@@ -7,11 +7,11 @@ import type { RepoMetadata } from '../nip34-parsers.js';
 
 /**
  * Where "how do I fund a TOON identity and push?" is documented — the
- * `@toon-protocol/git` package README (install, daemon vs standalone payment
+ * `@toon-protocol/rig` package README (install, daemon vs standalone payment
  * modes, fee model).
  */
 const RIG_CLI_DOCS_URL =
-  'https://github.com/toon-protocol/toon-client/tree/main/packages/git#readme';
+  'https://github.com/toon-protocol/toon-client/tree/main/packages/rig#readme';
 
 /**
  * Best-effort synchronous copy via the legacy `document.execCommand('copy')`
@@ -63,7 +63,7 @@ function shellQuote(value: string): string {
 
 /**
  * The paste-and-run setup commands for contributing to a specific repo with
- * the `rig` CLI: install `@toon-protocol/git`, persist the repo's `a`-tag
+ * the `rig` CLI: install `@toon-protocol/rig`, persist the repo's `a`-tag
  * addressing (`30617:<owner>:<repoId>`) as the `toon.*` git config keys the
  * CLI reads, and push. Key spellings match what `rig push` itself persists
  * (git config keys are case-insensitive; `toon.repoid` is the CLI's
@@ -75,7 +75,7 @@ export function buildPushSnippet(
   relayUrl: string,
 ): string {
   return [
-    'npm i -g @toon-protocol/git',
+    'npm i -g @toon-protocol/rig',
     `git config toon.repoid ${shellQuote(repoId)}`,
     `git config toon.owner ${shellQuote(ownerPubkey)}`,
     `git config toon.relay ${shellQuote(relayUrl)}`,

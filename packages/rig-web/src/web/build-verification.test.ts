@@ -11,7 +11,7 @@ const distDir = resolve(__dirname, '..', '..', 'dist');
 
 /**
  * These tests verify the Vite production build output for Arweave deployment.
- * They require `pnpm build` to have been run first in packages/rig.
+ * They require `pnpm build` to have been run first in packages/rig-web.
  *
  * If dist/ does not exist, the build-dependent tests are skipped.
  */

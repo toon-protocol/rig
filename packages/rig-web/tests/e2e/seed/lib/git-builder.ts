@@ -2,7 +2,7 @@
  * Git object construction and Arweave upload utilities for E2E seed scripts.
  *
  * The pure builders (createGitBlob/Tree/Commit, GitObject, envelope hashing,
- * MAX_OBJECT_SIZE) were promoted to `@toon-protocol/git` (#223) and are
+ * MAX_OBJECT_SIZE) were promoted to `@toon-protocol/rig` (#223) and are
  * re-exported here so seed scripts keep working unchanged. The upload/network
  * helpers below (uploadGitObject, waitForArweaveIndex, shaMap tracking) stay
  * in the seed lib until they're superseded by the Publisher (#226).
@@ -18,11 +18,11 @@ import {
   createGitCommit,
   createGitTree,
   type GitObject,
-} from '@toon-protocol/git';
+} from '@toon-protocol/rig';
 import { PEER1_DESTINATION } from './constants.js';
 
 // ---------------------------------------------------------------------------
-// Promoted pure builders (re-exported from @toon-protocol/git)
+// Promoted pure builders (re-exported from @toon-protocol/rig)
 // ---------------------------------------------------------------------------
 
 export { createGitBlob, createGitCommit, createGitTree, type GitObject };

@@ -1,5 +1,5 @@
 /**
- * Pubkey identity utilities for @toon-protocol/rig.
+ * Pubkey identity utilities for @toon-protocol/rig-web.
  *
  * Stub: Will be implemented as part of the rig epic.
  * Maps Nostr pubkeys to git author identities and checks maintainer authorization.

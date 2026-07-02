@@ -11,7 +11,7 @@
 // Gateway list + fetch timeout are owned by @toon-protocol/arweave (the single
 // source of truth shared with views + client-mcp); the Git-SHA → txId GraphQL
 // resolver (resolveGitSha / seedShaCache / clearShaCache) moved there too so
-// the Node write path (@toon-protocol/git) shares ONE implementation (#225).
+// the Node write path (@toon-protocol/rig) shares ONE implementation (#225).
 // Everything is re-exported here so existing rig importers keep their
 // `../arweave-client.js` path.
 export {

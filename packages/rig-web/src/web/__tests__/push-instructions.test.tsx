@@ -60,7 +60,7 @@ describe('[P1] PushInstructions', () => {
   it('buildPushSnippet produces the paste-and-run CLI setup', () => {
     expect(buildPushSnippet('my-repo', OWNER, 'ws://localhost:7100')).toBe(
       [
-        'npm i -g @toon-protocol/git',
+        'npm i -g @toon-protocol/rig',
         'git config toon.repoid my-repo',
         `git config toon.owner ${OWNER}`,
         'git config toon.relay ws://localhost:7100',
@@ -97,7 +97,7 @@ describe('[P1] PushInstructions', () => {
 
     const snippet = document.querySelector('pre');
     expect(snippet).not.toBeNull();
-    expect(snippet!.textContent).toContain('npm i -g @toon-protocol/git');
+    expect(snippet!.textContent).toContain('npm i -g @toon-protocol/rig');
     expect(snippet!.textContent).toContain('git config toon.repoid rig-demo');
     expect(snippet!.textContent).toContain(`git config toon.owner ${OWNER}`);
     expect(snippet!.textContent).toContain(
@@ -115,7 +115,7 @@ describe('[P1] PushInstructions', () => {
     const docsLink = screen.getByRole('link', { name: /rig cli docs/i });
     expect(docsLink).toHaveAttribute(
       'href',
-      'https://github.com/toon-protocol/toon-client/tree/main/packages/git#readme',
+      'https://github.com/toon-protocol/toon-client/tree/main/packages/rig#readme',
     );
   });
 
