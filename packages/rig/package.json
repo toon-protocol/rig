@@ -6,7 +6,7 @@
   "author": "Jonathan Green",
   "repository": {
     "type": "git",
-    "url": "https://github.com/toon-protocol/toon-client.git",
+    "url": "https://github.com/toon-protocol/rig.git",
     "directory": "packages/rig"
   },
   "publishConfig": {
@@ -48,17 +48,17 @@
   },
   "dependencies": {
     "@toon-format/toon": "^1.0.0",
-    "@toon-protocol/client": "workspace:^",
+    "@toon-protocol/client": "^0.21.1",
     "@toon-protocol/core": "^3.1.2",
     "nostr-tools": "^2.20.0"
   },
   "optionalDependencies": {
     "@ar.io/sdk": "^4.0.3",
     "@ar.io/solana-contracts": "^1.0.1",
-    "@solana/kit": "^6.8.0"
+    "@solana/kit": "^6.10.0"
   },
   "devDependencies": {
-    "@toon-protocol/arweave": "workspace:*",
+    "@toon-protocol/arweave": "^0.2.0",
     "@types/node": "^20.0.0",
     "@types/ws": "^8.18.1",
     "tsup": "^8.0.0",
