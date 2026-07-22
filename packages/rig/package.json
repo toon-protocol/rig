@@ -44,7 +44,8 @@
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@toon-format/toon": "^1.0.0",

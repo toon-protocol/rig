@@ -12,7 +12,12 @@
     "format:check": "prettier --check \"packages/*/src/**/*.{ts,tsx}\"",
     "changeset": "changeset",
     "version": "changeset version",
-    "release": "changeset publish"
+    "release": "changeset publish",
+    "typecheck": "pnpm -r typecheck",
+    "sandcastle": "npx tsx .sandcastle/main.ts",
+    "sandcastle:plan": "npx tsx .sandcastle/plan-dry-run.ts",
+    "sandcastle:implement": "npx tsx .sandcastle/agent-implement-issue.ts",
+    "sandcastle:review": "npx tsx .sandcastle/agent-review-pr.ts"
   },
   "keywords": [
     "git",
@@ -36,6 +41,7 @@
     ]
   },
   "devDependencies": {
+    "@ai-hero/sandcastle": "0.12.0",
     "@changesets/cli": "^2.27.9",
     "@eslint/js": "^9.0.0",
     "eslint": "^9.0.0",
@@ -43,6 +49,7 @@
     "prettier": "^3.2.0",
     "tsx": "^4.19.2",
     "typescript": "^5.3.0",
-    "typescript-eslint": "^8.0.0"
+    "typescript-eslint": "^8.0.0",
+    "zod": "^3.25.0"
   }
 }
