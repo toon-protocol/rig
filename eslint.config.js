@@ -61,6 +61,10 @@ export default tseslint.config(
       '**/*.js',
       '**/*.cjs',
       '**/*.mjs',
+      // The sandcastle runner scripts run via tsx and are not part of any
+      // workspace tsconfig, so typed-lint (projectService) can't resolve them.
+      // Exclude them here — same pattern as tooling dirs like .claude.
+      '.sandcastle/**',
     ],
   }
 );
