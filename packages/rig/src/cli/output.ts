@@ -277,9 +277,18 @@ export function calmBootstrapNoise(): StderrCalmer {
         reframed = true;
       }
     }
-    return typeof encodingOrCb === 'function'
-      ? original.call(process.stderr, text, encodingOrCb)
-      : original.call(process.stderr, text, encodingOrCb, cb);
+    if (typeof encodingOrCb === 'function') {
+      // `original` is `typeof process.stderr.write`, an overloaded function
+      // type; `.call()` on it only resolves against the LAST overload
+      // (chunk, encoding, cb), so the 2-arg (chunk, cb) call needs an
+      // explicit narrow to the matching overload signature.
+      const writeWithCallback = original as (
+        chunk: Uint8Array | string,
+        cb?: (err?: Error | null) => void
+      ) => boolean;
+      return writeWithCallback.call(process.stderr, text, encodingOrCb);
+    }
+    return original.call(process.stderr, text, encodingOrCb, cb);
   }) as typeof process.stderr.write;
   process.stderr.write = patched;
   return {
