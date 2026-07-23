@@ -1,0 +1,21 @@
+name: Setup workspace
+description: >-
+  Install pnpm + Node and install workspace dependencies. The repo must already
+  be checked out (actions/checkout) before this action runs -- a local composite
+  action can't be resolved until its files exist in the workspace, so checkout
+  stays in the calling job rather than inside here.
+
+runs:
+  using: composite
+  steps:
+    - uses: pnpm/action-setup@v4
+      with:
+        version: 8.15.9
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: pnpm
+    # rig's lockfile is not kept perfectly frozen in CI (repo history uses
+    # --no-frozen-lockfile); --frozen-lockfile fails the install outright.
+    - run: pnpm install --no-frozen-lockfile
+      shell: bash
