@@ -1,0 +1,30 @@
+{
+  "repo": "toon-protocol/rig",
+  "capturedAt": "2026-07-23",
+  "capturedFromCommit": "45d0c64331a63e8ca6e5d3f0b53ac4c22992aec2",
+  "capturedFromRun": "https://github.com/toon-protocol/rig/actions/runs/29951187589",
+  "gateShape": ["eslint", "typecheck", "vitest", "build"],
+  "speed": {
+    "gateWallClockSeconds": 103,
+    "method": "CI job wall-clock (startedAt->completedAt) for the `build` job in .github/workflows/ci.yml, run 29951187589 (push to main, same commit as capturedFromCommit). startedAt 2026-07-22T19:29:41Z, completedAt 2026-07-22T19:31:24Z."
+  },
+  "performance": {
+    "runnerMinutes": 2,
+    "dockerImageSizeBytes": null,
+    "cacheHitRatePercent": null,
+    "method": "runnerMinutes = ceil(103s / 60) billable minutes on a single ubuntu-latest 1x job (GitHub Actions billing granularity). dockerImageSizeBytes/cacheHitRatePercent are N/A: the actual PR/push gate (ci.yml `build` job) does not build a Docker image or use a remote build cache -- that only happens in the separate agent-image.yml smoke-test workflow, which is not part of this repo's PR gate."
+  },
+  "correctness": {
+    "eslintErrors": 4,
+    "eslintWarnings": 356,
+    "typecheckErrors": 1,
+    "method": "`eslint .` and `pnpm run typecheck` (pnpm -r typecheck -> tsc --noEmit per package) run locally against main@45d0c64 (HEAD of capturedFromCommit) with the exact dependency versions pinned in pnpm-lock.yaml."
+  },
+  "reproduce": [
+    "git checkout 45d0c64331a63e8ca6e5d3f0b53ac4c22992aec2",
+    "pnpm install --frozen-lockfile",
+    "eslint .                 # -> 4 errors, 356 warnings",
+    "pnpm run typecheck       # -> 1 error",
+    "gh run view 29951187589 --json jobs   # -> build job wall-clock / runner-minutes"
+  ]
+}

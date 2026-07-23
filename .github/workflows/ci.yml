@@ -40,6 +40,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Record gate start time
+        id: gate_start
+        run: echo "start=$(date +%s)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
 
       - uses: pnpm/action-setup@v4
@@ -53,9 +57,27 @@ jobs:
 
       - run: pnpm install --no-frozen-lockfile
 
-      - run: pnpm lint
-        continue-on-error: true
+      # Unit tests for the gate scripts themselves (not covered by
+      # `pnpm -r test`, since .sandcastle isn't a workspace package).
+      - run: npx tsx --test .sandcastle/gate/*.test.ts
+
+      # Runs eslint + typecheck and fails only on violations beyond the
+      # frozen .sandcastle/gate-baseline.json allowlist (ADR-0001). Replaces
+      # the old `pnpm lint` step, which had `continue-on-error: true` and
+      # silently masked lint failures as green CI (a false-PASS hole) while
+      # never gating typecheck at all.
+      - run: npx tsx .sandcastle/gate/correctness.ts
 
       - run: pnpm -r build
 
       - run: pnpm -r test --if-present
+
+      # No-regression guard: fails if gate wall-clock / runner-minutes
+      # regress beyond a tolerance of the frozen baseline. Reads only the
+      # frozen baseline numbers (never a live threshold) so the same commit
+      # always earns the same verdict.
+      - name: Speed/performance no-regression guard
+        run: |
+          end=$(date +%s)
+          export GATE_WALL_CLOCK_SECONDS=$((end - ${{ steps.gate_start.outputs.start }}))
+          npx tsx .sandcastle/gate/regression.ts
