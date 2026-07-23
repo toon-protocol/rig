@@ -142,36 +142,37 @@ export function devnetMnemonicFromEnv(env) {
 // CLI orchestration
 // ---------------------------------------------------------------------------
 
-function runRig(rigBin, args, opts) {
+function runRig(rigBin, args, opts = {}) {
   return execFileSync(rigBin, args, { encoding: 'utf8', ...opts });
 }
 
-function checkHelp(rigBin, log, results, subcommand) {
-  const name = `rig ${subcommand} --help`;
+/** Run `fn`, recording an ok/FAIL result under `name` and logging either way. */
+function recordCheck(log, results, name, fn) {
   try {
-    const out = runRig(rigBin, [subcommand, '--help'], {});
-    assertUsageOutput(out, subcommand);
+    fn();
     log(`ok - ${name}`);
     results.push({ name, ok: true });
   } catch (err) {
     log(`FAIL - ${name}: ${err.message}`);
     results.push({ name, ok: false, error: err.message });
   }
+}
+
+function checkHelp(rigBin, log, results, subcommand) {
+  recordCheck(log, results, `rig ${subcommand} --help`, () => {
+    const out = runRig(rigBin, [subcommand, '--help']);
+    assertUsageOutput(out, subcommand);
+  });
 }
 
 function checkNameStatus(rigBin, log, results, arnsName, identityEnv) {
   const name = `rig name status ${arnsName} --json (mainnet, #376 pin)`;
-  try {
+  recordCheck(log, results, name, () => {
     const out = runRig(rigBin, ['name', 'status', arnsName, '--json'], {
       env: identityEnv,
     });
     assertNameStatusJson(parseJsonDocument(out), arnsName);
-    log(`ok - ${name}`);
-    results.push({ name, ok: true });
-  } catch (err) {
-    log(`FAIL - ${name}: ${err.message}`);
-    results.push({ name, ok: false, error: err.message });
-  }
+  });
 }
 
 /** A throwaway git repo with one file, ready for `rig init`. */
@@ -185,7 +186,10 @@ function makeThrowawayRepo(identityEnv) {
     GIT_COMMITTER_EMAIL: 'smoke@toonprotocol.dev',
   };
   execFileSync('git', ['init', '-q'], { cwd: dir, env: gitEnv });
-  writeFileSync(join(dir, 'index.html'), '<!doctype html><title>rig smoke</title>\n');
+  writeFileSync(
+    join(dir, 'index.html'),
+    '<!doctype html><title>rig smoke</title>\n'
+  );
   execFileSync('git', ['add', '-A'], { cwd: dir, env: gitEnv });
   execFileSync('git', ['commit', '-q', '-m', 'rig smoke-published'], {
     cwd: dir,
@@ -196,26 +200,19 @@ function makeThrowawayRepo(identityEnv) {
 
 function checkSitePublishEstimate(rigBin, log, results, relayUrl, identityEnv) {
   const name = 'rig site publish --json --force-reupload (no --yes, no spend)';
-  try {
+  recordCheck(log, results, name, () => {
     const repoId = `rig-smoke-${randomUUID()}`;
     const dir = makeThrowawayRepo(identityEnv);
-    runRig(rigBin, ['init', '--repo-id', repoId], { cwd: dir, env: identityEnv });
-    runRig(rigBin, ['remote', 'add', 'origin', relayUrl], {
-      cwd: dir,
-      env: identityEnv,
-    });
+    const cwdEnv = { cwd: dir, env: identityEnv };
+    runRig(rigBin, ['init', '--repo-id', repoId], cwdEnv);
+    runRig(rigBin, ['remote', 'add', 'origin', relayUrl], cwdEnv);
     const out = runRig(
       rigBin,
       ['site', 'publish', '--json', '--force-reupload'],
-      { cwd: dir, env: identityEnv }
+      cwdEnv
     );
     assertSitePublishEstimateJson(parseJsonDocument(out), repoId);
-    log(`ok - ${name}`);
-    results.push({ name, ok: true });
-  } catch (err) {
-    log(`FAIL - ${name}: ${err.message}`);
-    results.push({ name, ok: false, error: err.message });
-  }
+  });
 }
 
 /**
@@ -231,14 +228,13 @@ function runDevnetPaidRoundTrip(env, log) {
       'skip - paid devnet round-trip: RIG_SMOKE_DEVNET_MNEMONIC not set ' +
         '(human-provisioned secret; see issue #1)'
     );
-    return { ran: false };
+    return;
   }
   log(
     'skip - paid devnet round-trip: RIG_SMOKE_DEVNET_MNEMONIC is set, but the ' +
       'round-trip itself is not yet wired (stub — see issue #1 triage: ' +
       'provisioning + wiring real spend is an explicit human follow-up)'
   );
-  return { ran: false };
 }
 
 export function main(env = process.env, log = console.log) {
