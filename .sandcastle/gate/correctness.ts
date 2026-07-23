@@ -3,12 +3,7 @@
 // Pre-existing debt passes; only NEW violations fail the gate.
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(__dirname, '..', '..');
-const BASELINE_PATH = path.join(REPO_ROOT, '.sandcastle', 'gate-baseline.json');
+import { BASELINE_PATH, REPO_ROOT } from './paths.ts';
 
 export interface CorrectnessCounts {
   eslintErrors: number;

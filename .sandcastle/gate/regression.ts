@@ -4,12 +4,7 @@
 // frozen baseline numbers (never a live/recomputed threshold) so the same
 // commit always earns the same verdict.
 import { readFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(__dirname, '..', '..');
-const BASELINE_PATH = path.join(REPO_ROOT, '.sandcastle', 'gate-baseline.json');
+import { BASELINE_PATH } from './paths.ts';
 
 // How far above the frozen baseline a run may drift before it's a regression.
 export const TOLERANCE = 0.2;

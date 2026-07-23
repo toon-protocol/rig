@@ -57,6 +57,10 @@ jobs:
 
       - run: pnpm install --no-frozen-lockfile
 
+      # Unit tests for the gate scripts themselves (not covered by
+      # `pnpm -r test`, since .sandcastle isn't a workspace package).
+      - run: npx tsx --test .sandcastle/gate/*.test.ts
+
       # Runs eslint + typecheck and fails only on violations beyond the
       # frozen .sandcastle/gate-baseline.json allowlist (ADR-0001). Replaces
       # the old `pnpm lint` step, which had `continue-on-error: true` and
