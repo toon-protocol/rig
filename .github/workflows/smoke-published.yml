@@ -1,0 +1,49 @@
+name: Smoke-test published rig
+
+# e2e smoke test for the PUBLISHED @toon-protocol/rig against live networks
+# (issue #1, the toon-client#376 lesson): #376's `SolanaSigner` guard crash
+# shipped green through unit tests and was only caught by smoke-testing the
+# published npm artifact -- the failure lived in the packaged module graph,
+# not in any unit. This installs @toon-protocol/rig from npm in a clean
+# runner and drives the REAL `rig` binary against real networks (mainnet
+# ar.io for `name status`, a live devnet relay for the `site publish`
+# estimate). See scripts/smoke-published/smoke-published.mjs for the checks.
+#
+# Runs manually (workflow_dispatch) or automatically after a Release run
+# completes, so a fresh publish gets smoke-tested without a human trigger.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '@toon-protocol/rig version/tag to install (default: latest)'
+        required: false
+        default: 'latest'
+  workflow_run:
+    workflows: ['Release']
+    types: [completed]
+
+jobs:
+  smoke-published:
+    name: Smoke-test published rig
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install @toon-protocol/rig from npm
+        run: npm install -g "@toon-protocol/rig@${{ inputs.version || 'latest' }}"
+
+      - name: Run the published-package smoke checks
+        env:
+          RIG_BIN: rig
+          # Opt-in, devnet-gated paid round-trip (see the script): unset here,
+          # so the job stays free-only until a maintainer wires the secret.
+          RIG_SMOKE_DEVNET_MNEMONIC: ${{ secrets.RIG_SMOKE_DEVNET_MNEMONIC }}
+        run: node scripts/smoke-published/smoke-published.mjs
