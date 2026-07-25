@@ -115,9 +115,9 @@ describe('generateRigPointerHtml', () => {
   it('loads nothing external except the one immutable deployment', () => {
     const html = generateRigPointerHtml(options());
     const base = `https://arweave.net/${DEFAULT_RIG_WEB_BUNDLE.manifestTx}`;
-    const srcs = [...html.matchAll(/(?:src|href)="(https?:[^"]+)"/g)].map(
-      (m) => m[1]
-    );
+    const srcs = [...html.matchAll(/(?:src|href)="(https?:[^"]+)"/g)]
+      .map((m) => m[1])
+      .filter((src): src is string => src !== undefined);
     // css + js from the manifest; the only other URL is the fallback link.
     expect(srcs).toEqual(
       expect.arrayContaining([

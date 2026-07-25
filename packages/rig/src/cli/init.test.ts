@@ -321,9 +321,9 @@ describe('rig init identity generation (#294)', () => {
       err,
       deps: {
         io: {
-          out: (line) => out.push(line),
-          err: (line) => err.push(line),
-          emitJson: (payload) => out.push(JSON.stringify(payload, null, 2)),
+          out: (line: string) => out.push(line),
+          err: (line: string) => err.push(line),
+          emitJson: (payload: unknown) => out.push(JSON.stringify(payload, null, 2)),
           isInteractive: tty.isInteractive,
           confirm: async () => tty.confirm(),
         },
@@ -535,9 +535,9 @@ describe('rig init git-init (#300)', () => {
       err,
       deps: {
         io: {
-          out: (line) => out.push(line),
-          err: (line) => err.push(line),
-          emitJson: (payload) => out.push(JSON.stringify(payload, null, 2)),
+          out: (line: string) => out.push(line),
+          err: (line: string) => err.push(line),
+          emitJson: (payload: unknown) => out.push(JSON.stringify(payload, null, 2)),
           isInteractive: tty.isInteractive,
           confirm: async () => tty.confirm(),
         },

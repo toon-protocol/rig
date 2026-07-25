@@ -48,9 +48,9 @@ describe('buildRepoAnnouncement (kind:30617)', () => {
   it('returns an UnsignedEvent (no id, no sig, no pubkey)', () => {
     const event = buildRepoAnnouncement('test', 'Test', 'Desc');
 
-    expect((event as Record<string, unknown>)['id']).toBeUndefined();
-    expect((event as Record<string, unknown>)['sig']).toBeUndefined();
-    expect((event as Record<string, unknown>)['pubkey']).toBeUndefined();
+    expect((event as unknown as Record<string, unknown>)['id']).toBeUndefined();
+    expect((event as unknown as Record<string, unknown>)['sig']).toBeUndefined();
+    expect((event as unknown as Record<string, unknown>)['pubkey']).toBeUndefined();
   });
 
   it('includes a created_at timestamp', () => {

@@ -96,17 +96,17 @@ describe('rig chain', () => {
   it('set sol / mina normalize to canonical families', async () => {
     const h1 = makeHarness(env());
     expect(await runChain(['set', 'sol'], h1.deps)).toBe(0);
-    expect(readConfig().chain).toBe('solana');
+    expect(readConfig()['chain']).toBe('solana');
 
     const h2 = makeHarness(env());
     expect(await runChain(['set', 'mina'], h2.deps)).toBe(0);
-    expect(readConfig().chain).toBe('mina');
+    expect(readConfig()['chain']).toBe('mina');
   });
 
   it('set accepts a full chain id verbatim', async () => {
     const h = makeHarness(env());
     expect(await runChain(['set', 'evm:base:84532'], h.deps)).toBe(0);
-    expect(readConfig().chain).toBe('evm:base:84532');
+    expect(readConfig()['chain']).toBe('evm:base:84532');
     expect(h.out.join('\n')).toMatch(/EVM USDC/);
   });
 
@@ -125,7 +125,7 @@ describe('rig chain', () => {
   it('set warns when TOON_CLIENT_CHAIN env would override the write', async () => {
     const h = makeHarness(env({ TOON_CLIENT_CHAIN: 'evm' }));
     expect(await runChain(['set', 'solana'], h.deps)).toBe(0);
-    expect(readConfig().chain).toBe('solana'); // still written
+    expect(readConfig()['chain']).toBe('solana'); // still written
     expect(h.err.join('\n')).toMatch(/TOON_CLIENT_CHAIN.*overrides/);
   });
 
@@ -163,7 +163,7 @@ describe('rig chain', () => {
     writeConfig({ chain: 'solana' });
     const h = makeHarness(env({ TOON_CLIENT_CHAIN: 'evm' }));
     expect(await runChain(['unset'], h.deps)).toBe(0);
-    expect(readConfig().chain).toBeUndefined();
+    expect(readConfig()['chain']).toBeUndefined();
     expect(h.out.join('\n')).toMatch(/Still pinned to evm.*TOON_CLIENT_CHAIN/);
   });
 

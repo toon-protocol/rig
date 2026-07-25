@@ -1029,7 +1029,7 @@ describe('StandalonePublisher', () => {
           string,
           { chain: string; tokenNetworkAddress: string; tokenAddress?: string }
         >();
-        const extended = Object.assign(client as object, {
+        const extended = Object.assign(client, {
           onChainChannelClient: { channelContext: onChainContext },
           async depositToChannel(channelId: string, amount: string | bigint) {
             money.deposits.push({ channelId, amount });

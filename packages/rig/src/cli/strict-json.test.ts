@@ -608,6 +608,14 @@ describe('strict --json stdout: every rig-owned command emits exactly one JSON d
           setBaseNameRecord: async () => ({ id: 'm' }),
           setUndernameRecord: async () => ({ id: 'm' }),
         }),
+        spawnAnt: async () => {
+          throw new Error('spawnAnt is write-mode only — not exercised by name status');
+        },
+        buildSetRecordTransaction: async () => {
+          throw new Error(
+            'buildSetRecordTransaction is write-mode only — not exercised by name status'
+          );
+        },
       }),
     });
     expect(result.code).toBe(0);

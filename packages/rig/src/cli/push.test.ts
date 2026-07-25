@@ -26,6 +26,7 @@ import type {
   StandaloneContext,
   StandaloneLoadOptions,
 } from './standalone-context.js';
+import type { GitEstimateResponse, GitPushResponse } from '../routes.js';
 
 const OWNER = 'ab'.repeat(32);
 const TX_ID = 'x'.repeat(43);
@@ -926,7 +927,7 @@ describe('daemon delegation (#279)', () => {
           refname: 'refs/heads/main',
           localSha: 'a'.repeat(40),
           remoteSha: null,
-          kind: 'create',
+          kind: 'new',
         },
       ],
       newRefs: { 'refs/heads/main': 'a'.repeat(40) },
