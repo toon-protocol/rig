@@ -31,11 +31,11 @@ vi.mock('@/hooks/use-repo-languages', () => ({
 
 import { RepoListPage } from '@/app/pages/repo-list-page';
 import { useRepoList } from '@/hooks/use-repo-list';
-import type { RepoMetadata } from '../../nip34-parsers.js';
+import type { RepoListEntry } from '@/hooks/use-repo-list';
 
 const mockUseRepoList = vi.mocked(useRepoList);
 
-function createRepoMetadata(overrides: Partial<RepoMetadata> = {}): RepoMetadata {
+function createRepoListEntry(overrides: Partial<RepoListEntry> = {}): RepoListEntry {
   return {
     repoId: 'test-repo',
     name: 'test-repo',
@@ -46,6 +46,7 @@ function createRepoMetadata(overrides: Partial<RepoMetadata> = {}): RepoMetadata
     cloneUrls: [],
     webUrls: [],
     maintainers: [],
+    announcedAt: 1700000000,
     ...overrides,
   };
 }
@@ -80,8 +81,8 @@ describe('[P1] RepoListPage', () => {
   it('renders repo cards with name and description', () => {
     mockUseRepoList.mockReturnValue({
       repos: [
-        createRepoMetadata({ repoId: 'repo-a', name: 'Alpha Repo', description: 'First repo' }),
-        createRepoMetadata({ repoId: 'repo-b', name: 'Beta Repo', description: 'Second repo', ownerPubkey: 'b'.repeat(64) }),
+        createRepoListEntry({ repoId: 'repo-a', name: 'Alpha Repo', description: 'First repo' }),
+        createRepoListEntry({ repoId: 'repo-b', name: 'Beta Repo', description: 'Second repo', ownerPubkey: 'b'.repeat(64) }),
       ],
       loading: false,
       error: null,
