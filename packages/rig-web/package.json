@@ -45,7 +45,6 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.0.0",
     "arweave": "^1.15.5",
-    "eslint-plugin-react-hooks": "^5.2.0",
     "jsdom": "^24.0.0",
     "marked": "^17.0.5",
     "tailwindcss": "^4.0.0",

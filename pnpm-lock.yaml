@@ -26,6 +26,9 @@ importers:
       eslint-config-prettier:
         specifier: ^9.0.0
         version: 9.1.2(eslint@9.39.5)
+      eslint-plugin-react-hooks:
+        specifier: ^5.2.0
+        version: 5.2.0(eslint@9.39.5)
       prettier:
         specifier: ^3.2.0
         version: 3.9.6
@@ -176,9 +179,6 @@ importers:
       arweave:
         specifier: ^1.15.5
         version: 1.15.7
-      eslint-plugin-react-hooks:
-        specifier: ^5.2.0
-        version: 5.2.0(eslint@9.39.5)
       jsdom:
         specifier: ^24.0.0
         version: 24.1.3

@@ -34,11 +34,7 @@ export default tseslint.config(
   },
   {
     files: ['packages/rig-web/**/*.{ts,tsx}'],
-    plugins: { 'react-hooks': reactHooks },
-    rules: {
-      'react-hooks/rules-of-hooks': 'error',
-      'react-hooks/exhaustive-deps': 'warn',
-    },
+    ...reactHooks.configs['recommended-latest'],
   },
   // Relaxed rules for test files, examples
   {
