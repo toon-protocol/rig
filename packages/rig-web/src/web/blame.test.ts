@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 import { computeBlame, resolveFileSha, isBlameError } from './blame.js';
+import type { BlameResult, BlameError } from './blame.js';
 
 // Mock arweave-client and git-objects
 vi.mock('./arweave-client.js', () => ({
@@ -37,6 +38,21 @@ function textToBytes(text: string): Uint8Array {
 
 function makeSha(prefix: string): string {
   return prefix.repeat(Math.ceil(40 / prefix.length)).slice(0, 40);
+}
+
+/**
+ * Narrows a computeBlame result to BlameResult, throwing (a real runtime
+ * check, not a cast) if it's an error or null. Keeps the 32 success-shape
+ * assertions below from silently passing on a `{ reason: ... }` result.
+ */
+function expectBlame(result: BlameResult | BlameError | null): BlameResult {
+  if (result === null) {
+    throw new Error('expected blame success, got null');
+  }
+  if (isBlameError(result)) {
+    throw new Error(`expected blame success, got reason: ${result.reason}`);
+  }
+  return result;
 }
 
 // ============================================================================
@@ -166,22 +182,22 @@ describe('Blame - computeBlame', () => {
 
     const result = await computeBlame('file.ts', commitSha, 'test-repo');
 
-    expect(result).not.toBeNull();
-    expect(result!.lines).toHaveLength(3);
-    expect(result!.fileContent).toBe(fileContent);
-    expect(result!.beyondLimit).toBe(false);
+    const blame = expectBlame(result);
+    expect(blame.lines).toHaveLength(3);
+    expect(blame.fileContent).toBe(fileContent);
+    expect(blame.beyondLimit).toBe(false);
 
     // All lines attributed to the single commit
-    for (const line of result!.lines) {
+    for (const line of blame.lines) {
       expect(line.commitSha).toBe(commitSha);
       expect(line.author).toBe('Alice <alice@example.com> 1700000000 +0000');
       expect(line.timestamp).toBe(1700000000);
     }
 
     // Line numbers are 1-based
-    expect(result!.lines[0]!.lineNumber).toBe(1);
-    expect(result!.lines[1]!.lineNumber).toBe(2);
-    expect(result!.lines[2]!.lineNumber).toBe(3);
+    expect(blame.lines[0]!.lineNumber).toBe(1);
+    expect(blame.lines[1]!.lineNumber).toBe(2);
+    expect(blame.lines[2]!.lineNumber).toBe(3);
   });
 
   // ---------------------------------------------------------------------------
@@ -285,18 +301,18 @@ describe('Blame - computeBlame', () => {
 
     const result = await computeBlame('file.ts', commitC, 'test-repo');
 
-    expect(result).not.toBeNull();
-    expect(result!.lines).toHaveLength(4);
-    expect(result!.beyondLimit).toBe(false);
+    const blame = expectBlame(result);
+    expect(blame.lines).toHaveLength(4);
+    expect(blame.beyondLimit).toBe(false);
 
     // line 1 "line B1" — exists in commit B's content but not in commit A's, so attributed to B
     // line 2 "line B2" — same as above, attributed to B
     // line 3 "line C3" — not in commit B's content, attributed to C
     // line 4 "line C4" — not in commit B's content, attributed to C
-    expect(result!.lines[0]!.commitSha).toBe(commitB);
-    expect(result!.lines[1]!.commitSha).toBe(commitB);
-    expect(result!.lines[2]!.commitSha).toBe(commitC);
-    expect(result!.lines[3]!.commitSha).toBe(commitC);
+    expect(blame.lines[0]!.commitSha).toBe(commitB);
+    expect(blame.lines[1]!.commitSha).toBe(commitB);
+    expect(blame.lines[2]!.commitSha).toBe(commitC);
+    expect(blame.lines[3]!.commitSha).toBe(commitC);
   });
 
   // ---------------------------------------------------------------------------
@@ -376,15 +392,15 @@ describe('Blame - computeBlame', () => {
     // maxDepth = 1 means we only walk 1 commit before hitting the limit
     const result = await computeBlame('file.ts', commitB, 'test-repo', 1);
 
-    expect(result).not.toBeNull();
-    expect(result!.lines).toHaveLength(2);
-    expect(result!.beyondLimit).toBe(true);
+    const blame = expectBlame(result);
+    expect(blame.lines).toHaveLength(2);
+    expect(blame.beyondLimit).toBe(true);
 
     // "new line" not in parent content -> attributed to commitB
-    expect(result!.lines[0]!.commitSha).toBe(commitB);
+    expect(blame.lines[0]!.commitSha).toBe(commitB);
     // "old line" exists in parent but depth limit prevents further walk
     // -> attributed to oldest walked commit (commitB since depth=1 means we only process commitB)
-    expect(result!.lines[1]!.commitSha).toBe(commitB);
+    expect(blame.lines[1]!.commitSha).toBe(commitB);
   });
 
   // ---------------------------------------------------------------------------
@@ -508,11 +524,11 @@ describe('Blame - computeBlame', () => {
 
     const result = await computeBlame('file.ts', commitSha, 'test-repo');
 
-    expect(result).not.toBeNull();
-    expect(result!.lines).toHaveLength(2);
-    expect(result!.beyondLimit).toBe(false);
-    expect(result!.lines[0]!.commitSha).toBe(commitSha);
-    expect(result!.lines[1]!.commitSha).toBe(commitSha);
+    const blame = expectBlame(result);
+    expect(blame.lines).toHaveLength(2);
+    expect(blame.beyondLimit).toBe(false);
+    expect(blame.lines[0]!.commitSha).toBe(commitSha);
+    expect(blame.lines[1]!.commitSha).toBe(commitSha);
   });
 
   // ---------------------------------------------------------------------------
@@ -552,10 +568,10 @@ describe('Blame - computeBlame', () => {
 
     const result = await computeBlame('empty.ts', commitSha, 'test-repo');
 
-    expect(result).not.toBeNull();
-    expect(result!.lines).toHaveLength(0);
-    expect(result!.fileContent).toBe('');
-    expect(result!.beyondLimit).toBe(false);
+    const blame = expectBlame(result);
+    expect(blame.lines).toHaveLength(0);
+    expect(blame.fileContent).toBe('');
+    expect(blame.beyondLimit).toBe(false);
   });
 
   // ---------------------------------------------------------------------------
@@ -630,13 +646,13 @@ describe('Blame - computeBlame', () => {
 
     const result = await computeBlame('file.ts', commitB, 'test-repo');
 
-    expect(result).not.toBeNull();
-    expect(result!.lines).toHaveLength(2);
-    expect(result!.beyondLimit).toBe(false);
+    const blame = expectBlame(result);
+    expect(blame.lines).toHaveLength(2);
+    expect(blame.beyondLimit).toBe(false);
     // All lines attributed to commitB (the commit that added the file)
-    expect(result!.lines[0]!.commitSha).toBe(commitB);
-    expect(result!.lines[1]!.commitSha).toBe(commitB);
-    expect(result!.lines[0]!.author).toBe(
+    expect(blame.lines[0]!.commitSha).toBe(commitB);
+    expect(blame.lines[1]!.commitSha).toBe(commitB);
+    expect(blame.lines[0]!.author).toBe(
       'Bob <bob@example.com> 1700002000 +0000'
     );
   });
@@ -735,12 +751,12 @@ describe('Blame - computeBlame', () => {
 
     const result = await computeBlame('file.ts', commitC, 'test-repo');
 
-    expect(result).not.toBeNull();
-    expect(result!.lines).toHaveLength(2);
+    const blame = expectBlame(result);
+    expect(blame.lines).toHaveLength(2);
     // "line one" not in contentA ("old line") -> attributed to B (not C, since C didn't change the file)
     // "line two" not in contentA -> attributed to B
-    expect(result!.lines[0]!.commitSha).toBe(commitB);
-    expect(result!.lines[1]!.commitSha).toBe(commitB);
+    expect(blame.lines[0]!.commitSha).toBe(commitB);
+    expect(blame.lines[1]!.commitSha).toBe(commitB);
   });
 
   // ---------------------------------------------------------------------------
