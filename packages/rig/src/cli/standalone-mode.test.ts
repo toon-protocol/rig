@@ -42,7 +42,7 @@ const RELAY = 'wss://relay-ws.devnet.toonprotocol.dev';
 function apexAnnounce(
   overrides: Partial<Record<string, unknown>> = {}
 ): AnnouncedPeer {
-  const content = {
+  const content: Record<string, unknown> = {
     ilpAddress: 'g.proxy.relay',
     btpEndpoint: 'wss://proxy.devnet.toonprotocol.dev:443',
     assetCode: 'USDC',

@@ -231,10 +231,10 @@ describe('readObjects (cat-file --batch)', () => {
     const { objects, missing } = await reader.readObjects([binaryBlobSha]);
     expect(missing).toEqual([]);
     expect(objects).toHaveLength(1);
-    expect(objects[0].sha).toBe(binaryBlobSha);
-    expect(objects[0].type).toBe('blob');
-    expect(objects[0].body.length).toBe(binaryContent.length);
-    expect(objects[0].body.equals(binaryContent)).toBe(true);
+    expect(objects[0]?.sha).toBe(binaryBlobSha);
+    expect(objects[0]?.type).toBe('blob');
+    expect(objects[0]?.body.length).toBe(binaryContent.length);
+    expect(objects[0]?.body.equals(binaryContent)).toBe(true);
   });
 
   it('reads mixed types in input order and reports missing objects', async () => {
@@ -251,10 +251,10 @@ describe('readObjects (cat-file --batch)', () => {
       binaryBlobSha,
     ]);
     expect(objects.map((o) => o.type)).toEqual(['commit', 'tag', 'blob']);
-    expect(objects[0].body.toString('utf-8')).toContain(
+    expect(objects[0]?.body.toString('utf-8')).toContain(
       'first: readme + nested dirs'
     );
-    expect(objects[1].body.toString('utf-8')).toContain('tag v1.0.0');
+    expect(objects[1]?.body.toString('utf-8')).toContain('tag v1.0.0');
   });
 
   it('round-trips every object of the repo closure (incl. trees)', async () => {
