@@ -65,6 +65,10 @@ export default tseslint.config(
       // workspace tsconfig, so typed-lint (projectService) can't resolve them.
       // Exclude them here — same pattern as tooling dirs like .claude.
       '.sandcastle/**',
+      // Dead pre-extraction e2e harness excluded from packages/rig-web's
+      // tsconfig (rig#28) -- no longer part of any project, so typed-lint
+      // can't resolve it either.
+      'packages/rig-web/tests/e2e/seed/**',
     ],
   }
 );
