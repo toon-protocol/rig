@@ -15,7 +15,7 @@ import {
   buildCloneCommand,
   buildDisplayCommand,
 } from '@/components/clone-instructions';
-import type { RepoMetadata } from '../../nip34-parsers.js';
+import type { RepoMetadata } from '../nip34-parsers.js';
 
 const OWNER = 'a'.repeat(64);
 

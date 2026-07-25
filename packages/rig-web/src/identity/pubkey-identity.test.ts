@@ -9,42 +9,10 @@ import {
   toGitAuthorIdentity,
   enrichPubkeyProfile,
 } from './pubkey-identity.js';
-import type { HandlerContext } from '@toon-protocol/sdk';
 
 // ============================================================================
 // Factories
 // ============================================================================
-
-/**
- * Factory for creating a mock HandlerContext for authorization tests.
- */
-function _createMockHandlerContext(
-  overrides: Partial<HandlerContext> = {}
-): HandlerContext {
-  return {
-    toon: 'mock-toon-string',
-    kind: 1631,
-    pubkey: 'ab'.repeat(32),
-    amount: 1000n,
-    destination: 'g.test.rig',
-    decode: vi.fn().mockReturnValue({
-      id: 'a'.repeat(64),
-      pubkey: 'ab'.repeat(32),
-      kind: 1631,
-      content: '',
-      tags: [],
-      created_at: Math.floor(Date.now() / 1000),
-      sig: 'c'.repeat(128),
-    }),
-    accept: vi.fn().mockReturnValue({ accept: true, fulfillment: 'mock' }),
-    reject: vi.fn().mockReturnValue({
-      accept: false,
-      code: 'F06',
-      message: 'Unauthorized',
-    }),
-    ...overrides,
-  } as HandlerContext;
-}
 
 /**
  * Factory for creating a mock kind:30617 Repository Announcement event
