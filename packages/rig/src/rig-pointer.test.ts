@@ -29,7 +29,7 @@ function options(overrides: Partial<RigPointerOptions> = {}): RigPointerOptions 
 }
 
 describe('DEFAULT_RIG_WEB_URL', () => {
-  it('points at rig-web is the sole owner (#20) — not the retired toon-client copy', () => {
+  it('points at rig-web, now that rig is the sole owner (#20) — not the retired toon-client copy', () => {
     expect(DEFAULT_RIG_WEB_URL).toBe('https://toon-protocol.github.io/rig');
   });
 });
