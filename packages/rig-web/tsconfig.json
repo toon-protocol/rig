@@ -23,5 +23,9 @@
     }
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts", "tests/**/*.tsx", "*.config.ts"],
-  "exclude": ["node_modules", "dist"]
+  // tests/e2e/seed/** is a dead harness left over from the pre-extraction toon-client
+  // monorepo layout (cross-repo ../../../../../sdk|client imports that no longer exist,
+  // plus an uninstalled nostr-tools dep) -- see rig#28. Restore-or-delete is a separate,
+  // human-decided follow-up; this only removes it from the typecheck surface.
+  "exclude": ["node_modules", "dist", "tests/e2e/seed/**"]
 }
