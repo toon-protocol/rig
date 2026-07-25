@@ -36,7 +36,7 @@ Output is a plain static directory in `packages/rig-web/dist/` (~2.2 MB, ~22 fil
 
 The current standing deployment is GitHub Pages, serving the devnet-pointed build:
 
-- **URL:** <https://toon-protocol.github.io/toon-client/>
+- **URL:** <https://toon-protocol.github.io/rig/>
 
 Deploys are automatic: [`.github/workflows/deploy-rig-web.yml`](../../.github/workflows/deploy-rig-web.yml)
 builds and publishes `dist/` via GitHub's Pages Actions build (`actions/configure-pages` +
@@ -45,7 +45,7 @@ builds and publishes `dist/` via GitHub's Pages Actions build (`actions/configur
 manual deploy step required. To redeploy without a code change, run the workflow manually via
 `workflow_dispatch`.
 
-Point at any relay without rebuilding via the hash: `…/toon-client/#relay=wss://relay.example`
+Point at any relay without rebuilding via the hash: `…/rig/#relay=wss://relay.example`
 (boot code rewrites this to the router-safe `#/?relay=…`, which also works directly — see
 [Relay resolution order](#relay-resolution-order)).
 

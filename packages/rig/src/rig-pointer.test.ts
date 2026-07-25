@@ -28,6 +28,12 @@ function options(overrides: Partial<RigPointerOptions> = {}): RigPointerOptions 
   };
 }
 
+describe('DEFAULT_RIG_WEB_URL', () => {
+  it('points at rig-web is the sole owner (#20) — not the retired toon-client copy', () => {
+    expect(DEFAULT_RIG_WEB_URL).toBe('https://toon-protocol.github.io/rig');
+  });
+});
+
 describe('repo routes', () => {
   it('builds the hash route rig-web understands, relay inside the fragment', () => {
     expect(repoHashRoute(options())).toBe(
