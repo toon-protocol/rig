@@ -32,7 +32,7 @@
 // ---------------------------------------------------------------------------
 
 const GATEWAYS = ['https://arweave.net', 'https://permagate.io', 'https://ar-io.dev'];
-const FULL_RIG_URL = 'https://toon-protocol.github.io/toon-client';
+const FULL_RIG_URL = 'https://toon-protocol.github.io/rig';
 const ANNOUNCE_KIND = 30617;
 const REFS_KIND = 30618;
 const MAX_COMMITS = 30;

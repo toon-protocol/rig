@@ -64,8 +64,7 @@ export const DEFAULT_RIG_WEB_GATEWAY = 'https://arweave.net';
 export const RIG_WEB_GATEWAY_ENV = 'RIG_WEB_GATEWAY';
 
 /** Pages deployment for the no-JS / delayed fallback link (tracks main). */
-export const DEFAULT_RIG_WEB_URL =
-  'https://toon-protocol.github.io/toon-client';
+export const DEFAULT_RIG_WEB_URL = 'https://toon-protocol.github.io/rig';
 
 /** Env var overriding the fallback URL. */
 export const RIG_WEB_URL_ENV = 'RIG_WEB_URL';
