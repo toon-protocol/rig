@@ -223,18 +223,29 @@ export function decodeEventFallback(toonData: string): NostrEvent {
     }
   }
 
-  out.tags = tags;
+  const id = out['id'];
+  const pubkey = out['pubkey'];
+  const kind = out['kind'];
+  const createdAt = out['created_at'];
   if (
-    typeof out.id !== 'string' ||
-    typeof out.pubkey !== 'string' ||
-    typeof out.kind !== 'number' ||
-    typeof out.created_at !== 'number'
+    typeof id !== 'string' ||
+    typeof pubkey !== 'string' ||
+    typeof kind !== 'number' ||
+    typeof createdAt !== 'number'
   ) {
     throw new Error('Tolerant fallback: payload is not a NostrEvent shape');
   }
-  if (typeof out.content !== 'string') out.content = String(out.content ?? '');
-  if (typeof out.sig !== 'string') out.sig = String(out.sig ?? '');
-  return out as unknown as NostrEvent;
+  const content = out['content'];
+  const sig = out['sig'];
+  return {
+    id,
+    pubkey,
+    kind,
+    created_at: createdAt,
+    tags,
+    content: typeof content === 'string' ? content : String(content ?? ''),
+    sig: typeof sig === 'string' ? sig : String(sig ?? ''),
+  };
 }
 
 /** Structural check that a decoded value is a usable NostrEvent. */
@@ -242,11 +253,11 @@ function isNostrEventShape(value: unknown): value is NostrEvent {
   if (value === null || typeof value !== 'object') return false;
   const v = value as Record<string, unknown>;
   return (
-    typeof v.id === 'string' &&
-    typeof v.pubkey === 'string' &&
-    typeof v.kind === 'number' &&
-    typeof v.created_at === 'number' &&
-    Array.isArray(v.tags)
+    typeof v['id'] === 'string' &&
+    typeof v['pubkey'] === 'string' &&
+    typeof v['kind'] === 'number' &&
+    typeof v['created_at'] === 'number' &&
+    Array.isArray(v['tags'])
   );
 }
 
