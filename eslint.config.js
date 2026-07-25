@@ -1,6 +1,7 @@
 import eslint from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
+import reactHooks from 'eslint-plugin-react-hooks';
 
 export default tseslint.config(
   eslint.configs.recommended,
@@ -30,6 +31,10 @@ export default tseslint.config(
         { prefer: 'type-imports' },
       ],
     },
+  },
+  {
+    files: ['packages/rig-web/**/*.{ts,tsx}'],
+    ...reactHooks.configs['recommended-latest'],
   },
   // Relaxed rules for test files, examples
   {
