@@ -157,7 +157,7 @@ export async function readWalletBounded(
     timer = setTimeout(() => reject(new WalletReadTimeoutError(timeoutMs)), timeoutMs);
   });
   // Don't let the loser reject into an unhandled rejection post-race.
-  settled.catch(() => {});
+  settled.catch(() => undefined);
   try {
     return await Promise.race([settled, guard]);
   } finally {
