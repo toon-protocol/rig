@@ -2,7 +2,8 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   timeout: 30000,
-  retries: process.env.CI ? 1 : 0,
+  retries: process.env['CI'] ? 1 : 0,
+  globalSetup: './tests/e2e/seed/seed-all.ts',
   use: {
     baseURL: 'http://localhost:5173',
     headless: true,
@@ -17,7 +18,6 @@ export default defineConfig({
     {
       name: 'rig-e2e',
       testDir: './tests/e2e/specs',
-      globalSetup: './tests/e2e/seed/seed-all.ts',
     },
   ],
   webServer: {

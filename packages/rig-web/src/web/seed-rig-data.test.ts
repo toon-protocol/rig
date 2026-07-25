@@ -2,7 +2,7 @@
 // Ensures seedFromRefs correctly reformats sha→txId mappings so that
 // resolveGitSha() can satisfy lookups from relay events without a GraphQL round-trip.
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest';
 import { seedFromRefs } from './lib/seed-cache.js';
 import {
   clearShaCache,
@@ -31,7 +31,12 @@ function makeRefs(arweaveEntries: [string, string][]): RepoRefs {
 // Stub fetch so every miss resolves deterministically (empty GraphQL result →
 // null) and instantly, with zero network dependence. Seeded (cache-hit) tests
 // never reach fetch, so this does not mask their behaviour.
-let fetchMock: ReturnType<typeof vi.fn>;
+interface FetchGraphqlResponse {
+  ok: boolean;
+  json: () => Promise<{ data: { transactions: { edges: never[] } } }>;
+}
+
+let fetchMock: Mock<[], Promise<FetchGraphqlResponse>>;
 
 beforeEach(() => {
   clearShaCache();

@@ -37,6 +37,7 @@ describe('Ref Resolver - resolveDefaultRef', () => {
         ['main', 'aaa'],
         ['develop', 'bbb'],
       ]),
+      arweaveMap: new Map<string, string>(),
     };
 
     const result = resolveDefaultRef(meta, refs);
@@ -52,6 +53,7 @@ describe('Ref Resolver - resolveDefaultRef', () => {
         ['HEAD', 'ccc'],
         ['develop', 'ddd'],
       ]),
+      arweaveMap: new Map<string, string>(),
     };
 
     const result = resolveDefaultRef(meta, refs);
@@ -64,6 +66,7 @@ describe('Ref Resolver - resolveDefaultRef', () => {
     const refs = {
       repoId: 'test-repo',
       refs: new Map([['feature-x', 'eee']]),
+      arweaveMap: new Map<string, string>(),
     };
 
     const result = resolveDefaultRef(meta, refs);
@@ -76,6 +79,7 @@ describe('Ref Resolver - resolveDefaultRef', () => {
     const refs = {
       repoId: 'test-repo',
       refs: new Map<string, string>(),
+      arweaveMap: new Map<string, string>(),
     };
 
     const result = resolveDefaultRef(meta, refs);
