@@ -15,6 +15,13 @@ name: Deploy rig-web
 on:
   push:
     branches: [main]
+    # Deliberately not narrowed to packages/rig-web/**: rig-web embeds
+    # @toon-protocol/rig, so a rig-only change (including a changeset
+    # release commit) can change rig-web's runtime behavior and must still
+    # redeploy. This means every rig release commit also triggers a Pages
+    # deploy even when no web code changed; now that runs queue instead of
+    # cancel (see the concurrency block below), that's a harmless extra
+    # deploy rather than a source of collisions (toon-protocol/rig#32).
     paths:
       - 'packages/rig-web/**'
       - 'packages/rig/**'
@@ -27,17 +34,20 @@ permissions:
   pages: write
   id-token: write
 
-# One Pages deploy at a time; a newer push supersedes an in-flight one.
+# One Pages deploy at a time; queue rather than cancel. Cancelling the
+# *workflow run* does not cancel the *API-side deployment* it already
+# created, so killing a run mid-flight orphans a stale "in progress" lock
+# that then 400s the next deploy (toon-protocol/rig#32). Let each run finish.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment-retry.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -70,5 +80,20 @@ jobs:
         with:
           path: packages/rig-web/dist
 
+      # The Pages API can hold a stale "in progress" lock on the previous
+      # deployment for a few minutes after that run reported success,
+      # 400ing the very next deploy (toon-protocol/rig#32). One retry
+      # after a short wait is enough to clear a transient stale lock
+      # without masking a real, persistent deploy failure.
       - id: deployment
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+
+      - name: Wait before retrying a failed Pages deployment
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 15
+
+      - name: Retry Pages deployment (transient stale-lock tolerance)
+        id: deployment-retry
+        if: steps.deployment.outcome == 'failure'
         uses: actions/deploy-pages@v4
