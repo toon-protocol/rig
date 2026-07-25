@@ -88,7 +88,11 @@ describe('Rig-UI Pointer HTML Generation', () => {
     // Config should only have relay
     const configMatch = html.match(/window\.__RIG_CONFIG__=(\{[^}]+\})/);
     expect(configMatch).toBeTruthy();
-    const config = JSON.parse(configMatch![1]);
+    const configJson = configMatch![1];
+    if (configJson === undefined) {
+      throw new Error('config capture group missing');
+    }
+    const config = JSON.parse(configJson);
     expect(config).toEqual({ relay: 'wss://relay.example.com' });
   });
 

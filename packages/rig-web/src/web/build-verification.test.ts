@@ -103,7 +103,9 @@ describe.skipIf(!buildExists)(
       const allRefs = [
         ...(html.matchAll(/src="([^"]+)"/g) || []),
         ...(html.matchAll(/href="([^"]+)"/g) || []),
-      ].map((m) => m[1]);
+      ]
+        .map((m) => m[1])
+        .filter((ref): ref is string => ref !== undefined);
 
       for (const ref of allRefs) {
         // Skip data: URIs, external URLs, and inline SVG
@@ -150,6 +152,9 @@ describe.skipIf(!buildExists)(
       expect(cspMatch).not.toBeNull();
 
       const csp = cspMatch![1];
+      if (csp === undefined) {
+        throw new Error('script-src CSP match missing capture group');
+      }
       // Extract just the script-src directive (up to the next directive or end)
       const scriptSrcMatch = csp.match(/script-src\s+([^;]*)/);
       expect(scriptSrcMatch).not.toBeNull();
