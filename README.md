@@ -31,11 +31,20 @@ Requires Node `>=22` and pnpm `8.15.9` (see `packageManager`).
 
 ## Release
 
-`@toon-protocol/rig` is published to npm via [changesets](https://github.com/changesets/changesets).
+`@toon-protocol/rig` is released via [changesets](https://github.com/changesets/changesets).
 Add a changeset with `pnpm changeset` when you change the package; merging to
 `main` opens/updates a Release PR, and merging that publishes. `rig-web` is
 private and deployed to GitHub Pages (`.github/workflows/deploy-rig-web.yml`),
 not published to npm.
+
+**Publishing provenance.** Versions `1.0.0` through `3.0.0` of
+`@toon-protocol/rig` were published from the
+[`toon-client`](https://github.com/toon-protocol/toon-client) monorepo, where
+this package lived before extraction. This repository has not published to npm
+yet; it becomes the publishing source at `3.1.0`. `packages/rig/package.json` is
+pinned at `3.0.0` to match npm's `latest` so the first release cut here follows
+on from the published history rather than re-minting an occupied version. See
+[`packages/rig/CHANGELOG.md`](packages/rig/CHANGELOG.md).
 
 ## License
 

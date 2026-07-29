@@ -1,6 +1,35 @@
 # @toon-protocol/rig
 
-## 2.14.0
+> **Publishing provenance — this file is not npm's history before `3.1.0`.**
+>
+> Every published version of `@toon-protocol/rig` from `1.0.0` through `3.0.0`
+> was released from the
+> [`toon-client`](https://github.com/toon-protocol/toon-client) monorepo, where
+> this package lived before it was extracted into this repository. **This
+> repository has published nothing to npm to date**; it becomes the publishing
+> source at `3.1.0`. `package.json` is therefore set to `3.0.0` — npm's
+> `latest` — so the first release cut here continues the published history
+> instead of re-minting an occupied version.
+>
+> Consequences for the entries below, which are this repository's own working
+> history and are deliberately left as written rather than back-filled:
+>
+> - **The `2.14.0` entry below was never published from here, and npm's
+>   `2.14.0` is a different release.** npm's `2.14.0` was cut from `toon-client`
+>   and does **not** contain the `DEFAULT_RIG_WEB_URL` change described below;
+>   that change first reaches npm in `3.1.0`. The number is minted twice, from
+>   two trees, and cannot be un-minted.
+> - **Versions this repository did not cut are absent** — including `2.13.3` and
+>   `3.0.0`, both published from `toon-client`. They are not reconstructed here.
+>   npm's `3.0.0` already carries the sealed-wire / flat-route-price work
+>   (`@toon-protocol/client` `0.22.0`, removal of `uploadFeePerByte`,
+>   `flooredUploadFee` and `PublishEventResult.data`), so `3.1.0` is not that
+>   break landing — it is one behaviour change on top of it.
+>
+> For the published history of `1.0.0`–`3.0.0`, see `packages/rig/CHANGELOG.md`
+> in `toon-client`.
+
+## 2.14.0 — never published from this repository (see provenance note above)
 
 ### Minor Changes
 
