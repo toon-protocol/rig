@@ -1,9 +1,30 @@
 ---
-'@toon-protocol/rig': major
+'@toon-protocol/rig': minor
 ---
 
 Move onto `@toon-protocol/client` 0.22.0: the sealed wire, and a flat price
-asked of the route. **Breaking.**
+asked of the route — plus the `DEFAULT_RIG_WEB_URL` pointer fix, which is the
+only part of this release a consumer on `3.0.0` has not already got.
+
+**Read the bump first.** This is the first release published from the
+`toon-protocol/rig` repository; `1.0.0`–`3.0.0` were published from the
+`toon-client` monorepo, where this package used to live. npm's `3.0.0` was cut
+from the tree that already contains everything described below except the
+pointer URL — so relative to `3.0.0` this release **breaks nothing**, and is a
+`minor`. The removals below are recorded for anyone arriving from `2.x`; if you
+are on `3.0.0` you have already done that migration.
+
+**What actually changes for a `3.0.0` consumer.** `DEFAULT_RIG_WEB_URL` — the
+rig pointer's no-JS/delayed fallback link, embedded permanently into every
+Arweave-published rig pointer — now points at
+`https://toon-protocol.github.io/rig` instead of the retired
+`toon-protocol.github.io/toon-client` copy. `rig` now solely owns `rig-web`;
+`/toon-client/` is a permanent fragment-preserving redirect stub.
+
+---
+
+The rest of this entry describes the `2.x` → `3.x` move, already shipped in
+`3.0.0`.
 
 Both pins (`packages/rig`, `packages/rig-web`) go `^0.21.1` → `^0.22.0`. The
 client's 0.22.0 is itself breaking on two axes, and this package's public
@@ -31,7 +52,7 @@ more handlers. A 100-byte and a 100 KB upload to the same store route now cost
 the same, and the connector gates every paid packet at that figure regardless
 of what a client computes.
 
-So the following are **removed**, not deprecated:
+So the following are **removed**, not deprecated (as of `3.0.0`):
 
 - `FeeRates.uploadFeePerByte` and `FeeRates.minUploadFee`, replaced by one flat
   `FeeRates.uploadFee`.
@@ -47,5 +68,3 @@ is a lie told to every caller who sets it, and it would silently misprice
 a per-byte computation, so `getFeeRates()` — and with it the `rig push` confirm
 table, the rig-page pointer fee and `rig site` estimates — equals what is
 claimed.
-
-`@toon-protocol/rig` is past 1.0, so removing exported API is a major bump.
