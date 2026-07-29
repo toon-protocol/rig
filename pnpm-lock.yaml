@@ -51,8 +51,8 @@ importers:
         specifier: ^1.0.0
         version: 1.4.0
       '@toon-protocol/client':
-        specifier: ^0.21.1
-        version: 0.21.1(typescript@5.9.3)(zod@3.25.76)
+        specifier: ^0.22.0
+        version: 0.22.0(typescript@5.9.3)(zod@3.25.76)
       '@toon-protocol/core':
         specifier: ^3.1.2
         version: 3.1.3(typescript@5.9.3)
@@ -156,8 +156,8 @@ importers:
         specifier: ^16.0.0
         version: 16.3.2(@testing-library/dom@10.4.1)(@types/react-dom@19.2.3)(@types/react@19.2.17)(react-dom@19.2.8)(react@19.2.8)
       '@toon-protocol/client':
-        specifier: ^0.21.1
-        version: 0.21.1(@types/react@19.2.17)(react@19.2.8)(typescript@5.9.3)(zod@3.25.76)
+        specifier: ^0.22.0
+        version: 0.22.0(@types/react@19.2.17)(react@19.2.8)(typescript@5.9.3)(zod@3.25.76)
       '@toon-protocol/core':
         specifier: ^1.6.0
         version: 1.6.0(@toon-protocol/connector@3.41.0)(@types/react@19.2.17)(react@19.2.8)(typescript@5.9.3)
@@ -8582,10 +8582,77 @@ packages:
       - uploadthing
       - utf-8-validate
       - zod
+    dev: false
 
-  /@toon-protocol/client@0.21.1(typescript@5.9.3)(zod@3.25.76):
-    resolution: {integrity: sha512-e3jD617/sfe3pJDwv8DGBfC2ZnP6dv3fM6UstNhNO9t6P7DmwMWT7u4KB68+1eE0JCxQBO6N5G2cF+ZUa766Gg==}
+  /@toon-protocol/client@0.22.0(@types/react@19.2.17)(react@19.2.8)(typescript@5.9.3)(zod@3.25.76):
+    resolution: {integrity: sha512-PE6zfDBCMGZpNZpdZXC4RkVapkxtgjz68Np2ugItlE5pFl0SaL+3W4E/SoVweXszE4Mgpih8RkChYA6aaIt7Bw==}
     dependencies:
+      '@noble/ciphers': 2.1.1
+      '@noble/curves': 2.2.0
+      '@noble/ed25519': 2.3.0
+      '@noble/hashes': 1.8.0
+      '@scure/bip32': 1.7.0
+      '@scure/bip39': 1.6.0
+      '@toon-protocol/core': 3.1.3(@types/react@19.2.17)(react@19.2.8)(typescript@5.9.3)
+      '@toon-protocol/sdk': 3.1.3(@types/react@19.2.17)(mina-signer@3.1.0)(react@19.2.8)(typescript@5.9.3)
+      nostr-tools: 2.24.1(typescript@5.9.3)
+      viem: 2.55.5(typescript@5.9.3)(zod@3.25.76)
+    optionalDependencies:
+      '@solana/web3.js': 1.98.4(typescript@5.9.3)
+      '@toon-protocol/mina-zkapp': 0.1.1
+      mina-signer: 3.1.0
+      o1js: 2.14.0
+      ws: 8.21.1(bufferutil@4.1.0)(utf-8-validate@6.0.6)
+    transitivePeerDependencies:
+      - '@azure/app-configuration'
+      - '@azure/cosmos'
+      - '@azure/data-tables'
+      - '@azure/identity'
+      - '@azure/keyvault-secrets'
+      - '@azure/storage-blob'
+      - '@capacitor/preferences'
+      - '@deno/kv'
+      - '@netlify/blobs'
+      - '@planetscale/database'
+      - '@react-native-async-storage/async-storage'
+      - '@solana/sysvars'
+      - '@tanstack/query-core'
+      - '@tanstack/react-query'
+      - '@toon-protocol/connector'
+      - '@types/react'
+      - '@upstash/redis'
+      - '@vercel/blob'
+      - '@vercel/functions'
+      - '@vercel/kv'
+      - '@x402/core'
+      - '@x402/evm'
+      - '@x402/extensions'
+      - '@x402/svm'
+      - aws4fetch
+      - bufferutil
+      - db0
+      - debug
+      - encoding
+      - expo-auth-session
+      - expo-crypto
+      - expo-web-browser
+      - fastestsmallesttextencoderdecoder
+      - immer
+      - ioredis
+      - preact-render-to-string
+      - react
+      - react-native
+      - supports-color
+      - typescript
+      - uploadthing
+      - utf-8-validate
+      - zod
+    dev: true
+
+  /@toon-protocol/client@0.22.0(typescript@5.9.3)(zod@3.25.76):
+    resolution: {integrity: sha512-PE6zfDBCMGZpNZpdZXC4RkVapkxtgjz68Np2ugItlE5pFl0SaL+3W4E/SoVweXszE4Mgpih8RkChYA6aaIt7Bw==}
+    dependencies:
+      '@noble/ciphers': 2.1.1
       '@noble/curves': 2.2.0
       '@noble/ed25519': 2.3.0
       '@noble/hashes': 1.8.0
