@@ -19,7 +19,6 @@ import {
 } from '../standalone/network-bootstrap.js';
 import { MinaZkAppStore } from '../standalone/mina-zkapp-store.js';
 import {
-  MissingUplinkError,
   OFFICIAL_PROXY_URL,
   OFFICIAL_PUBLISH_DESTINATION,
   buildMinaAutoDeploy,

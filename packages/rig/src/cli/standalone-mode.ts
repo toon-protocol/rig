@@ -191,11 +191,6 @@ function readClientConfig(path: string): ClientConfigFile {
   }
 }
 
-/** `https://host/ilp` → `https://host` (the client re-derives `/ilp`). */
-function proxyBaseOf(httpEndpoint: string): string {
-  return httpEndpoint.replace(/\/+$/, '').replace(/\/ilp$/i, '');
-}
-
 // ---------------------------------------------------------------------------
 // Pure topology resolution (#264) — exported for tests
 // ---------------------------------------------------------------------------
@@ -470,7 +465,7 @@ export async function resolveNetworkTopology(
   // overrides are for, and those are all EXPLICIT. `MissingUplinkError`
   // can no longer fire from here — an uplink always resolves.
   let proxyUrl = explicitProxyUrl;
-  let btpUrl = explicitBtpUrl;
+  const btpUrl = explicitBtpUrl;
   if (!proxyUrl && !btpUrl) {
     proxyUrl = OFFICIAL_PROXY_URL;
   }
