@@ -1,5 +1,12 @@
 # @toon-protocol/rig
 
+## 3.3.1
+
+### Patch Changes
+
+- ded1908: Update devnet test fixtures to the apex's rotated settlement and announce
+  identity. Test-data only — no runtime behaviour change.
+
 ## 3.3.0
 
 ### Minor Changes
