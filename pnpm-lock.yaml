@@ -156,8 +156,8 @@ importers:
         specifier: ^16.0.0
         version: 16.3.2(@testing-library/dom@10.4.1)(@types/react-dom@19.2.3)(@types/react@19.2.17)(react-dom@19.2.8)(react@19.2.8)
       '@toon-protocol/client':
-        specifier: ^0.22.0
-        version: 0.22.0(@types/react@19.2.17)(react@19.2.8)(typescript@5.9.3)(zod@3.25.76)
+        specifier: ^0.25.0
+        version: 0.25.0(@types/react@19.2.17)(react@19.2.8)(typescript@5.9.3)(zod@3.25.76)
       '@toon-protocol/core':
         specifier: ^1.6.0
         version: 1.6.0(@toon-protocol/connector@3.41.0)(@types/react@19.2.17)(react@19.2.8)(typescript@5.9.3)
@@ -8584,8 +8584,8 @@ packages:
       - zod
     dev: false
 
-  /@toon-protocol/client@0.22.0(@types/react@19.2.17)(react@19.2.8)(typescript@5.9.3)(zod@3.25.76):
-    resolution: {integrity: sha512-PE6zfDBCMGZpNZpdZXC4RkVapkxtgjz68Np2ugItlE5pFl0SaL+3W4E/SoVweXszE4Mgpih8RkChYA6aaIt7Bw==}
+  /@toon-protocol/client@0.25.0(@types/react@19.2.17)(react@19.2.8)(typescript@5.9.3)(zod@3.25.76):
+    resolution: {integrity: sha512-j/2UDz3MgNq8P4vZ573z5FBHx7ilpVZJQDq6teNTJvd4FJM+roye0N7IQHuhpmL/ARKnQxCGz8B+WiDutXeFDg==}
     dependencies:
       '@noble/ciphers': 2.1.1
       '@noble/curves': 2.2.0
