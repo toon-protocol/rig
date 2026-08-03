@@ -84,21 +84,20 @@ export function parseFactoryJobRequest(event: RelayEvent): FactoryJobRequest {
   const paramValue = (name: string): string | undefined =>
     params.find((t) => t[1] === name)?.[2];
 
-  const outputTag = event.tags.find((t) => t[0] === 'output');
+  const repo = paramValue('repo');
+  const target = paramValue('target');
+  const constraints = paramValue('constraints');
+  const outputMime = event.tags.find((t) => t[0] === 'output')?.[1];
 
   return {
     requestEventId: event.id,
     buyerPubkey: event.pubkey,
     brief: briefTag[1],
     bidMicroUsdc: bidTag[1],
-    ...(paramValue('repo') !== undefined ? { repo: paramValue('repo') } : {}),
-    ...(paramValue('target') !== undefined
-      ? { target: paramValue('target') }
-      : {}),
-    ...(paramValue('constraints') !== undefined
-      ? { constraints: paramValue('constraints') }
-      : {}),
-    ...(outputTag?.[1] !== undefined ? { outputMime: outputTag[1] } : {}),
+    ...(repo !== undefined ? { repo } : {}),
+    ...(target !== undefined ? { target } : {}),
+    ...(constraints !== undefined ? { constraints } : {}),
+    ...(outputMime !== undefined ? { outputMime } : {}),
   };
 }
 
