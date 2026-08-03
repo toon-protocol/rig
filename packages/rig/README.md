@@ -585,6 +585,37 @@ it — that stays behind the `Publisher` seam:
   `executePush` (crash-resume safe via content-addressed skip).
 - `routes.ts` — the JSON wire shapes of the daemon's `/git/*` control routes.
 - `cli/` — the `rig` bin.
+- `factory-job-{events,plan,delivery,execute}.ts` — the factory job adapter
+  (job → sandcastle milestones → paid increments,
+  [toon-meta#262](https://github.com/toon-protocol/toon-meta/issues/262) "agents
+  earning"): `planFactoryJob`/`executeFactoryJob` mirror `planPush`/`executePush`'s
+  split, and `JobDeliveryPort` is the injected seam for the per-increment
+  encrypt/pay leg. `factory-job-delivery-client.ts` (`ClientJobDeliveryPort`) is
+  the concrete `JobDeliveryPort`, backed by `@toon-protocol/client`'s real
+  hashlock helpers; `factory-job-pay.ts` is the buyer-side counterpart
+  (`payIncrementOffer`/`decryptIncrementArtifact`). See "Factory job proof"
+  below.
+
+### Factory job proof — one paid increment end to end (#56)
+
+`scripts/factory-job-proof.ts` is the runnable proof that a provider can
+deliver one factory-job increment to a buyer and get paid for it, entirely
+off-chain, using the real `@toon-protocol/client` (no fakes): encrypt → upload
+→ offer → pay → fulfil → decrypt, then assert the provider's `getClaimState()`
+spendable balance rose with the on-chain deposit unchanged (no settlement).
+
+```sh
+cd packages/rig
+pnpm factory-job-proof
+```
+
+By default this generates and faucet-funds two fresh devnet identities (a
+provider and a buyer) against the public devnet (see "Devnet reference"
+below) and tears them down at the end — safe to re-run any number of times.
+Set `FACTORY_JOB_PROOF_PROVIDER_MNEMONIC` / `FACTORY_JOB_PROOF_BUYER_MNEMONIC`
+to reuse already-funded identities instead, or `FACTORY_JOB_PROOF_SKIP_FUND=1`
+to skip the faucet drip. See the script's own header comment for the full env
+var list.
 
 Part of [epic #222](https://github.com/toon-protocol/toon-client/issues/222) and
 [epic #246](https://github.com/toon-protocol/toon-client/issues/246).

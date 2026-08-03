@@ -45,11 +45,12 @@
     "build": "tsup",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json"
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "factory-job-proof": "tsx scripts/factory-job-proof.ts"
   },
   "dependencies": {
     "@toon-format/toon": "^1.0.0",
-    "@toon-protocol/client": "^0.25.0",
+    "@toon-protocol/client": "^0.26.0",
     "@toon-protocol/core": "^3.1.2",
     "nostr-tools": "^2.20.0"
   },
@@ -63,6 +64,7 @@
     "@types/node": "^20.0.0",
     "@types/ws": "^8.18.1",
     "tsup": "^8.0.0",
+    "tsx": "^4.19.2",
     "typescript": "^5.3.0",
     "vitest": "^1.0.0",
     "ws": "^8.18.0"
