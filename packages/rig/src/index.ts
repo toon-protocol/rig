@@ -144,3 +144,39 @@ export {
   type RejectedRefUpdate,
   type UploadStepResult,
 } from './push.js';
+
+// #52: factory job adapter — job → sandcastle milestones → paid increments.
+export {
+  FACTORY_JOB_FEEDBACK_KIND,
+  FACTORY_JOB_REQUEST_KIND,
+  FACTORY_JOB_RESULT_KIND,
+  buildIncrementOfferEvent,
+  buildNarrationEvent,
+  buildQuoteEvent,
+  buildResultEvent,
+  parseFactoryJobRequest,
+  type BuildIncrementOfferOptions,
+  type BuildNarrationOptions,
+  type BuildResultEventOptions,
+  type EncryptedArtifactRef,
+  type FactoryJobOutcome,
+  type FactoryJobRequest,
+  type RelayEvent,
+} from './factory-job-events.js';
+export {
+  planFactoryJob,
+  type FactoryMilestone,
+  type FactoryTicket,
+  type IncrementSpec,
+} from './factory-job-plan.js';
+export {
+  type EncryptedArtifact,
+  type JobDeliveryPort,
+  type OfferedIncrement,
+} from './factory-job-delivery.js';
+export {
+  executeFactoryJob,
+  type ExecuteFactoryJobOptions,
+  type FactoryJobExecution,
+  type FactoryJobHooks,
+} from './factory-job-execute.js';
