@@ -27,34 +27,48 @@ import {
   type FactoryJobRequest,
   type RelayEvent,
 } from './factory-job-events.js';
+import type { GateResult } from './factory-job-gate.js';
 import {
   planFactoryJob,
   type FactoryTicket,
   type IncrementSpec,
 } from './factory-job-plan.js';
 
-/** Runs one factory milestone and returns its deliverable as raw bytes. */
+/** One milestone's deliverable, plus the gate result that ran against it, when one did. */
+export interface FactoryJobWork {
+  artifact: Uint8Array;
+  /**
+   * The reproducible gate result (#53) for this milestone's work, per
+   * `FACTORY.md`'s pinned pipeline (lint/typecheck/test/build). Omitted for
+   * `plan` — there is no code to gate against a brief.
+   */
+  gate?: GateResult;
+}
+
+/** Runs one factory milestone and returns its deliverable, plus that milestone's gate result. */
 export interface FactoryJobHooks {
   /**
    * Runs the factory's plan phase for `job` (mirrors `.sandcastle/main.ts`'s
    * Phase 1): returns the per-ticket fan-out the implement milestone splits
-   * into, plus the plan document itself as increment 1's artifact.
+   * into, plus the plan document itself as increment 1's artifact. No gate
+   * result — planning produces no code to lint/typecheck/test/build.
    */
   plan(
     job: FactoryJobRequest
   ): Promise<{ tickets: FactoryTicket[]; artifact: Uint8Array }>;
   /**
-   * Runs one ticket's implement(+review) sandbox pipeline (mirrors Phase
-   * 2's per-issue `sandbox.run`) and returns its deliverable (e.g. the
-   * ticket's diff) as that implement increment's artifact.
+   * Runs one ticket's implement sandbox pipeline (mirrors Phase 2's
+   * per-issue `sandbox.run`, which ends in the gate per `FACTORY.md`) and
+   * returns its deliverable (e.g. the ticket's diff) plus that run's gate
+   * result.
    */
-  implement(ticket: FactoryTicket): Promise<Uint8Array>;
+  implement(ticket: FactoryTicket): Promise<FactoryJobWork>;
   /**
    * Runs the factory's merge/review phase over every completed ticket
-   * (mirrors Phase 3) and returns the final deliverable as the review
-   * increment's artifact.
+   * (mirrors Phase 3, which re-runs the gate per `merge-prompt.md`) and
+   * returns the final deliverable plus that run's gate result.
    */
-  review(tickets: FactoryTicket[]): Promise<Uint8Array>;
+  review(tickets: FactoryTicket[]): Promise<FactoryJobWork>;
 }
 
 export interface ExecuteFactoryJobOptions {
@@ -76,13 +90,13 @@ export interface FactoryJobExecution {
   resultEventId: string;
 }
 
-async function artifactFor(
+async function workFor(
   spec: IncrementSpec,
   tickets: FactoryTicket[],
   planArtifact: Uint8Array,
   hooks: FactoryJobHooks
-): Promise<Uint8Array> {
-  if (spec.milestone === 'plan') return planArtifact;
+): Promise<FactoryJobWork> {
+  if (spec.milestone === 'plan') return { artifact: planArtifact };
   if (spec.milestone === 'implement') {
     if (!spec.ticket) {
       throw new Error(
@@ -157,15 +171,15 @@ export async function executeFactoryJob(
   };
 
   for (const spec of schedule) {
-    let workBytes: Uint8Array;
+    let work: FactoryJobWork;
     try {
-      workBytes = await artifactFor(spec, tickets, planArtifact, hooks);
+      work = await workFor(spec, tickets, planArtifact, hooks);
     } catch {
       // Provider-side failure mid-job: stop where we are, no renegotiation.
       return haltWith('abandoned-provider');
     }
 
-    const encrypted = await delivery.encryptArtifact(workBytes);
+    const encrypted = await delivery.encryptArtifact(work.artifact);
     const uploadReceipt = await uploadBlob({
       body: Buffer.from(encrypted.ciphertext),
       contentType: 'application/octet-stream',
@@ -181,6 +195,7 @@ export async function executeFactoryJob(
         ciphertextSha256: encrypted.ciphertextSha256,
         conditionHex: encrypted.conditionHex,
       },
+      ...(work.gate ? { gate: work.gate } : {}),
     });
     const offerReceipt = await publisher.publishEvent(offerEvent, relayUrls);
 

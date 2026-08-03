@@ -163,6 +163,12 @@ export {
   type FactoryJobRequest,
   type RelayEvent,
 } from './factory-job-events.js';
+// #53: reproducible gate result per increment — the objective floor.
+export {
+  gatePassed,
+  type GateCheck,
+  type GateResult,
+} from './factory-job-gate.js';
 export {
   planFactoryJob,
   type FactoryMilestone,
@@ -179,4 +185,5 @@ export {
   type ExecuteFactoryJobOptions,
   type FactoryJobExecution,
   type FactoryJobHooks,
+  type FactoryJobWork,
 } from './factory-job-execute.js';
