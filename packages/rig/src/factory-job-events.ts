@@ -11,6 +11,7 @@
 
 import type { UnsignedEvent } from './nip34-events.js';
 import type { IncrementSpec } from './factory-job-plan.js';
+import { gatePassed, type GateResult } from './factory-job-gate.js';
 
 // ---------------------------------------------------------------------------
 // Kinds
@@ -153,6 +154,26 @@ export interface BuildIncrementOfferOptions {
   parentEventId: string;
   increment: IncrementSpec;
   artifact: EncryptedArtifactRef;
+  /**
+   * The reproducible gate result for this increment's work (#53 — the
+   * objective floor), when one ran. Omitted for milestones with nothing to
+   * gate (e.g. `plan` — there is no code to lint against a brief).
+   */
+  gate?: GateResult;
+}
+
+/** A gate result missing its commit or check list cannot be reproduced by the buyer — reject it here rather than publish an unverifiable claim. */
+function assertReproducible(gate: GateResult): void {
+  if (gate.checks.length === 0) {
+    throw new Error(
+      'gate result must record at least one check for the offer to be reproducible'
+    );
+  }
+  if (!gate.commit) {
+    throw new Error(
+      'gate result must record the commit it ran against for the offer to be reproducible'
+    );
+  }
 }
 
 /**
@@ -161,25 +182,35 @@ export interface BuildIncrementOfferOptions {
  * artifact. This is the join between the relay plane and the connector
  * plane (§4.2): `condition` here MUST equal the paying PREPARE's
  * `executionCondition`, byte for byte.
+ *
+ * When `gate` is supplied, the offer also carries a `["gate", "pass"|"fail"]`
+ * tag (cheap to scan for a gate-pass rate, decision 8) and the full
+ * reproducible result in `content` — visible to the buyer before they pay,
+ * per the issue: a gate-failing increment is still offered, never hidden.
  */
 export function buildIncrementOfferEvent(
   options: BuildIncrementOfferOptions
 ): UnsignedEvent {
-  const { job, parentEventId, increment, artifact } = options;
+  const { job, parentEventId, increment, artifact, gate } = options;
+  if (gate) assertReproducible(gate);
+
+  const tags: string[][] = [
+    ['e', job.requestEventId, '', 'root'],
+    ['e', parentEventId, '', 'reply'],
+    ['p', job.buyerPubkey],
+    ['status', 'partial'],
+    ['increment', String(increment.n), String(increment.of)],
+    ['i', artifact.arweaveTxId, 'url'],
+    ['i', artifact.ciphertextSha256, 'text', '', 'hash'],
+    ['amount', increment.priceUsdc, 'usdc'],
+    ['condition', artifact.conditionHex],
+  ];
+  if (gate) tags.push(['gate', gatePassed(gate) ? 'pass' : 'fail']);
+
   return {
     kind: FACTORY_JOB_FEEDBACK_KIND,
-    content: '',
-    tags: [
-      ['e', job.requestEventId, '', 'root'],
-      ['e', parentEventId, '', 'reply'],
-      ['p', job.buyerPubkey],
-      ['status', 'partial'],
-      ['increment', String(increment.n), String(increment.of)],
-      ['i', artifact.arweaveTxId, 'url'],
-      ['i', artifact.ciphertextSha256, 'text', '', 'hash'],
-      ['amount', increment.priceUsdc, 'usdc'],
-      ['condition', artifact.conditionHex],
-    ],
+    content: gate ? JSON.stringify({ gate }) : '',
+    tags,
     created_at: Math.floor(Date.now() / 1000),
   };
 }

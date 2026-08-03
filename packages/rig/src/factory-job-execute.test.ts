@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { executeFactoryJob, type FactoryJobHooks } from './factory-job-execute.js';
 import type { JobDeliveryPort } from './factory-job-delivery.js';
+import type { GateResult } from './factory-job-gate.js';
 import type {
   BlobUpload,
   FeeRates,
@@ -95,16 +96,31 @@ function fakeDelivery(payDecisions: boolean[] = []): JobDeliveryPort {
   };
 }
 
+const PASSING_GATE: GateResult = {
+  commit: 'c'.repeat(40),
+  toolchain: { node: '20.11.0', pnpm: '9.1.0' },
+  checks: [
+    { name: 'lint', command: 'eslint .', pass: true },
+    { name: 'typecheck', command: 'pnpm run typecheck', pass: true },
+    { name: 'test', command: 'pnpm -r test --if-present', pass: true },
+    { name: 'build', command: 'pnpm -r build', pass: true },
+  ],
+};
+
 function fakeHooks(overrides: Partial<FactoryJobHooks> = {}): FactoryJobHooks {
   return {
     plan: vi.fn(async () => ({
       tickets: TICKETS,
       artifact: new TextEncoder().encode('the plan'),
     })),
-    implement: vi.fn(async (ticket) =>
-      new TextEncoder().encode(`diff for ${ticket.id}`)
-    ),
-    review: vi.fn(async () => new TextEncoder().encode('merged PR')),
+    implement: vi.fn(async (ticket) => ({
+      artifact: new TextEncoder().encode(`diff for ${ticket.id}`),
+      gate: PASSING_GATE,
+    })),
+    review: vi.fn(async () => ({
+      artifact: new TextEncoder().encode('merged PR'),
+      gate: PASSING_GATE,
+    })),
     ...overrides,
   };
 }
@@ -140,6 +156,69 @@ describe('executeFactoryJob', () => {
 
     const last = publisher.publishedEvents[publisher.publishedEvents.length - 1];
     expect(last?.tags).toEqual(expect.arrayContaining([['outcome', 'completed']]));
+  });
+
+  it('publishes a gate tag + reproducible gate content on implement/review offers, but not on the plan offer (#53)', async () => {
+    const publisher = fakePublisher();
+    const delivery = fakeDelivery();
+    const hooks = fakeHooks();
+
+    await executeFactoryJob({
+      job: JOB,
+      requestEvent: REQUEST_EVENT,
+      hooks,
+      publisher,
+      delivery,
+      relayUrls: [],
+    });
+
+    // published: [quote, plan-offer, implement-1-offer, implement-2-offer, review-offer, result]
+    const [, planOffer, implement1Offer, implement2Offer, reviewOffer] =
+      publisher.publishedEvents;
+
+    expect(planOffer?.tags.some((t) => t[0] === 'gate')).toBe(false);
+    expect(planOffer?.content).toBe('');
+
+    for (const offer of [implement1Offer, implement2Offer, reviewOffer]) {
+      expect(offer?.tags).toEqual(expect.arrayContaining([['gate', 'pass']]));
+      const content = JSON.parse(offer?.content ?? '{}') as {
+        gate: GateResult;
+      };
+      expect(content.gate).toEqual(PASSING_GATE);
+    }
+  });
+
+  it('tags a failing gate as ["gate", "fail"] but still offers the increment (a failing gate is not a protocol violation)', async () => {
+    const publisher = fakePublisher();
+    const delivery = fakeDelivery();
+    const failingGate: GateResult = {
+      ...PASSING_GATE,
+      checks: [
+        ...PASSING_GATE.checks.slice(0, -1),
+        { name: 'build', command: 'pnpm -r build', pass: false },
+      ],
+    };
+    const hooks = fakeHooks({
+      implement: vi.fn(async (ticket) => ({
+        artifact: new TextEncoder().encode(`diff for ${ticket.id}`),
+        gate: failingGate,
+      })),
+    });
+
+    const result = await executeFactoryJob({
+      job: JOB,
+      requestEvent: REQUEST_EVENT,
+      hooks,
+      publisher,
+      delivery,
+      relayUrls: [],
+    });
+
+    expect(result.outcome).toBe('completed');
+    const [, , implement1Offer] = publisher.publishedEvents;
+    expect(implement1Offer?.tags).toEqual(
+      expect.arrayContaining([['gate', 'fail']])
+    );
   });
 
   it('runs implement once per ticket, never lumping them into one increment', async () => {
@@ -214,7 +293,10 @@ describe('executeFactoryJob', () => {
     const hooks = fakeHooks({
       implement: vi.fn(async (ticket) => {
         if (ticket.id === '2') throw new Error('sandbox crashed');
-        return new TextEncoder().encode('diff for 1');
+        return {
+          artifact: new TextEncoder().encode('diff for 1'),
+          gate: PASSING_GATE,
+        };
       }),
     });
 

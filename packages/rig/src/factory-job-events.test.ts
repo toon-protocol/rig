@@ -11,6 +11,7 @@ import {
   type RelayEvent,
 } from './factory-job-events.js';
 import type { IncrementSpec } from './factory-job-plan.js';
+import type { GateResult } from './factory-job-gate.js';
 
 const BUYER_PUBKEY =
   '55c2a467881059a942fdc6908b041273885b8720bfa8fcf2f5f9c20a73b0964d';
@@ -189,6 +190,113 @@ describe('buildIncrementOfferEvent (kind:7000 status:partial)', () => {
   it("MUST NOT be mistaken for narration — status is never 'processing'", () => {
     const statusTag = offer.tags.find((t) => t[0] === 'status');
     expect(statusTag?.[1]).toBe('partial');
+  });
+
+  it('carries no gate tag and empty content when no gate ran (e.g. the plan increment)', () => {
+    expect(offer.tags.some((t) => t[0] === 'gate')).toBe(false);
+    expect(offer.content).toBe('');
+  });
+
+  describe('with a gate result (§53 — objective floor)', () => {
+    const passingGate: GateResult = {
+      commit: 'c'.repeat(40),
+      toolchain: { node: '20.11.0', pnpm: '9.1.0' },
+      checks: [
+        { name: 'lint', command: 'eslint .', pass: true },
+        { name: 'typecheck', command: 'pnpm run typecheck', pass: true },
+        { name: 'test', command: 'pnpm -r test --if-present', pass: true },
+        { name: 'build', command: 'pnpm -r build', pass: true },
+      ],
+    };
+
+    it('adds a ["gate", "pass"] tag when every check passed', () => {
+      const withGate = buildIncrementOfferEvent({
+        job: JOB,
+        parentEventId: QUOTE_EVENT_ID,
+        increment: implementIncrement,
+        artifact: {
+          arweaveTxId: 'arTx1',
+          ciphertextSha256: 'a'.repeat(64),
+          conditionHex: 'b'.repeat(64),
+        },
+        gate: passingGate,
+      });
+
+      expect(withGate.tags).toEqual(expect.arrayContaining([['gate', 'pass']]));
+    });
+
+    it('adds a ["gate", "fail"] tag when any check failed', () => {
+      const failingGate: GateResult = {
+        ...passingGate,
+        checks: [
+          ...passingGate.checks.slice(0, -1),
+          { name: 'build', command: 'pnpm -r build', pass: false },
+        ],
+      };
+
+      const withGate = buildIncrementOfferEvent({
+        job: JOB,
+        parentEventId: QUOTE_EVENT_ID,
+        increment: implementIncrement,
+        artifact: {
+          arweaveTxId: 'arTx1',
+          ciphertextSha256: 'a'.repeat(64),
+          conditionHex: 'b'.repeat(64),
+        },
+        gate: failingGate,
+      });
+
+      expect(withGate.tags).toEqual(expect.arrayContaining([['gate', 'fail']]));
+    });
+
+    it('serializes the full reproducible gate result into content, buyer-readable before paying', () => {
+      const withGate = buildIncrementOfferEvent({
+        job: JOB,
+        parentEventId: QUOTE_EVENT_ID,
+        increment: implementIncrement,
+        artifact: {
+          arweaveTxId: 'arTx1',
+          ciphertextSha256: 'a'.repeat(64),
+          conditionHex: 'b'.repeat(64),
+        },
+        gate: passingGate,
+      });
+
+      const content = JSON.parse(withGate.content) as { gate: GateResult };
+      expect(content.gate).toEqual(passingGate);
+    });
+
+    it('throws when the gate result has no checks (not reproducible)', () => {
+      expect(() =>
+        buildIncrementOfferEvent({
+          job: JOB,
+          parentEventId: QUOTE_EVENT_ID,
+          increment: implementIncrement,
+          artifact: {
+            arweaveTxId: 'arTx1',
+            ciphertextSha256: 'a'.repeat(64),
+            conditionHex: 'b'.repeat(64),
+          },
+          gate: { ...passingGate, checks: [] },
+        })
+      ).toThrow(/check/);
+    });
+
+    it('throws when the gate result has no commit (not reproducible)', () => {
+      expect(() =>
+        buildIncrementOfferEvent({
+          job: JOB,
+          parentEventId: QUOTE_EVENT_ID,
+          increment: implementIncrement,
+          artifact: {
+            arweaveTxId: 'arTx1',
+            ciphertextSha256: 'a'.repeat(64),
+            conditionHex: 'b'.repeat(64),
+          },
+          gate: { ...passingGate, commit: '' },
+        })
+      ).toThrow(/commit/);
+    });
   });
 });
 
