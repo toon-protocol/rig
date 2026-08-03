@@ -133,7 +133,7 @@ async function fundIfNeeded(label: string, evmAddress: string): Promise<void> {
   log(`${label}: faucet (evm) responded — ${JSON.stringify(evmResult.response)}`);
 }
 
-function assert(condition: boolean, message: string): void {
+function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`ASSERTION FAILED: ${message}`);
   log(`OK — ${message}`);
 }
@@ -216,9 +216,6 @@ async function main(): Promise<void> {
       beforeEntry?.ok === true,
       'provider claim state read before the run succeeded'
     );
-    if (!beforeEntry || beforeEntry.ok !== true) {
-      throw new Error('unreachable — asserted above');
-    }
 
     // 1. Provider does the (trivial, one-increment) work and encrypts it.
     const plaintext = new TextEncoder().encode(
@@ -247,7 +244,6 @@ async function main(): Promise<void> {
     const paid = await waitForPayment;
     assert(paid, 'the provider observed the increment as paid');
     assert(payment.paid, 'the buyer observed the PREPARE as accepted');
-    if (!payment.paid) throw new Error('unreachable — asserted above');
 
     // 4. Buyer decrypts using ONLY the revealed fulfillment.
     const decrypted = decryptIncrementArtifact(
@@ -268,9 +264,6 @@ async function main(): Promise<void> {
       afterEntry?.ok === true,
       'provider claim state read after the run succeeded'
     );
-    if (!afterEntry || afterEntry.ok !== true) {
-      throw new Error('unreachable — asserted above');
-    }
 
     const availableOf = (entry: Extract<ClaimStateResult, { ok: true }>) =>
       BigInt(entry.available ?? entry.cumulativeClaimed);
