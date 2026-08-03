@@ -1,5 +1,51 @@
 # @toon-protocol/rig
 
+## 3.4.0
+
+### Minor Changes
+
+- 3dfd680: Factory job adapter: turn an accepted job into a factory run that emits paid increments.
+
+  New exports (`@toon-protocol/rig`): `planFactoryJob` prices a job's `bid`
+  across the milestone boundaries `.sandcastle/main.ts` already produces —
+  plan, one increment per implementation ticket (never a single lump-sum
+  implement increment), then review — mirroring `planPush`'s network-free
+  planning split. `executeFactoryJob` runs those milestones through injected
+  hooks, delivers each increment's artifact through the existing `Publisher`
+  (upload + event publish) plus a new `JobDeliveryPort` (encrypt + wait for
+  payment), and halts at the first unpaid increment — the buyer and provider
+  are each exposed for at most one increment. `factory-job-events.ts` adds
+  pure builders/parser for the wire format toon-meta#263 fixed: kind:5097 job
+  request, kind:6097 job result, kind:7000 job feedback (quote / increment
+  offer / narration).
+
+  `JobDeliveryPort`'s real implementation is deferred: `@toon-protocol/client`
+  0.25.1 (latest published) does not yet export the earning-API/hashlock
+  helpers (`encryptArtifact`, `fulfillIncrement`, `createJobMessageHandler`,
+  `getClaimState`) merged to its `main` branch today — wiring those in is a
+  follow-up ticket once a release carries them.
+
+- e59b2e9: Publish a reproducible gate result per increment: the objective floor of toon-meta#262 decision 5.
+
+  New exports (`@toon-protocol/rig`): `GateResult`/`GateCheck` (`factory-job-gate.ts`)
+  record which checks ran, the literal command for each, the commit, and the
+  toolchain versions — enough for a buyer to re-run the gate themselves and
+  get the same answer. `gatePassed` derives the aggregate pass/fail.
+
+  `FactoryJobHooks.implement`/`.review` now return a `FactoryJobWork`
+  (`{ artifact, gate? }`) instead of raw bytes — `plan` carries no gate, since
+  there is no code to lint/typecheck/test/build against a brief.
+  `buildIncrementOfferEvent` (`factory-job-events.ts`) threads the gate result
+  onto the `kind:7000 status:"partial"` offer: a `["gate", "pass"|"fail"]` tag
+  for cheap aggregation into a gate-pass rate (decision 8), and the full
+  reproducible result in `content` — visible to the buyer before they pay, per
+  the issue's "not discovered after payment." Throws if a gate result is
+  missing its commit or check list, since either would make the claim
+  unreproducible rather than verifiable. A failing gate is not a protocol
+  violation — the increment is still offered, just visibly failing; the
+  distinction between "passed the gate" and "is good work" stays with
+  reputation, never this.
+
 ## 3.3.1
 
 ### Patch Changes
