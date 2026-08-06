@@ -56,14 +56,14 @@
  * (`FACTORY_JOB_PROOF_PROVIDER_MNEMONIC` set to the same mnemonic) resumes
  * the channel that identity already holds instead of opening — and locking
  * another `initialDeposit` into — a fresh one every time. This rides the
- * same peer→channel map `rig channel open` uses (`../src/standalone/
- * channel-map.ts`, keyed under `TOON_CLIENT_HOME`, default `~/.toon-client`):
- * `StandalonePublisher.openChannelExplicit` resumes a recorded channel when
- * one exists, else opens on-chain and records it for the next run. The log
- * line below always says which happened, so a rising channel count is never
- * ambiguous (a FRESH open per run is expected/correct ONLY the first time an
- * identity is used, or after RIG_CHANNEL_MAP_FILENAME's record for it is
- * removed).
+ * same peer→channel map `rig channel open` uses
+ * (`../src/standalone/channel-map.ts`, keyed under `TOON_CLIENT_HOME`,
+ * default `~/.toon-client`): `StandalonePublisher.openChannelExplicit`
+ * resumes a recorded channel when one exists, else opens on-chain and records
+ * it for the next run. The log line below always says which happened, so a
+ * rising channel count is never ambiguous (a FRESH open per run is
+ * expected/correct ONLY the first time an identity is used, or after
+ * RIG_CHANNEL_MAP_FILENAME's record for it is removed).
  *
  * GAS NOTE: opening the provider's on-chain settlement channel is a real
  * Base Sepolia transaction and needs Base Sepolia ETH, which the devnet
@@ -225,11 +225,12 @@ async function main(): Promise<void> {
   });
   await buyerClient.start();
 
-  // Peer→channel map (#67): resumes the provider's channel across runs
-  // instead of locking a fresh deposit every time — see the CHANNEL REUSE
-  // module doc above.
+  // Peer→channel map (#67): a publisher wrapped around the already-started
+  // provider client, purely so the channel open goes through the recorded
+  // resume path instead of locking a fresh deposit every run — see the
+  // CHANNEL REUSE module doc above.
   const channelMap = new ChannelMapStore(resolveChannelPaths(process.env));
-  const providerChannel = new StandalonePublisher({
+  const providerPublisher = new StandalonePublisher({
     client: providerClient,
     channelDestination: providerDestination,
     channelMap,
@@ -237,7 +238,7 @@ async function main(): Promise<void> {
   });
 
   try {
-    const openOutcome = await providerChannel.openChannelExplicit();
+    const openOutcome = await providerPublisher.openChannelExplicit();
     const providerChannelId = openOutcome.channelId;
     log(`provider channel: ${describeChannelOpenOutcome(openOutcome)}`);
     const before = await providerClient.getClaimState([providerChannelId]);
@@ -311,10 +312,11 @@ async function main(): Promise<void> {
 
     log('PROOF COMPLETE — one paid factory-job increment, end to end.');
   } finally {
-    // Releases the per-identity advisory lock only (`providerChannel` wraps
-    // the already-constructed `providerClient`, so it does not own — and
-    // will not stop — the client itself; that happens below).
-    await providerChannel.stop();
+    // Releases the per-identity advisory lock only — it leaves the channel
+    // open (that is the whole point of #67), and because the publisher wraps
+    // an externally-constructed `providerClient` it does not own — and will
+    // not stop — the client itself; that happens below.
+    await providerPublisher.stop();
     await providerClient.stop();
     await buyerClient.stop();
   }

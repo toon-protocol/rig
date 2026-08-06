@@ -35,7 +35,7 @@ describe('describeChannelOpenOutcome', () => {
     expect(line).not.toMatch(/resumed/i);
   });
 
-  it('degrades gracefully when the deposit total is not known', () => {
+  it('omits the deposit clause entirely when the deposit total is not known', () => {
     const resumed: ChannelOpenOutcome = {
       channelId: '0xabc',
       resumed: true,
@@ -47,7 +47,12 @@ describe('describeChannelOpenOutcome', () => {
       destination: 'g.toon.provider',
     };
 
-    expect(describeChannelOpenOutcome(resumed)).toContain('0xabc');
-    expect(describeChannelOpenOutcome(fresh)).toContain('0xdef');
+    const resumedLine = describeChannelOpenOutcome(resumed);
+    const freshLine = describeChannelOpenOutcome(fresh);
+
+    expect(resumedLine).toContain('0xabc');
+    expect(resumedLine).not.toContain('deposit');
+    expect(freshLine).toContain('0xdef');
+    expect(freshLine).not.toContain('deposit');
   });
 });
