@@ -89,17 +89,16 @@ Related:
 
 1. **Apply `agent:review` to a PULL REQUEST** (not an issue). The
    `agent-review.yml` runner fires on PR label events.
-2. The runner checks out the PR head, runs the reviewer (opus, 1 iteration) for
-   clarity/standards refinements, and **pushes any commits back onto the PR**.
-   It never merges or closes anything.
+2. The runner checks out `main`, fetches the PR head into a local branch, and
+   runs the reviewer (opus, 1 iteration) along two axes: Standards
+   (clarity/standards refinements, **pushed back onto the PR**) and Spec
+   (reviewing against the target issue resolved from the PR body's
+   `Closes #n`). The reviewer must emit a structured `<review>` verdict
+   (`clean`/`blocking`, toon-meta#275); a malformed verdict fails the job. On
+   `blocking`, the findings are posted as a PR review and the `needs:human`
+   label is applied. It never merges or closes anything.
 3. Rollback: remove the label / cancel the run. Any pushed review commits live
    on the PR branch and can be dropped like any other commit.
-
-> **Verify on first review run:** the standalone-review path (reviewing an
-> existing PR branch rather than a fresh loop branch) is our interpretation of
-> the 0.12.0 engine. Confirm the sandbox checks out the existing head branch and
-> that the reviewer's `git diff` against `main` is non-empty. See
-> `.sandcastle/agent-review-pr.ts` for the exact caveats.
 
 ---
 

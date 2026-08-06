@@ -1,6 +1,6 @@
 {
   "name": "@toon-protocol/rig",
-  "version": "3.5.0",
+  "version": "3.5.1",
   "description": "Git-to-TOON write path core — build git objects and NIP-34 events for the Rig control plane",
   "license": "MIT",
   "author": "Jonathan Green",
@@ -50,8 +50,8 @@
   },
   "dependencies": {
     "@toon-format/toon": "^1.0.0",
-    "@toon-protocol/client": "^0.26.0",
-    "@toon-protocol/core": "^3.1.2",
+    "@toon-protocol/client": "^0.29.0",
+    "@toon-protocol/core": "^3.2.0",
     "nostr-tools": "^2.20.0"
   },
   "optionalDependencies": {
