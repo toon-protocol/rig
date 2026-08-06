@@ -52,6 +52,19 @@
  * and by default a fresh identity is generated so repeat runs never collide
  * on nonce/claim state.
  *
+ * CHANNEL REUSE (#67): a consecutive run against the SAME provider identity
+ * (`FACTORY_JOB_PROOF_PROVIDER_MNEMONIC` set to the same mnemonic) resumes
+ * the channel that identity already holds instead of opening — and locking
+ * another `initialDeposit` into — a fresh one every time. This rides the
+ * same peer→channel map `rig channel open` uses
+ * (`../src/standalone/channel-map.ts`, keyed under `TOON_CLIENT_HOME`,
+ * default `~/.toon-client`): `StandalonePublisher.openChannelExplicit`
+ * resumes a recorded channel when one exists, else opens on-chain and records
+ * it for the next run. The log line below always says which happened, so a
+ * rising channel count is never ambiguous (a FRESH open per run is
+ * expected/correct ONLY the first time an identity is used, or after
+ * RIG_CHANNEL_MAP_FILENAME's record for it is removed).
+ *
  * GAS NOTE: opening the provider's on-chain settlement channel is a real
  * Base Sepolia transaction and needs Base Sepolia ETH, which the devnet
  * faucet's `/api/base-sepolia/request` route drips on a best-effort basis
@@ -73,6 +86,12 @@ import {
   decryptIncrementArtifact,
   payIncrementOffer,
 } from '../src/factory-job-pay.js';
+import { describeChannelOpenOutcome } from '../src/factory-job-proof-log.js';
+import {
+  ChannelMapStore,
+  resolveChannelPaths,
+  StandalonePublisher,
+} from '../src/standalone/index.js';
 
 const PROXY_URL =
   process.env['FACTORY_JOB_PROOF_PROXY_URL'] ??
@@ -206,9 +225,22 @@ async function main(): Promise<void> {
   });
   await buyerClient.start();
 
+  // Peer→channel map (#67): a publisher wrapped around the already-started
+  // provider client, purely so the channel open goes through the recorded
+  // resume path instead of locking a fresh deposit every run — see the
+  // CHANNEL REUSE module doc above.
+  const channelMap = new ChannelMapStore(resolveChannelPaths(process.env));
+  const providerPublisher = new StandalonePublisher({
+    client: providerClient,
+    channelDestination: providerDestination,
+    channelMap,
+    warn: log,
+  });
+
   try {
-    const providerChannelId = await providerClient.openChannel();
-    log(`provider channel: ${providerChannelId}`);
+    const openOutcome = await providerPublisher.openChannelExplicit();
+    const providerChannelId = openOutcome.channelId;
+    log(`provider channel: ${describeChannelOpenOutcome(openOutcome)}`);
     const before = await providerClient.getClaimState([providerChannelId]);
     log(`provider claim state BEFORE: ${JSON.stringify(before)}`);
     const beforeEntry = before[0];
@@ -280,6 +312,11 @@ async function main(): Promise<void> {
 
     log('PROOF COMPLETE — one paid factory-job increment, end to end.');
   } finally {
+    // Releases the per-identity advisory lock only — it leaves the channel
+    // open (that is the whole point of #67), and because the publisher wraps
+    // an externally-constructed `providerClient` it does not own — and will
+    // not stop — the client itself; that happens below.
+    await providerPublisher.stop();
     await providerClient.stop();
     await buyerClient.stop();
   }
