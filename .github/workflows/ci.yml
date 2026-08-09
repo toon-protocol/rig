@@ -18,7 +18,7 @@ jobs:
 
       - name: Require changeset when the publishable package changes
         run: |
-          # @toon-protocol/rig is published; rig-web is private (deployed, not published).
+          # @toon-protocol/rig is published to npm; rig-web is not an npm package.
           PUBLISHABLE="packages/rig"
           changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
           needs_changeset=false
