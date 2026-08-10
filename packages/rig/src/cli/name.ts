@@ -173,14 +173,19 @@ export interface ArnsSdk {
     years?: number;
   }): Promise<bigint>;
   /**
-   * Register (buy) a name; the spawned ANT is owned by the signer's Solana
-   * key. Returns the settling registry transaction id and, when the SDK
-   * surfaces it, the new ANT process id.
+   * Register (buy) a name. `processId`, when supplied, binds the purchase to
+   * an ANT the caller already owns (both `rig name` buy paths spawn their
+   * own ANT first and pass its id here — #79 — so the name is never
+   * registered against the registry's placeholder). Returns the settling
+   * registry transaction id and, when the SDK echoes it back, the ANT
+   * process id actually bound; absent that echo, callers trust the
+   * `processId` they requested.
    */
   buyRecord(args: {
     name: string;
     type: NameType;
     years?: number;
+    processId?: string;
   }): Promise<{ id: string; processId?: string }>;
   /**
    * Spawn a fresh ANT owned by THIS identity's Solana key (`ANT.spawn` —
@@ -239,6 +244,22 @@ export interface LoadArnsOptions {
 
 /** Build a network-targeted {@link ArnsSdk} (tests inject a stub). */
 export type LoadArns = (options: LoadArnsOptions) => Promise<ArnsSdk>;
+
+/**
+ * The Solana System Program id (32 base58 "1"s) — the ar.io registry writes
+ * this into a record's `processId` when no ANT is actually attached. It is a
+ * real, valid program id (not a null the SDK invented), so a buy that never
+ * attaches an ANT looks superficially like it worked unless this exact
+ * string is checked for wherever an ANT process id is accepted or reported
+ * (#79 — a direct buy silently registering against this placeholder is the
+ * bug this constant exists to make impossible to miss).
+ */
+export const ARNS_NULL_PROCESS_ID = '11111111111111111111111111111111';
+
+/** True when `id` denotes "no ANT" — absent or the registry's placeholder. */
+function isNoAntProcessId(id: string | null | undefined): boolean {
+  return id === null || id === undefined || id === ARNS_NULL_PROCESS_ID;
+}
 
 /**
  * The minimum `@ar.io/sdk` release `rig name` is built against: the first
@@ -1323,7 +1344,10 @@ interface NameBuyJson {
   payment: string;
   executed: boolean;
   hint?: string;
-  /** Brokered buy: the ANT this identity spawned and owns (execute only). */
+  /**
+   * The ANT this identity spawned and owns (execute only) — both the
+   * brokered and direct paths spawn one (#79).
+   */
   spawn?: { processId: string; signature: string };
   result?: {
     registryTxId: string;
@@ -1508,21 +1532,51 @@ async function runBuy(
   }
 
   // ── Direct: register with our own funded wallet (the #367 path) ──────────
+  // #79: this identity spawns ITS OWN ANT first (dust SOL, same as the
+  // brokered path) and passes its processId into buyRecord, so the name is
+  // bound to a real ANT from inception instead of collapsing to the
+  // registry's all-ones placeholder.
+  const spawn = await signed.sdk.spawnAnt({ name });
+  if (!flags.json) {
+    io.out(`Spawned ANT ${spawn.processId} (tx ${spawn.signature})`);
+  }
   const receipt = await signed.sdk.buyRecord({
     name,
     type,
     ...(years !== null ? { years } : {}),
+    processId: spawn.processId,
   });
-  const result = {
-    registryTxId: receipt.id,
-    antProcessId: receipt.processId ?? null,
-  };
+  // Trust the processId we asked to attach; only defer to the SDK's own echo
+  // when it explicitly returns one (informational, per the ArnsSdk contract).
+  const attachedProcessId = receipt.processId ?? spawn.processId;
+  const antProcessId = isNoAntProcessId(attachedProcessId)
+    ? null
+    : attachedProcessId;
+  const result = { registryTxId: receipt.id, antProcessId };
+  const spawnInfo = { processId: spawn.processId, signature: spawn.signature };
+
+  if (antProcessId === null) {
+    // The purchase went through — the spend is real and on-chain — but no
+    // ANT is attached, so the name cannot resolve. Exit non-zero and surface
+    // the registry tx either way: never exit 0 on a null ANT (#79), and
+    // never lose the tx that makes the spend recoverable.
+    const hint =
+      `bought "${name}" (registry tx ${result.registryTxId}) but no ANT is ` +
+      'attached — the spend is on-chain and recoverable, but the name ' +
+      'cannot resolve until an ANT is attached to it';
+    if (flags.json) {
+      io.emitJson(buildJson(true, { spawn: spawnInfo, result, hint }));
+    } else {
+      io.err(hint);
+    }
+    return 1;
+  }
 
   if (flags.json) {
-    io.emitJson(buildJson(true, { result }));
+    io.emitJson(buildJson(true, { spawn: spawnInfo, result }));
   } else {
     io.out(`Registered "${name}" — registry tx ${result.registryTxId}`);
-    if (result.antProcessId) io.out(`  ANT process: ${result.antProcessId}`);
+    io.out(`  ANT process: ${result.antProcessId}`);
     io.out(
       `Point it at content with \`rig name set ${name} <txId>\`, then it ` +
         `resolves at https://${name}.<gateway>/`

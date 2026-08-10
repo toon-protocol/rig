@@ -25,6 +25,7 @@ import type { CliIo } from './output.js';
 import {
   ArnsSdkIncompatibleError,
   ArnsSdkUnavailableError,
+  ARNS_NULL_PROCESS_ID,
   defaultLoadArns,
   DVM_PAYMENT_NOTE,
   DEVNET_DVM_URL,
@@ -62,7 +63,12 @@ interface StubCalls {
     type: string;
     years?: number;
   }[];
-  buyRecord: { name: string; type: string; years?: number }[];
+  buyRecord: {
+    name: string;
+    type: string;
+    years?: number;
+    processId?: string;
+  }[];
   spawnAnt: { name: string }[];
   buildSetRecordTransaction: {
     antProcessId: string;
@@ -91,6 +97,17 @@ interface StubOptions {
   targets?: Record<string, { transactionId: string; ttlSeconds: number }>;
   /** Make loadArns throw this (optional-dep-missing path). */
   loadError?: Error;
+  /** Make spawnAnt throw this (aborts before any spend). */
+  spawnError?: Error;
+  /** processId spawnAnt returns (default 'SPAWNED-ANT-ID'). */
+  spawnProcessId?: string;
+  /**
+   * processId buyRecord's receipt echoes back. Defaults to echoing whatever
+   * processId the caller requested (the realistic "attach succeeded" case).
+   * Set to `ARNS_NULL_PROCESS_ID` (or omit request-echoing) to simulate a
+   * registry-side attach failure.
+   */
+  buyRecordProcessId?: string;
 }
 
 function makeStubSdk(options: StubOptions): { sdk: ArnsSdk; calls: StubCalls } {
@@ -129,11 +146,18 @@ function makeStubSdk(options: StubOptions): { sdk: ArnsSdk; calls: StubCalls } {
     },
     buyRecord: async (args) => {
       calls.buyRecord.push(args);
-      return { id: 'registry-tx-1', processId: 'ANT-PROCESS-ID' };
+      return {
+        id: 'registry-tx-1',
+        processId: options.buyRecordProcessId ?? args.processId,
+      };
     },
     spawnAnt: async (args) => {
       calls.spawnAnt.push(args);
-      return { processId: 'SPAWNED-ANT-ID', signature: 'spawn-tx-1' };
+      if (options.spawnError) throw options.spawnError;
+      return {
+        processId: options.spawnProcessId ?? 'SPAWNED-ANT-ID',
+        signature: 'spawn-tx-1',
+      };
     },
     buildSetRecordTransaction: async (args) => {
       calls.buildSetRecordTransaction.push(args);
@@ -353,7 +377,7 @@ describe('rig name', () => {
     expect(h.loadArnsModes).toEqual(['read']);
   });
 
-  it('buy --yes executes buyRecord and reports the registry tx + ANT process', async () => {
+  it('buy --yes spawns our own ANT, registers with its process id, and reports it', async () => {
     const h = makeHarness(env, cwd, { stub: { cost: 1_000_000n } });
     const code = await runName(
       ['buy', 'mysite', '--permabuy', '--yes', '--json'],
@@ -366,17 +390,69 @@ describe('rig name', () => {
       type: 'permabuy',
       years: null,
       executed: true,
+      spawn: { processId: 'SPAWNED-ANT-ID', signature: 'spawn-tx-1' },
     });
     expect(doc['result']).toMatchObject({
       registryTxId: 'registry-tx-1',
-      antProcessId: 'ANT-PROCESS-ID',
+      antProcessId: 'SPAWNED-ANT-ID',
     });
     expect(h.calls.getTokenCost).toEqual([
       { intent: 'Buy-Name', name: 'mysite', type: 'permabuy' },
     ]);
-    expect(h.calls.buyRecord).toEqual([{ name: 'mysite', type: 'permabuy' }]);
+    // Spawns exactly once, and the spawned processId flows into buyRecord.
+    expect(h.calls.spawnAnt).toEqual([{ name: 'mysite' }]);
+    expect(h.calls.buyRecord).toEqual([
+      { name: 'mysite', type: 'permabuy', processId: 'SPAWNED-ANT-ID' },
+    ]);
     // The quote runs signerless; write plumbing is built only at execute time.
     expect(h.loadArnsModes).toEqual(['read', 'write']);
+  });
+
+  it('a spawn failure aborts before any spend (buyRecord never called)', async () => {
+    const h = makeHarness(env, cwd, {
+      stub: { spawnError: new Error('ANT.spawn: insufficient SOL for rent') },
+    });
+    const code = await runName(
+      ['buy', 'mysite', '--yes', '--json'],
+      h.deps
+    );
+    expect(code).toBe(1);
+    const doc = JSON.parse(h.out.join('\n')) as Record<string, unknown>;
+    expect(String(doc['detail'])).toContain('insufficient SOL for rent');
+    expect(h.calls.spawnAnt).toHaveLength(1);
+    expect(h.calls.buyRecord).toHaveLength(0);
+  });
+
+  it('a buy that ends with no ANT attached (registry echoes the placeholder) exits non-zero and still carries the registry tx', async () => {
+    const h = makeHarness(env, cwd, {
+      stub: { buyRecordProcessId: ARNS_NULL_PROCESS_ID },
+    });
+    const code = await runName(
+      ['buy', 'mysite', '--yes', '--json'],
+      h.deps
+    );
+    expect(code).toBe(1);
+    // The spend happened — buyRecord ran — so the tx must survive in the
+    // payload even though the buy is reported as a failure.
+    expect(h.calls.buyRecord).toHaveLength(1);
+    const doc = JSON.parse(h.out.join('\n')) as Record<string, unknown>;
+    expect(doc['result']).toMatchObject({
+      registryTxId: 'registry-tx-1',
+      antProcessId: null,
+    });
+    expect(String(doc['hint'])).toContain('registry-tx-1');
+    expect(String(doc['hint'])).toContain('no ANT is attached');
+  });
+
+  it('the placeholder id is rejected as "no ANT" even when spawnAnt itself returns it', async () => {
+    const h = makeHarness(env, cwd, {
+      interactive: false,
+      stub: { spawnProcessId: ARNS_NULL_PROCESS_ID },
+    });
+    const code = await runName(['buy', 'mysite', '--yes'], h.deps);
+    expect(code).toBe(1);
+    expect(h.err.join('\n')).toContain('no ANT is attached');
+    expect(h.err.join('\n')).toContain('registry-tx-1');
   });
 
   it('buy (human) states mARIO-on-Solana, NOT ILP, before the confirm', async () => {
@@ -392,7 +468,7 @@ describe('rig name', () => {
     expect(text).toContain('NOT through TOON ILP payment channels');
     expect(text).toContain('3 years');
     expect(h.calls.buyRecord).toEqual([
-      { name: 'mysite', type: 'lease', years: 3 },
+      { name: 'mysite', type: 'lease', years: 3, processId: 'SPAWNED-ANT-ID' },
     ]);
   });
 
@@ -878,7 +954,7 @@ describe('rig name', () => {
     expect(h.calls.buildSetRecordTransaction).toHaveLength(0);
   });
 
-  it('a plain buy (no --via) never spawns or submits a DVM job', async () => {
+  it('a plain buy (no --via) spawns its own ANT but never submits a DVM job', async () => {
     const h = makeHarness(env, cwd);
     const code = await runName(
       ['buy', 'mysite', '--yes', '--json'],
@@ -886,7 +962,7 @@ describe('rig name', () => {
     );
     expect(code).toBe(0);
     expect(h.calls.buyRecord).toHaveLength(1);
-    expect(h.calls.spawnAnt).toHaveLength(0);
+    expect(h.calls.spawnAnt).toHaveLength(1);
     expect(h.dvmJobs).toHaveLength(0);
     const doc = JSON.parse(h.out.join('\n')) as Record<string, unknown>;
     expect(doc['via']).toBeNull();
