@@ -1546,8 +1546,9 @@ async function runBuy(
     ...(years !== null ? { years } : {}),
     processId: spawn.processId,
   });
-  // Trust the processId we asked to attach; only defer to the SDK's own echo
-  // when it explicitly returns one (informational, per the ArnsSdk contract).
+  // The ANT actually bound: the SDK's echo when it returns one, otherwise the
+  // id we asked it to attach (4.0.3's Solana `buyRecord` resolves to `{ id }`
+  // alone, so in practice this is the ANT we just spawned).
   const attachedProcessId = receipt.processId ?? spawn.processId;
   const antProcessId = isNoAntProcessId(attachedProcessId)
     ? null

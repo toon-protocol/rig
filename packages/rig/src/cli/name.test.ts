@@ -412,10 +412,7 @@ describe('rig name', () => {
     const h = makeHarness(env, cwd, {
       stub: { spawnError: new Error('ANT.spawn: insufficient SOL for rent') },
     });
-    const code = await runName(
-      ['buy', 'mysite', '--yes', '--json'],
-      h.deps
-    );
+    const code = await runName(['buy', 'mysite', '--yes', '--json'], h.deps);
     expect(code).toBe(1);
     const doc = JSON.parse(h.out.join('\n')) as Record<string, unknown>;
     expect(String(doc['detail'])).toContain('insufficient SOL for rent');
@@ -427,10 +424,7 @@ describe('rig name', () => {
     const h = makeHarness(env, cwd, {
       stub: { buyRecordProcessId: ARNS_NULL_PROCESS_ID },
     });
-    const code = await runName(
-      ['buy', 'mysite', '--yes', '--json'],
-      h.deps
-    );
+    const code = await runName(['buy', 'mysite', '--yes', '--json'], h.deps);
     expect(code).toBe(1);
     // The spend happened — buyRecord ran — so the tx must survive in the
     // payload even though the buy is reported as a failure.
