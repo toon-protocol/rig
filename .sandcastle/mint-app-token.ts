@@ -70,7 +70,8 @@ function nameWithOwner(): string {
  */
 export function appJwt(appId: string, privateKey: string): string {
   const now = Math.floor(Date.now() / 1000);
-  const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  const b64 = (o: unknown) =>
+    Buffer.from(JSON.stringify(o)).toString("base64url");
   const unsigned = `${b64({ alg: "RS256", typ: "JWT" })}.${b64({
     iat: now - 60,
     exp: now + 9 * 60,
@@ -82,12 +83,16 @@ export function appJwt(appId: string, privateKey: string): string {
   // APP_PRIVATE_KEY is a PEM. GitHub secrets preserve newlines, but a key that
   // has been round-tripped through a shell can arrive with literal `\n`;
   // accept both so a mis-pasted secret fails loudly at the API call rather
-  // than with an opaque OpenSSL error here.
-  const pem = privateKey.includes("\\n") ? privateKey.replace(/\\n/g, "\n") : privateKey;
+  // than with an opaque OpenSSL error here. A no-op on a real-newline PEM.
+  const pem = privateKey.replace(/\\n/g, "\n");
   return `${unsigned}.${signer.sign(pem, "base64url")}`;
 }
 
-async function githubJson(path: string, jwt: string, method: "GET" | "POST"): Promise<unknown> {
+async function githubJson(
+  path: string,
+  jwt: string,
+  method: "GET" | "POST",
+): Promise<unknown> {
   const res = await fetch(`https://api.github.com${path}`, {
     method,
     headers: {
@@ -101,14 +106,21 @@ async function githubJson(path: string, jwt: string, method: "GET" | "POST"): Pr
     // Body is App-level metadata, never the installation token itself (that
     // is only returned on success), so it is safe to surface.
     throw new Error(
-      `GitHub API ${method} ${path} failed: ${res.status} ${res.statusText}\n${await res.text()}`,
+      `GitHub API ${method} ${path} failed: ${res.status} ` +
+        `${res.statusText}\n${await res.text()}`,
     );
   }
   return res.json();
 }
 
 /**
- * Mint a fresh installation token scoped to this repository.
+ * Mint a fresh token for the App installation that covers this repository.
+ *
+ * Scope note: no `repositories`/`permissions` narrowing is sent with the
+ * request, so the token carries the installation's full grant rather than
+ * being pinned to this repo alone. It is never handed to an agent — see
+ * agent-implement-issue.ts's pushBranch(), which stages it for the duration
+ * of one `git push` and deletes it in a `finally`.
  *
  * Requires `APP_ID` + `APP_PRIVATE_KEY` on the host. Falls back to the
  * ambient `GH_TOKEN` when they are absent. Throws if neither is available,
@@ -132,13 +144,18 @@ export async function mintAppToken(): Promise<MintedToken> {
   const jwt = appJwt(appId, privateKey);
 
   // The App is installed org-wide; ask GitHub which installation covers this
-  // repo rather than hard-coding an installation id.
-  const installation = (await githubJson(`/repos/${nameWithOwner()}/installation`, jwt, "GET")) as {
-    id?: number;
-  };
+  // repo rather than hard-coding an installation id. Resolved once — the
+  // no-`GITHUB_REPOSITORY` path shells out to `gh`.
+  const repo = nameWithOwner();
+  const installation = (await githubJson(
+    `/repos/${repo}/installation`,
+    jwt,
+    "GET",
+  )) as { id?: number };
   if (typeof installation.id !== "number") {
     throw new Error(
-      `GitHub returned no installation id for ${nameWithOwner()} — is the App installed on this repo?`,
+      `GitHub returned no installation id for ${repo} — is the App ` +
+        "installed on this repo?",
     );
   }
 
@@ -148,7 +165,9 @@ export async function mintAppToken(): Promise<MintedToken> {
     "POST",
   )) as { token?: string };
   if (!minted.token) {
-    throw new Error("GitHub returned an installation-token response with no `token` field.");
+    throw new Error(
+      "GitHub returned an installation-token response with no `token` field.",
+    );
   }
 
   return { token: minted.token, source: "app" };

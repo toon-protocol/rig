@@ -23,8 +23,9 @@ describe('appJwt', () => {
 
     const payload = decodeSegment(payloadSeg) as { iss: string; iat: number; exp: number };
     assert.equal(payload.iss, '123456');
-    // iat backdated ~60s for clock skew; exp is iat + 9 minutes, i.e. ~10
-    // minutes after `now` (which itself must stay under GitHub's 10-minute cap).
+    // iat is backdated ~60s for clock skew and exp is 9 minutes ahead of
+    // `now`, so the claimed iat..exp span is exactly 10 minutes while the
+    // token's remaining life stays under GitHub's 10-minute cap.
     const now = Math.floor(Date.now() / 1000);
     assert.ok(payload.iat <= now - 55 && payload.iat >= now - 65);
     assert.equal(payload.exp - payload.iat, 10 * 60);
