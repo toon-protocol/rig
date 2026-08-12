@@ -13,8 +13,6 @@ import {
   type NostrEvent,
   parsePR,
   parsePRUpdate,
-  parseIssue,
-  resolvePRStatus,
   resolvePRTip,
 } from './nip34-parsers.js';
 
