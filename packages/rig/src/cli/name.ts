@@ -118,7 +118,12 @@ export type ArioNetwork = 'mainnet' | 'devnet';
 
 /** One name's current registry record (the free `status` read). */
 export interface ArnsRecordView {
-  /** ANT (Arweave Name Token) process id that owns/serves the name. */
+  /**
+   * ANT (Arweave Name Token) process id that owns/serves the name, or `null`
+   * when no ANT is attached. The registry's all-ones placeholder
+   * ({@link ARNS_NULL_PROCESS_ID}) is normalized to `null` at this seam — a
+   * non-null value here always means a real ANT (#79).
+   */
   processId: string | null;
   /** `lease` or `permabuy`, when known. */
   type: NameType | null;
@@ -173,14 +178,19 @@ export interface ArnsSdk {
     years?: number;
   }): Promise<bigint>;
   /**
-   * Register (buy) a name; the spawned ANT is owned by the signer's Solana
-   * key. Returns the settling registry transaction id and, when the SDK
-   * surfaces it, the new ANT process id.
+   * Register (buy) a name. `processId`, when supplied, binds the purchase to
+   * an ANT the caller already owns (both `rig name` buy paths spawn their
+   * own ANT first and pass its id here — #79 — so the name is never
+   * registered against the registry's placeholder). Returns the settling
+   * registry transaction id and, when the SDK echoes it back, the ANT
+   * process id actually bound; absent that echo, callers trust the
+   * `processId` they requested.
    */
   buyRecord(args: {
     name: string;
     type: NameType;
     years?: number;
+    processId?: string;
   }): Promise<{ id: string; processId?: string }>;
   /**
    * Spawn a fresh ANT owned by THIS identity's Solana key (`ANT.spawn` —
@@ -239,6 +249,30 @@ export interface LoadArnsOptions {
 
 /** Build a network-targeted {@link ArnsSdk} (tests inject a stub). */
 export type LoadArns = (options: LoadArnsOptions) => Promise<ArnsSdk>;
+
+/**
+ * The Solana System Program id (32 base58 "1"s) — the ar.io registry writes
+ * this into a record's `processId` when no ANT is actually attached. It is a
+ * real, valid program id (not a null the SDK invented), so a buy that never
+ * attaches an ANT looks superficially like it worked unless this exact
+ * string is checked for wherever an ANT process id is accepted or reported
+ * (#79 — a direct buy silently registering against this placeholder is the
+ * bug this constant exists to make impossible to miss).
+ */
+export const ARNS_NULL_PROCESS_ID = '11111111111111111111111111111111';
+
+/**
+ * Normalize an ANT process id: the real id, or `null` when no ANT is attached
+ * (absent, or the registry's all-ones placeholder). Every command that accepts
+ * or reports an ANT process id goes through this, so the placeholder can never
+ * be mistaken for a working attachment (#79 AC4).
+ */
+function antProcessIdOf(id: string | null | undefined): string | null {
+  if (id === null || id === undefined || id === ARNS_NULL_PROCESS_ID) {
+    return null;
+  }
+  return id;
+}
 
 /**
  * The minimum `@ar.io/sdk` release `rig name` is built against: the first
@@ -625,7 +659,11 @@ export const defaultLoadArns: LoadArns = async (options) => {
       // Solana-native records carry cluster unix timestamps in SECONDS; the
       // seam contract (and the human expiry render) is ms epoch.
       return {
-        processId: raw.processId ?? null,
+        // #79 AC4: the registry writes the all-ones placeholder when no ANT
+        // is attached. The seam contract is "a process id or null", so the
+        // placeholder is normalized to null right here — every caller then
+        // sees "no ANT" instead of a valid-looking System Program address.
+        processId: antProcessIdOf(raw.processId),
         type: raw.type ?? null,
         ...(raw.startTimestamp !== undefined
           ? { startTimestamp: raw.startTimestamp * 1000 }
@@ -1323,7 +1361,10 @@ interface NameBuyJson {
   payment: string;
   executed: boolean;
   hint?: string;
-  /** Brokered buy: the ANT this identity spawned and owns (execute only). */
+  /**
+   * The ANT this identity spawned and owns (execute only) — both the
+   * brokered and direct paths spawn one (#79).
+   */
   spawn?: { processId: string; signature: string };
   result?: {
     registryTxId: string;
@@ -1508,21 +1549,50 @@ async function runBuy(
   }
 
   // ── Direct: register with our own funded wallet (the #367 path) ──────────
+  // #79: this identity spawns ITS OWN ANT first (dust SOL, same as the
+  // brokered path) and passes its processId into buyRecord, so the name is
+  // bound to a real ANT from inception instead of collapsing to the
+  // registry's all-ones placeholder.
+  const spawn = await signed.sdk.spawnAnt({ name });
+  if (!flags.json) {
+    io.out(`Spawned ANT ${spawn.processId} (tx ${spawn.signature})`);
+  }
   const receipt = await signed.sdk.buyRecord({
     name,
     type,
     ...(years !== null ? { years } : {}),
+    processId: spawn.processId,
   });
-  const result = {
-    registryTxId: receipt.id,
-    antProcessId: receipt.processId ?? null,
-  };
+  // The ANT actually bound: the SDK's echo when it returns one, otherwise the
+  // id we asked it to attach (4.0.3's Solana `buyRecord` resolves to `{ id }`
+  // alone, so in practice this is the ANT we just spawned). Normalized like
+  // every other ANT id, so the placeholder reads as "no ANT" here too.
+  const antProcessId = antProcessIdOf(receipt.processId ?? spawn.processId);
+  const result = { registryTxId: receipt.id, antProcessId };
+  const spawnInfo = { processId: spawn.processId, signature: spawn.signature };
+
+  if (antProcessId === null) {
+    // The purchase went through — the spend is real and on-chain — but no
+    // ANT is attached, so the name cannot resolve. Exit non-zero and surface
+    // the registry tx either way: never exit 0 on a null ANT (#79), and
+    // never lose the tx that makes the spend recoverable.
+    const hint =
+      `bought "${name}" (registry tx ${result.registryTxId}) but no ANT is ` +
+      'attached — the spend is on-chain and recoverable, but the name ' +
+      'cannot resolve until an ANT is attached to it';
+    if (flags.json) {
+      io.emitJson(buildJson(true, { spawn: spawnInfo, result, hint }));
+    } else {
+      io.err(hint);
+    }
+    return 1;
+  }
 
   if (flags.json) {
-    io.emitJson(buildJson(true, { result }));
+    io.emitJson(buildJson(true, { spawn: spawnInfo, result }));
   } else {
     io.out(`Registered "${name}" — registry tx ${result.registryTxId}`);
-    if (result.antProcessId) io.out(`  ANT process: ${result.antProcessId}`);
+    io.out(`  ANT process: ${result.antProcessId}`);
     io.out(
       `Point it at content with \`rig name set ${name} <txId>\`, then it ` +
         `resolves at https://${name}.<gateway>/`
@@ -1579,13 +1649,25 @@ async function runSet(
   );
 
   const record = await ctx.sdk.getArNSRecord({ name });
-  if (!record || !record.processId) {
+  if (!record) {
     throw new Error(
       `no ArNS record for "${name}" on ${ctx.network} — buy it first with ` +
         `\`rig name buy ${name}\` (or check \`rig name status ${name}\`)`
     );
   }
-  const antProcessId = record.processId;
+  const antProcessId = antProcessIdOf(record.processId);
+  if (antProcessId === null) {
+    // #79 AC4: the placeholder is "no ANT", not a process id. Signing a
+    // record update against it would target the Solana System Program and
+    // cannot succeed, so refuse here rather than build and sign a doomed tx.
+    throw new Error(
+      `"${name}" is registered on ${ctx.network} but has NO ANT attached ` +
+        `(the registry placeholder ${ARNS_NULL_PROCESS_ID}) — \`rig name set\` ` +
+        `needs a real ANT process, so there is nothing to write to. Check ` +
+        `\`rig name status ${name}\`; the name has to be re-bound to an ANT ` +
+        `before it can resolve.`
+    );
+  }
   const undername = flags.undername ?? null;
   const via = flags.via ?? null;
 
@@ -1754,6 +1836,12 @@ interface NameStatusJson {
   network: ArioNetwork;
   processId: string | null;
   registered: boolean;
+  /**
+   * #79 AC4: the name is registered but no ANT is attached (the registry's
+   * all-ones placeholder) — it cannot resolve, and `rig name set` cannot fix
+   * it. Never reported as success: status also exits non-zero in this case.
+   */
+  antMissing: boolean;
   identity: IdentityReport;
   solanaAddress: string;
   record: {
@@ -1765,6 +1853,8 @@ interface NameStatusJson {
   } | null;
   /** ANT record targets keyed by undername (`@` = base name). */
   targets: Record<string, AntRecordTarget> | null;
+  /** Set when the status is not a clean bill of health (`antMissing`). */
+  hint?: string;
 }
 
 async function runStatus(
@@ -1782,9 +1872,19 @@ async function runStatus(
   );
 
   const record = await ctx.sdk.getArNSRecord({ name });
+  // #79 AC4: never report the registry's placeholder as the name's ANT. A
+  // registered name with no ANT attached cannot resolve, so it is a failure
+  // to be diagnosed — not a healthy registration.
+  const antProcessId = antProcessIdOf(record?.processId);
+  const antMissing = record !== null && antProcessId === null;
+  const antMissingHint =
+    `"${name}" is registered on ${ctx.network} but has NO ANT attached ` +
+    `(the registry placeholder ${ARNS_NULL_PROCESS_ID}) — it cannot resolve, ` +
+    `and \`rig name set\` cannot write records against it. The name has to be ` +
+    `re-bound to an ANT.`;
   let targets: Record<string, AntRecordTarget> | null = null;
-  if (record?.processId) {
-    const ant = await ctx.sdk.ant(record.processId);
+  if (antProcessId !== null) {
+    const ant = await ctx.sdk.ant(antProcessId);
     targets = await ant.getRecords();
   }
 
@@ -1796,11 +1896,12 @@ async function runStatus(
       network: ctx.network,
       processId: ctx.processId ?? null,
       registered: record !== null,
+      antMissing,
       identity: ctx.identity,
       solanaAddress: ctx.solanaAddress,
       record: record
         ? {
-            antProcessId: record.processId,
+            antProcessId,
             type: record.type,
             startTimestamp: record.startTimestamp ?? null,
             endTimestamp: record.endTimestamp ?? null,
@@ -1808,8 +1909,9 @@ async function runStatus(
           }
         : null,
       targets,
+      ...(antMissing ? { hint: antMissingHint } : {}),
     } satisfies NameStatusJson);
-    return 0;
+    return antMissing ? 1 : 0;
   }
 
   io.out(`ArNS name "${name}" on ${ctx.network}:`);
@@ -1818,7 +1920,7 @@ async function runStatus(
     io.out(renderIdentityLine(ctx.identity));
     return 0;
   }
-  io.out(`  ANT process: ${record.processId ?? '(unknown)'}`);
+  io.out(`  ANT process: ${antProcessId ?? 'NONE — no ANT is attached'}`);
   io.out(`  Type: ${record.type ?? '(unknown)'}`);
   if (record.type === 'permabuy') {
     io.out('  Expiry: never (permabuy)');
@@ -1836,10 +1938,16 @@ async function runStatus(
         `    ${label} → ${target.transactionId} (ttl ${target.ttlSeconds}s)`
       );
     }
+  } else if (antMissing) {
+    io.out('  Records: none — there is no ANT to hold them.');
   } else {
     io.out('  Records: none set — point one with `rig name set`.');
   }
   io.out(renderIdentityLine(ctx.identity));
+  if (antMissing) {
+    io.err(antMissingHint);
+    return 1;
+  }
   return 0;
 }
 
