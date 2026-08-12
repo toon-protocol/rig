@@ -93,8 +93,21 @@ export interface AnnouncedCapability {
 export interface AnnouncedPeer {
   /** Announcing identity (event author, hex). */
   pubkey: string;
-  /** Parsed + validated `IlpPeerInfo` (rig's core 3.x parser). */
-  info: IlpPeerInfo;
+  /**
+   * Parsed + validated `IlpPeerInfo` (rig's core 3.x parser), widened with
+   * the optional operator-notice field (toon-protocol/toon#183, #78).
+   * `notice` stays `unknown` rather than a typed field: no PUBLISHED
+   * `@toon-protocol/core` yet round-trips it through `parseIlpPeerInfo`
+   * (toon#183 shipped on core's `main`, but toon#184's actual npm release
+   * hadn't landed as of 2026-08-12 — registry `latest` was still 3.3.0), so
+   * today `notice` is always `undefined` here regardless of what an
+   * announce carries. The pinned range (`^3.2.0` in package.json) already
+   * accepts a future 3.4.x, so a routine `pnpm install` after that publish
+   * starts populating this with zero further rig changes — see
+   * `./notice.ts`, which treats the value as untrusted input and validates
+   * it itself either way.
+   */
+  info: IlpPeerInfo & { notice?: unknown };
   /** Out-of-band `routes` content field, when present and well-formed. */
   routes?: AnnouncedRoutes;
   /** Out-of-band `capabilities` content field (route prices), when valid. */
