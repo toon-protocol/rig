@@ -11,7 +11,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AnnouncedPeer } from './network-bootstrap.js';
 import {
@@ -156,15 +156,6 @@ describe('formatNoticeLines', () => {
     expect(actionLines.some((l) => l.includes(notice.summary))).toBe(true);
     expect(actionLines.some((l) => l.includes(notice.url))).toBe(true);
   });
-
-  it('never renders anything beyond the url string itself (no fetch, no extra content)', () => {
-    const notice: OperatorNotice = {
-      ...VALID_NOTICE,
-      severity: 'action-required',
-    };
-    const lines = formatNoticeLines(notice).join('\n');
-    expect(lines).toContain(notice.url);
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -252,6 +243,27 @@ describe('showOperatorNoticeOnce', () => {
     showOperatorNoticeOnce(peer, [SEED_PUBKEY], store, warn);
     expect(warnings.length).toBeGreaterThan(0);
     expect(warnings.join('\n')).toContain(VALID_NOTICE.summary);
+  });
+
+  it('prints the operator-controlled url but never fetches it', () => {
+    const fetchSpy = vi.fn();
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = fetchSpy as unknown as typeof globalThis.fetch;
+    try {
+      showOperatorNoticeOnce(
+        peerWithNotice(SEED_PUBKEY, {
+          ...VALID_NOTICE,
+          severity: 'action-required',
+        }),
+        [SEED_PUBKEY],
+        new NoticeStore({ path }),
+        warn
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(warnings.join('\n')).toContain(VALID_NOTICE.url);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('never prints the same id twice, even across separate command invocations', () => {

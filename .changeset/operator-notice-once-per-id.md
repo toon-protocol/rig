@@ -24,6 +24,6 @@ version carries it yet (toon#184 landed the release changeset, not the
 `npm publish`; registry `latest` was still 3.3.0 as of 2026-08-12).
 `AnnouncedPeer.info.notice` is widened as `unknown` and validated by rig
 itself for exactly this reason — today it is always `undefined` regardless
-of what a live announce carries. The existing `^3.2.0` dependency range
-already accepts a future 3.4.x, so this starts firing for real on the next
-routine `pnpm install` after core publishes, with no further rig changes.
+of what a live announce carries. Turning it on after core publishes takes a
+dependency bump (`pnpm update @toon-protocol/core` — the `^3.2.0` range
+already accepts a 3.4.x, but the lockfile pins 3.2.0) and no rig changes.

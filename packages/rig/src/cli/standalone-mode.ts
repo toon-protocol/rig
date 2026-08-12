@@ -1114,12 +1114,11 @@ export async function createStandaloneContext(
             `rig: no payment-peer announce (kind:10032) found on ${relayUrl} — ` +
               'falling back to the genesis peer seed'
           );
-        } else {
-          // #78: print once per notice id, and only from the trusted
-          // (genesis-seed) payment peer — no extra round trip, this reuses
-          // the discovery above.
-          showOperatorNoticeOnce(announce, seedPubkeys, noticeStore, warn);
         }
+        // #78: prints once per notice id, and only when the picked payment
+        // peer is a trusted (genesis-seed) announce — a no-op otherwise. No
+        // extra round trip: this reuses the discovery above.
+        showOperatorNoticeOnce(announce, seedPubkeys, noticeStore, warn);
       } catch (err) {
         warn(
           `rig: announce discovery on ${relayUrl} failed ` +

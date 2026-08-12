@@ -11,14 +11,15 @@
  * exists on `@toon-protocol/core`'s `main` (toon#183, closed), but no
  * published core version carries it yet: toon#184 (closed) landed the
  * release changeset but not the actual `npm publish` — registry `latest`
- * was still 3.3.0 as of 2026-08-12. `AnnouncedPeer.info.notice` is
- * therefore always `undefined` today regardless of what a live announce
- * carries (see the widening note in `./network-bootstrap.ts`), so nothing
- * below can be exercised end-to-end against a real relay yet — the tests
- * construct `AnnouncedPeer` fixtures directly, the same way
- * `pickPaymentPeer`'s own tests do. Once core publishes, the existing
- * `^3.2.0` dependency range already accepts it, so this starts firing for
- * real on the next routine `pnpm install` — no further rig changes needed.
+ * was still 3.3.0 as of 2026-08-12, and `parseIlpPeerInfo` there builds its
+ * result field by field, so an announce's `notice` is dropped on the way
+ * in. `AnnouncedPeer.info.notice` is therefore always `undefined` today
+ * (see the widening note in `./network-bootstrap.ts`) and nothing below can
+ * be exercised end-to-end against a real relay yet — the tests construct
+ * `AnnouncedPeer` fixtures directly, the same way `pickPaymentPeer`'s own
+ * tests do. Turning it on once core publishes takes a dependency bump
+ * (`pnpm update @toon-protocol/core`; the `^3.2.0` range already accepts a
+ * 3.4.x, but the lockfile pins 3.2.0) and no rig code changes.
  *
  * Seen-notice ids persist next to rig's other client state under
  * `TOON_CLIENT_HOME`, sibling to the channel map (`rig-channels.json`) and
