@@ -93,8 +93,16 @@ export interface AnnouncedCapability {
 export interface AnnouncedPeer {
   /** Announcing identity (event author, hex). */
   pubkey: string;
-  /** Parsed + validated `IlpPeerInfo` (rig's core 3.x parser). */
-  info: IlpPeerInfo;
+  /**
+   * Parsed + validated `IlpPeerInfo` (rig's core 3.x parser), widened with
+   * the optional operator-notice field (toon-protocol/toon#183, #78).
+   * `notice` is typed `unknown`, not a schema field: the installed core's
+   * `parseIlpPeerInfo` builds its result field by field, so `notice` only
+   * appears here once core publishes it (see `./notice.ts`'s module doc for
+   * that status). `./notice.ts` validates the value as untrusted input
+   * either way.
+   */
+  info: IlpPeerInfo & { notice?: unknown };
   /** Out-of-band `routes` content field, when present and well-formed. */
   routes?: AnnouncedRoutes;
   /** Out-of-band `capabilities` content field (route prices), when valid. */

@@ -86,6 +86,11 @@ import {
   topologyCacheTtlMs,
 } from '../standalone/topology-cache.js';
 import {
+  NOTICE_STORE_FILENAME,
+  NoticeStore,
+  showOperatorNoticeOnce,
+} from '../standalone/notice.js';
+import {
   DISCOVERY_TIMEOUT_MS,
   MinaChannelUnderivableError,
   SolanaChannelUnderivableError,
@@ -1055,6 +1060,12 @@ export async function createStandaloneContext(
     ),
   });
 
+  // ── Operator notices (#78): seen-id persistence, sibling to the channel
+  // map and topology cache above.
+  const noticeStore = new NoticeStore({
+    path: join(dir, NOTICE_STORE_FILENAME),
+  });
+
   const resolveLiveTopology = async (): Promise<NetworkTopology> => {
     // ── Live announce discovery ────────────────────────────────────────────
     // Skipped when explicit config already pins the whole payment topology
@@ -1096,13 +1107,18 @@ export async function createStandaloneContext(
         const peers = await discoverAnnouncedPeers(relayUrl, {
           timeoutMs: DISCOVERY_TIMEOUT_MS,
         });
-        announce = pickPaymentPeer(peers, genesisSeedPubkeys());
+        const seedPubkeys = genesisSeedPubkeys();
+        announce = pickPaymentPeer(peers, seedPubkeys);
         if (!announce) {
           warn(
             `rig: no payment-peer announce (kind:10032) found on ${relayUrl} — ` +
               'falling back to the genesis peer seed'
           );
         }
+        // #78: prints once per notice id, and only when the picked payment
+        // peer is a trusted (genesis-seed) announce — a no-op otherwise. No
+        // extra round trip: this reuses the discovery above.
+        showOperatorNoticeOnce(announce, seedPubkeys, noticeStore, warn);
       } catch (err) {
         warn(
           `rig: announce discovery on ${relayUrl} failed ` +
