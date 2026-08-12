@@ -559,6 +559,34 @@ describe('rig name', () => {
     expect(h.calls.setBaseNameRecord).toHaveLength(0);
   });
 
+  it('set on a placeholder-registered name (no ANT) errors — nothing signed or written', async () => {
+    const h = makeHarness(env, cwd, {
+      stub: {
+        record: {
+          processId: ARNS_NULL_PROCESS_ID,
+          type: 'lease',
+          startTimestamp: 1_700_000_000_000,
+          endTimestamp: 1_800_000_000_000,
+          undernameLimit: 10,
+        },
+      },
+    });
+    const code = await runName(
+      ['set', 'toonprotocol', TX_ID, '--yes', '--json'],
+      h.deps
+    );
+    expect(code).toBe(1);
+    const doc = JSON.parse(h.out.join('\n')) as Record<string, unknown>;
+    expect(doc).toMatchObject({ command: 'name', error: 'error' });
+    expect(String(doc['detail'])).toContain('NO ANT attached');
+    expect(String(doc['detail'])).toContain(ARNS_NULL_PROCESS_ID);
+    // The placeholder is the Solana System Program — never build or sign
+    // against it, and never claim the write happened.
+    expect(h.calls.antFor).toHaveLength(0);
+    expect(h.calls.buildSetRecordTransaction).toHaveLength(0);
+    expect(h.calls.setBaseNameRecord).toHaveLength(0);
+  });
+
   it('set needs a txId (exit 2)', async () => {
     const h = makeHarness(env, cwd);
     expect(await runName(['set', 'mysite'], h.deps)).toBe(2);
@@ -659,6 +687,53 @@ describe('rig name', () => {
     const code = await runName(['status', 'ghost'], h.deps);
     expect(code).toBe(0);
     expect(h.out.join('\n')).toContain('not registered');
+  });
+
+  it('status never reports the placeholder as the ANT — exits non-zero (--json)', async () => {
+    const h = makeHarness(env, cwd, {
+      stub: {
+        record: {
+          processId: ARNS_NULL_PROCESS_ID,
+          type: 'lease',
+          startTimestamp: 1_700_000_000_000,
+          endTimestamp: 1_800_000_000_000,
+          undernameLimit: 10,
+        },
+      },
+    });
+    const code = await runName(['status', 'toonprotocol', '--json'], h.deps);
+    expect(code).toBe(1);
+    const doc = JSON.parse(h.out.join('\n')) as Record<string, unknown>;
+    expect(doc).toMatchObject({
+      action: 'status',
+      registered: true,
+      antMissing: true,
+      targets: null,
+    });
+    expect(doc['record']).toMatchObject({ antProcessId: null, type: 'lease' });
+    // Never hand the System Program address to ANT.init.
+    expect(h.calls.antFor).toHaveLength(0);
+    expect(JSON.stringify(doc['record'])).not.toContain(ARNS_NULL_PROCESS_ID);
+    expect(String(doc['hint'])).toContain('NO ANT attached');
+  });
+
+  it('status (human) on a placeholder-registered name diagnoses it and exits non-zero', async () => {
+    const h = makeHarness(env, cwd, {
+      stub: {
+        record: {
+          processId: ARNS_NULL_PROCESS_ID,
+          type: 'lease',
+          startTimestamp: 1_700_000_000_000,
+          endTimestamp: 1_800_000_000_000,
+          undernameLimit: 10,
+        },
+      },
+    });
+    const code = await runName(['status', 'toonprotocol'], h.deps);
+    expect(code).toBe(1);
+    expect(h.out.join('\n')).toContain('ANT process: NONE');
+    expect(h.out.join('\n')).not.toContain(ARNS_NULL_PROCESS_ID.slice(0, 16));
+    expect(h.err.join('\n')).toContain('NO ANT attached');
   });
 
   // ── network / registry selection ──────────────────────────────────────────
