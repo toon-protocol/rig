@@ -103,9 +103,9 @@ interface StubOptions {
   spawnProcessId?: string;
   /**
    * processId buyRecord's receipt echoes back. Defaults to echoing whatever
-   * processId the caller requested (the realistic "attach succeeded" case).
-   * Set to `ARNS_NULL_PROCESS_ID` (or omit request-echoing) to simulate a
-   * registry-side attach failure.
+   * processId the caller requested (the realistic "attach succeeded" case);
+   * set it to `ARNS_NULL_PROCESS_ID` to simulate a registry-side attach
+   * failure.
    */
   buyRecordProcessId?: string;
 }

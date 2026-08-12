@@ -261,19 +261,17 @@ export type LoadArns = (options: LoadArnsOptions) => Promise<ArnsSdk>;
  */
 export const ARNS_NULL_PROCESS_ID = '11111111111111111111111111111111';
 
-/** True when `id` denotes "no ANT" — absent or the registry's placeholder. */
-function isNoAntProcessId(id: string | null | undefined): boolean {
-  return id === null || id === undefined || id === ARNS_NULL_PROCESS_ID;
-}
-
 /**
- * Normalize an ANT process id read off a record: the real id, or `null` when
- * no ANT is attached (absent, or the registry's all-ones placeholder). Every
- * command that accepts or reports a record's ANT goes through this, so the
- * placeholder can never be mistaken for a working attachment (#79 AC4).
+ * Normalize an ANT process id: the real id, or `null` when no ANT is attached
+ * (absent, or the registry's all-ones placeholder). Every command that accepts
+ * or reports an ANT process id goes through this, so the placeholder can never
+ * be mistaken for a working attachment (#79 AC4).
  */
 function antProcessIdOf(id: string | null | undefined): string | null {
-  return isNoAntProcessId(id) ? null : (id ?? null);
+  if (id === null || id === undefined || id === ARNS_NULL_PROCESS_ID) {
+    return null;
+  }
+  return id;
 }
 
 /**
@@ -1567,11 +1565,9 @@ async function runBuy(
   });
   // The ANT actually bound: the SDK's echo when it returns one, otherwise the
   // id we asked it to attach (4.0.3's Solana `buyRecord` resolves to `{ id }`
-  // alone, so in practice this is the ANT we just spawned).
-  const attachedProcessId = receipt.processId ?? spawn.processId;
-  const antProcessId = isNoAntProcessId(attachedProcessId)
-    ? null
-    : attachedProcessId;
+  // alone, so in practice this is the ANT we just spawned). Normalized like
+  // every other ANT id, so the placeholder reads as "no ANT" here too.
+  const antProcessId = antProcessIdOf(receipt.processId ?? spawn.processId);
   const result = { registryTxId: receipt.id, antProcessId };
   const spawnInfo = { processId: spawn.processId, signature: spawn.signature };
 
