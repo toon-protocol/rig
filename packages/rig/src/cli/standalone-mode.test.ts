@@ -19,15 +19,20 @@ import {
 } from '../standalone/network-bootstrap.js';
 import { MinaZkAppStore } from '../standalone/mina-zkapp-store.js';
 import {
+  OFFICIAL_BTP_URL,
   OFFICIAL_PROXY_URL,
   OFFICIAL_PUBLISH_DESTINATION,
+  bootstrapRecoveries,
   buildMinaAutoDeploy,
+  isBtpTransportError,
   resolveNetworkTopology,
   resolveUplinkConfig,
   type ClientConfigFile,
   type GenesisSeedLike,
+  type NetworkTopology,
   type NetworkTopologyInputs,
 } from './standalone-mode.js';
+import type { StandalonePublisher } from '../standalone/standalone-publisher.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -143,7 +148,8 @@ describe('resolveNetworkTopology — uplink', () => {
       inputs({ announce: undefined, genesisSeed: undefined })
     );
     expect(topology.proxyUrl).toBe(OFFICIAL_PROXY_URL);
-    expect(topology.btpUrl).toBeUndefined();
+    // Both legs are official constants — discovery only ever refines them.
+    expect(topology.btpUrl).toBe(OFFICIAL_BTP_URL);
   });
 });
 
@@ -177,29 +183,32 @@ describe('resolveNetworkTopology — paid-write BTP companion', () => {
     expect(topology.btpUrl).toBe('wss://proxy.devnet.toonprotocol.dev:443');
   });
 
-  it('falls back to the genesis seed when no announce is discovered', async () => {
+  it('falls back to the official relay BTP ingress, NOT the genesis seed', async () => {
+    // The committed seed in @toon-protocol/core still names the RETIRED apex
+    // (`proxy.devnet.toonprotocol.dev`), a host that resolves but refuses
+    // connections since the two-box cutover. Because the embedded client
+    // dials BTP during start(), adopting it would turn a late 401 into rig
+    // refusing to run at all.
     const topology = await resolveNetworkTopology(
       inputs({ announce: undefined })
     );
-    expect(topology.btpUrl).toBe(GENESIS.btpEndpoint);
+    expect(topology.btpUrl).toBe(OFFICIAL_BTP_URL);
+    expect(topology.btpUrl).not.toBe(GENESIS.btpEndpoint);
+    expect(OFFICIAL_BTP_URL).not.toContain('//proxy.devnet.');
   });
 
-  it('ignores an announce whose btpEndpoint is empty, using the seed', async () => {
+  it('ignores an announce whose btpEndpoint is empty', async () => {
     const topology = await resolveNetworkTopology(
       inputs({ announce: apexAnnounce({ btpEndpoint: '' }) })
     );
-    expect(topology.btpUrl).toBe(GENESIS.btpEndpoint);
+    expect(topology.btpUrl).toBe(OFFICIAL_BTP_URL);
   });
 
-  it('leaves the topology BTP-less when neither announce nor seed has one', async () => {
-    const topology = await resolveNetworkTopology(
-      inputs({
-        announce: apexAnnounce({ btpEndpoint: '' }),
-        genesisSeed: undefined,
-      })
-    );
-    expect(topology.btpUrl).toBeUndefined();
-    expect(topology.proxyUrl).toBe(OFFICIAL_PROXY_URL);
+  it('marks a discovered endpoint as derived (droppable when unreachable)', async () => {
+    for (const announce of [apexAnnounce(), undefined]) {
+      const topology = await resolveNetworkTopology(inputs({ announce }));
+      expect(topology.btpUrlDerived).toBe(true);
+    }
   });
 
   // An operator who pinned an uplink pinned the transport with it — silently
@@ -212,12 +221,162 @@ describe('resolveNetworkTopology — paid-write BTP companion', () => {
     expect(topology.btpUrl).toBeUndefined();
   });
 
-  it('never overrides an explicitly pinned BTP uplink', async () => {
+  it('never overrides an explicitly pinned BTP uplink, and never marks it derived', async () => {
     const topology = await resolveNetworkTopology(
       inputs({ file: { btpUrl: 'wss://my-btp.example:443' } })
     );
     expect(topology.btpUrl).toBe('wss://my-btp.example:443');
     expect(topology.proxyUrl).toBeUndefined();
+    expect(topology.btpUrlDerived).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unreachable-BTP classification
+//
+// The gate on dropping a derived BTP leg. Narrow on purpose: it decides
+// whether rig may abandon a configured transport, so anything broader would
+// paper over unrelated bootstrap failures.
+// ---------------------------------------------------------------------------
+
+describe('isBtpTransportError', () => {
+  const named = (name: string, message = 'boom'): Error => {
+    const err = new Error(message);
+    err.name = name;
+    return err;
+  };
+
+  it('matches the client BTP socket/auth failures', () => {
+    // @toon-protocol/client throws these (unexported) for a websocket that
+    // would not open or would not authenticate.
+    expect(
+      isBtpTransportError(
+        named('BtpConnectionError', 'WebSocket connection error: ECONNREFUSED')
+      )
+    ).toBe(true);
+    expect(isBtpTransportError(named('BtpAuthError'))).toBe(true);
+  });
+
+  it('does NOT match unrelated bootstrap failures', () => {
+    expect(isBtpTransportError(named('Error', 'connect ECONNREFUSED'))).toBe(
+      false
+    );
+    expect(isBtpTransportError(named('ToonClientError'))).toBe(false);
+    expect(isBtpTransportError(named('ChannelMapCorruptError'))).toBe(false);
+    expect(isBtpTransportError(named('MinaFeePayerUnfundedError'))).toBe(false);
+    expect(isBtpTransportError('BtpConnectionError')).toBe(false);
+    expect(isBtpTransportError(undefined)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bootstrap recoveries
+//
+// The safety net behind the BTP companion: the embedded client dials BTP
+// during start(), so an unreachable DERIVED endpoint must degrade to HTTP
+// rather than stop rig from running — a strictly worse failure than the 401
+// it replaces.
+// ---------------------------------------------------------------------------
+
+describe('bootstrapRecoveries', () => {
+  const DERIVED: NetworkTopology = {
+    proxyUrl: OFFICIAL_PROXY_URL,
+    btpUrl: OFFICIAL_BTP_URL,
+    btpUrlDerived: true,
+    destination: 'g.toon.relay',
+    knownPeers: [],
+  };
+  const btpDown = (): Error => {
+    const err = new Error('WebSocket connection error: ECONNREFUSED');
+    err.name = 'BtpConnectionError';
+    return err;
+  };
+
+  /** Records every topology a rebuild built from. */
+  function harness(
+    topology: NetworkTopology,
+    reresolve?: () => Promise<NetworkTopology>
+  ) {
+    const built: NetworkTopology[] = [];
+    const recoveries = bootstrapRecoveries({
+      topology,
+      buildPublisher: (topo) => {
+        built.push(topo);
+        return {} as StandalonePublisher;
+      },
+      ...(reresolve ? { reresolve } : {}),
+    });
+    return { built, recoveries };
+  }
+
+  it('drops an unreachable DERIVED BTP leg, keeping the HTTP uplink', async () => {
+    const { built, recoveries } = harness(DERIVED);
+    const btp = recoveries.find((r) => r.applies(btpDown()));
+    expect(btp).toBeDefined();
+    await btp?.rebuild();
+    expect(built).toHaveLength(1);
+    expect(built[0]?.btpUrl).toBeUndefined();
+    expect(built[0]?.btpUrlDerived).toBeUndefined();
+    // Everything else survives — this degrades one transport, not the topology.
+    expect(built[0]?.proxyUrl).toBe(OFFICIAL_PROXY_URL);
+    expect(built[0]?.destination).toBe('g.toon.relay');
+  });
+
+  it('names the dead endpoint and the remedy in the warning', () => {
+    const { recoveries } = harness(DERIVED);
+    const line = recoveries[recoveries.length - 1]?.describe(btpDown()) ?? '';
+    expect(line).toContain(OFFICIAL_BTP_URL);
+    expect(line).toContain('ECONNREFUSED');
+    expect(line).toContain('rig entry');
+  });
+
+  it('never drops an EXPLICITLY pinned BTP uplink', () => {
+    const { recoveries } = harness({
+      ...DERIVED,
+      btpUrl: 'wss://pinned.example:443',
+      btpUrlDerived: undefined,
+    });
+    expect(recoveries.some((r) => r.applies(btpDown()))).toBe(false);
+  });
+
+  it('does not fire for a non-BTP bootstrap failure', () => {
+    const { recoveries } = harness(DERIVED);
+    expect(
+      recoveries.some((r) => r.applies(new Error('chain misconfig')))
+    ).toBe(false);
+  });
+
+  it('registers no cache recovery for a live-resolved topology', () => {
+    const { recoveries } = harness(DERIVED);
+    expect(recoveries).toHaveLength(1);
+  });
+
+  // The two recoveries COMPOSE: the degrade must drop the BTP leg of whatever
+  // the cache recovery re-resolved, not of the topology it started from.
+  it('degrades the RE-RESOLVED topology after a cache recovery', async () => {
+    const fresh: NetworkTopology = {
+      ...DERIVED,
+      btpUrl: 'wss://rotated.example/ilp/btp',
+      destination: 'g.toon.relay',
+    };
+    const { built, recoveries } = harness(DERIVED, async () => fresh);
+    expect(recoveries).toHaveLength(2);
+
+    await recoveries[0]?.rebuild(); // cache miss → live re-resolve
+    expect(built[0]?.btpUrl).toBe('wss://rotated.example/ilp/btp');
+
+    expect(recoveries[1]?.applies(btpDown())).toBe(true);
+    expect(recoveries[1]?.describe(btpDown())).toContain(
+      'wss://rotated.example/ilp/btp'
+    );
+    await recoveries[1]?.rebuild();
+    expect(built[1]?.btpUrl).toBeUndefined();
+    expect(built[1]?.proxyUrl).toBe(OFFICIAL_PROXY_URL);
+  });
+
+  it('the cache recovery applies to ANY failure (staleness is untypeable)', () => {
+    const { recoveries } = harness(DERIVED, async () => DERIVED);
+    expect(recoveries[0]?.applies(new Error('anything at all'))).toBe(true);
   });
 });
 

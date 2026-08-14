@@ -172,6 +172,23 @@ export const OFFICIAL_PROXY_URL =
 /** The official relay-write route on that edge. */
 export const OFFICIAL_PUBLISH_DESTINATION = 'g.toon.relay';
 
+/**
+ * The BTP ingress paid writes ride when discovery does not name one — the
+ * RELAY box of the two-box devnet (ILP address `g.toon.relay`), which is the
+ * publish route every `rig push` terminates at.
+ *
+ * Deliberately NOT the genesis seed's `btpEndpoint`. `@toon-protocol/core`'s
+ * committed seed still names the retired apex
+ * (`wss://proxy.devnet.toonprotocol.dev/ilp/btp`), a host that resolves but
+ * refuses connections since the two-box cutover — and because the embedded
+ * client dials BTP during `start()`, handing it a dead endpoint would turn a
+ * late 401 into rig refusing to start at all. That is what
+ * {@link isBtpTransportError}'s degrade recovery guards against in general;
+ * this constant keeps the common path off the dead box in the first place.
+ */
+export const OFFICIAL_BTP_URL =
+  'wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp';
+
 export class MissingUplinkError extends Error {
   constructor(configPath: string, relayUrl: string | undefined) {
     const discovered = relayUrl
@@ -252,6 +269,14 @@ export interface NetworkTopologyInputs {
 export interface NetworkTopology {
   proxyUrl?: string;
   btpUrl?: string;
+  /**
+   * True when `btpUrl` came from DISCOVERY (the announce, or the
+   * {@link OFFICIAL_BTP_URL} fallback) rather than explicit config. Only a
+   * derived endpoint may be dropped by the unreachable-BTP degrade recovery
+   * — an operator's explicit pin is never silently abandoned. Persisted with
+   * the rest of the topology in the #279 cache.
+   */
+  btpUrlDerived?: boolean;
   /** Channel anchor / default ILP destination. */
   destination: string;
   publishDestination?: string;
@@ -488,7 +513,8 @@ export async function resolveNetworkTopology(
   // identity 'g.toon.client' failed to authenticate`, because the HTTP
   // one-shot carries only an unauthenticated `ILP-Peer-Id` header while the
   // BTP session authenticates on connect. Adopting the payment peer's
-  // ANNOUNCED BTP endpoint (genesis seed as the fallback) gives the client
+  // ANNOUNCED BTP endpoint ({@link OFFICIAL_BTP_URL} as the fallback — NOT
+  // the genesis seed, which still names the retired apex) gives the client
   // both transports; `preferBtpForPaidWrites` (set alongside this in
   // `createStandaloneContext`) then sends claims over BTP first and keeps
   // HTTP as the transport's own fallback. The x402 greeting bootstrap
@@ -498,8 +524,15 @@ export async function resolveNetworkTopology(
   // Only when NO uplink was configured explicitly: someone who pinned
   // `TOON_CLIENT_PROXY_URL` / `proxyUrl` pinned the transport too, and a
   // silently-added announce endpoint would route their paid writes off it.
+  //
+  // A derived endpoint is marked as such: it is a DISCOVERY guess, and the
+  // client dials it during `start()`, so an unreachable one must be able to
+  // degrade back to HTTP rather than stop rig from running. An explicit
+  // `btpUrl` is an operator's pin and is never dropped behind their back.
+  let btpUrlDerived = false;
   if (!explicitProxyUrl && !explicitBtpUrl) {
-    btpUrl = announce?.info.btpEndpoint || genesisSeed?.btpEndpoint;
+    btpUrl = announce?.info.btpEndpoint || OFFICIAL_BTP_URL;
+    btpUrlDerived = true;
   }
 
   // ── Destination anchor + publish/store routes ────────────────────────────
@@ -823,7 +856,7 @@ export async function resolveNetworkTopology(
 
   return {
     ...(proxyUrl ? { proxyUrl } : {}),
-    ...(btpUrl ? { btpUrl } : {}),
+    ...(btpUrl ? { btpUrl, ...(btpUrlDerived ? { btpUrlDerived } : {}) } : {}),
     destination,
     ...(publishDestination ? { publishDestination } : {}),
     ...(storeDestination ? { storeDestination } : {}),
@@ -898,8 +931,98 @@ export function resolveUplinkConfig(
 }
 
 // ---------------------------------------------------------------------------
-// Cached-topology recovery (#279)
+// Bootstrap recovery (#279 cached topology; unreachable derived BTP uplink)
 // ---------------------------------------------------------------------------
+
+/**
+ * Whether a start failure came from the BTP uplink itself — the websocket
+ * would not open, or would not authenticate.
+ *
+ * `@toon-protocol/client` throws its own `BtpConnectionError`/`BtpAuthError`
+ * for exactly these, but does not export them, so (like the channel
+ * introspection in `../standalone/standalone-publisher.ts`) they are matched
+ * structurally by `name`. Matching narrowly is the point: this decides
+ * whether rig may drop the BTP leg, and a broad match would silently paper
+ * over unrelated bootstrap failures.
+ */
+export function isBtpTransportError(err: unknown): boolean {
+  const name = err instanceof Error ? err.name : '';
+  return name === 'BtpConnectionError' || name === 'BtpAuthError';
+}
+
+/**
+ * One registered, single-use bootstrap recovery: whether it could address a
+ * given failure, what to tell the operator, and how to rebuild.
+ */
+export interface PublisherRecovery {
+  /** True when this recovery could plausibly address `err`. */
+  applies: (err: unknown) => boolean;
+  /** Warned before the retry — says what is being changed, and why. */
+  describe: (err: unknown) => string;
+  rebuild: () => Promise<StandalonePublisher>;
+}
+
+/**
+ * The bootstrap recoveries a standalone publisher runs with, in order (see
+ * {@link TopologyRecoveringPublisher} for the retry contract).
+ *
+ * The recoveries share one mutable "topology the inner publisher was built
+ * from", so they COMPOSE: the BTP degrade drops the BTP leg of whatever the
+ * cache recovery re-resolved, never of the topology this was called with.
+ *
+ * @param reresolve present only for a CACHE-sourced publisher (it should
+ *   invalidate the entry and resolve live); absent means no cache recovery.
+ */
+export function bootstrapRecoveries(args: {
+  topology: NetworkTopology;
+  buildPublisher: (topo: NetworkTopology) => StandalonePublisher;
+  reresolve?: () => Promise<NetworkTopology>;
+}): PublisherRecovery[] {
+  let active = args.topology;
+  const detail = (err: unknown): string =>
+    err instanceof Error ? err.message : String(err);
+  const recoveries: PublisherRecovery[] = [];
+
+  // #279: a cache-sourced publisher whose bootstrap fails invalidates the
+  // entry, re-resolves live (which re-writes the cache), and retries — so a
+  // rotated peer endpoint costs one failed attempt, not a broken TTL.
+  const reresolve = args.reresolve;
+  if (reresolve) {
+    recoveries.push({
+      applies: () => true,
+      describe: (err) =>
+        'rig: bootstrap with the cached network topology failed ' +
+        `(${detail(err)}) — invalidating the cache and re-resolving live`,
+      rebuild: async () => {
+        active = await reresolve();
+        return args.buildPublisher(active);
+      },
+    });
+  }
+
+  // A DERIVED BTP endpoint is a discovery guess, and the client dials it
+  // during start() — so an unreachable one must not stop rig from running.
+  // It drops back to the HTTP uplink, which is the behaviour placing the BTP
+  // leg otherwise replaces. Gated on {@link isBtpTransportError} so an
+  // unrelated bootstrap failure is never papered over, and on
+  // `btpUrlDerived` so an operator's explicit `btpUrl` pin is never
+  // abandoned behind their back.
+  recoveries.push({
+    applies: (err) => active.btpUrlDerived === true && isBtpTransportError(err),
+    describe: (err) =>
+      `rig: the discovered BTP uplink ${active.btpUrl} is unreachable ` +
+      `(${detail(err)}) — continuing over the HTTP uplink alone; paid ` +
+      'writes an edge accepts only over BTP will still fail, so pin a ' +
+      'reachable endpoint with `rig entry <url>` if they do',
+    rebuild: async () => {
+      const { btpUrl: _btpUrl, btpUrlDerived: _derived, ...http } = active;
+      active = http;
+      return args.buildPublisher(active);
+    },
+  });
+
+  return recoveries;
+}
 
 /** Structural check for a cached {@link NetworkTopology} document. */
 function isNetworkTopology(value: unknown): value is NetworkTopology {
@@ -924,27 +1047,40 @@ const NON_RECOVERABLE_START_ERRORS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Publisher wrapper implementing the #279 cache-invalidation contract: when
- * the inner publisher was built from a CACHED topology and its bootstrap
- * (`start`/`startClientOnly`) fails, the cache entry is invalidated, the
- * topology is re-resolved LIVE, a fresh publisher replaces the inner one,
- * and the operation proceeds — one retry, never more. Bootstrap failures
- * are pre-payment by construction (start() completes before any claim is
- * signed), so the retry can never double-pay. Publishers built from a live
- * resolution get no recovery hook and fail through unchanged.
+ * Publisher wrapper that retries a failed bootstrap (`start`/
+ * `startClientOnly`) against a repaired publisher. Each registered
+ * {@link PublisherRecovery} fires AT MOST ONCE, in order, and only when it
+ * `applies` to the failure, so the retry count is bounded by the number of
+ * recoveries — never a loop. Bootstrap failures are pre-payment by
+ * construction (start() completes before any claim is signed), so a retry
+ * can never double-pay. With no applicable recovery left, the failure passes
+ * straight through.
+ *
+ * Two recoveries are registered by {@link createStandaloneContext}:
+ *
+ *   - #279 cache invalidation: a publisher built from a CACHED topology
+ *     re-resolves LIVE, so a rotated peer endpoint costs one failed attempt
+ *     rather than a broken TTL.
+ *   - Unreachable DERIVED BTP uplink: discovery only guesses the peer's BTP
+ *     ingress, and the client dials it during `start()` — so a dead endpoint
+ *     would otherwise stop rig from running at all, which is strictly worse
+ *     than the HTTP-only behaviour it replaced. The BTP leg is dropped and
+ *     the run proceeds over HTTP. Never for an EXPLICIT `btpUrl`: that is an
+ *     operator's pin, and quietly abandoning it would hide a real
+ *     misconfiguration.
  */
 class TopologyRecoveringPublisher implements Publisher {
   private inner: StandalonePublisher;
-  private rebuild: (() => Promise<StandalonePublisher>) | undefined;
+  private readonly recoveries: PublisherRecovery[];
   private readonly warn: (line: string) => void;
 
   constructor(
     inner: StandalonePublisher,
-    rebuild: (() => Promise<StandalonePublisher>) | undefined,
+    recoveries: PublisherRecovery[],
     warn: (line: string) => void
   ) {
     this.inner = inner;
-    this.rebuild = rebuild;
+    this.recoveries = [...recoveries];
     this.warn = warn;
   }
 
@@ -957,36 +1093,39 @@ class TopologyRecoveringPublisher implements Publisher {
   }
 
   /**
-   * Run the bootstrap step, recovering ONCE from a stale cached topology.
-   * A rebuild failure surfaces the LIVE resolution's error — that is the
-   * network's real state, strictly more actionable than the cached failure.
+   * Run the bootstrap step, retrying against a repaired publisher for as long
+   * as an unused recovery applies. The LAST attempt's error is what surfaces
+   * — after a live re-resolution or an HTTP-only rebuild that is the
+   * network's real state, strictly more actionable than the failure that
+   * triggered the retry.
    */
   private async ensure(
     start: (p: StandalonePublisher) => Promise<void>
   ): Promise<StandalonePublisher> {
-    try {
-      await start(this.inner);
-      return this.inner;
-    } catch (err) {
-      const rebuild = this.rebuild;
-      this.rebuild = undefined;
-      const name = err instanceof Error ? err.name : '';
-      if (!rebuild || NON_RECOVERABLE_START_ERRORS.has(name)) throw err;
-      this.warn(
-        'rig: bootstrap with the cached network topology failed ' +
-          `(${err instanceof Error ? err.message : String(err)}) — ` +
-          'invalidating the cache and re-resolving live'
-      );
-      const fresh = await rebuild();
+    for (;;) {
       try {
-        // Failed starts release their own lock/state; stop() is idempotent.
-        await this.inner.stop();
-      } catch {
-        // best-effort teardown of the abandoned publisher
+        await start(this.inner);
+        return this.inner;
+      } catch (err) {
+        const name = err instanceof Error ? err.name : '';
+        if (NON_RECOVERABLE_START_ERRORS.has(name)) throw err;
+        // First applicable recovery wins, and is consumed either way — the
+        // loop is bounded by the number registered.
+        const index = this.recoveries.findIndex((r) => r.applies(err));
+        if (index < 0) throw err;
+        const [recovery] = this.recoveries.splice(index, 1) as [
+          PublisherRecovery,
+        ];
+        this.warn(recovery.describe(err));
+        const fresh = await recovery.rebuild();
+        try {
+          // Failed starts release their own lock/state; stop() is idempotent.
+          await this.inner.stop();
+        } catch {
+          // best-effort teardown of the abandoned publisher
+        }
+        this.inner = fresh;
       }
-      this.inner = fresh;
-      await start(this.inner);
-      return this.inner;
     }
   }
 
@@ -1359,17 +1498,22 @@ export async function createStandaloneContext(
     });
   };
 
-  // Cache-sourced publishers get the #279 recovery hook: a failed bootstrap
-  // invalidates the entry, re-resolves live (which re-writes the cache), and
-  // retries once. Live-resolved publishers fail through unchanged.
   const publisher = new TopologyRecoveringPublisher(
     buildPublisher(topology),
-    cached
-      ? async () => {
-          cache.invalidate(cacheKey);
-          return buildPublisher(await resolveLiveTopology());
-        }
-      : undefined,
+    bootstrapRecoveries({
+      topology,
+      buildPublisher,
+      // Only a CACHE-sourced publisher gets the re-resolve recovery;
+      // live-resolved ones have nothing staler to fall back from.
+      ...(cached
+        ? {
+            reresolve: async () => {
+              cache.invalidate(cacheKey);
+              return resolveLiveTopology();
+            },
+          }
+        : {}),
+    }),
     warn
   );
 
