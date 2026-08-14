@@ -45,7 +45,14 @@ const MNEMONIC =
 const APEX_PUBKEY = 'a1'.repeat(32);
 const RELAY = 'wss://relay-ws.devnet.toonprotocol.dev';
 
-/** Live-devnet-shaped apex announce. */
+/**
+ * Live-devnet-shaped apex announce. Its endpoints deliberately sit on a
+ * DIFFERENT host from the `OFFICIAL_*` constants so precedence is provable
+ * either way — that the announce does not place the HTTP uplink, and that it
+ * DOES place the BTP one. Trusting a live announce over the baked constant is
+ * intentional: the announce is current where a constant is baked, and an
+ * unreachable announced endpoint is caught by the degrade recovery.
+ */
 function apexAnnounce(
   overrides: Partial<Record<string, unknown>> = {}
 ): AnnouncedPeer {
@@ -105,6 +112,48 @@ function inputs(
     ...overrides,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Official defaults
+//
+// The two baked-in endpoints rig falls back to. They are the ONLY network
+// addresses a default install dials, so they get pinned here: the two-box
+// cutover retired the apex, and a default still pointing at it fails a fresh
+// channel open (the x402 greeting) even when paid writes ride BTP.
+// ---------------------------------------------------------------------------
+
+describe('official default endpoints', () => {
+  /** The apex destroyed in the two-box cutover — resolves, refuses connections. */
+  const RETIRED_APEX_HOST = 'proxy.devnet.toonprotocol.dev';
+
+  it('no default references the retired apex', () => {
+    for (const url of [OFFICIAL_PROXY_URL, OFFICIAL_BTP_URL]) {
+      expect(new URL(url).hostname).not.toBe(RETIRED_APEX_HOST);
+    }
+  });
+
+  it('both defaults live on the relay box that serves the publish route', () => {
+    // OFFICIAL_PUBLISH_DESTINATION is `g.toon.relay`, so the uplink that
+    // terminates it must be the relay box — not the ario/store box.
+    expect(OFFICIAL_PUBLISH_DESTINATION).toBe('g.toon.relay');
+    for (const url of [OFFICIAL_PROXY_URL, OFFICIAL_BTP_URL]) {
+      expect(new URL(url).hostname).toBe('proxy.relay.devnet.toonprotocol.dev');
+    }
+  });
+
+  it('uses the live ingress paths, not the legacy apex ones', () => {
+    // The edge serves ILP-over-HTTP at plain `/ilp` (a GET answers `405
+    // allow: POST`) and answers `410 Gone` on the old `/rust/ilp`.
+    const proxy = new URL(OFFICIAL_PROXY_URL);
+    expect(proxy.protocol).toBe('https:');
+    expect(proxy.pathname).toBe('/ilp');
+    expect(OFFICIAL_PROXY_URL).not.toContain('/rust/');
+
+    const btp = new URL(OFFICIAL_BTP_URL);
+    expect(btp.protocol).toBe('wss:');
+    expect(btp.pathname).toBe('/ilp/btp');
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Uplink resolution order

@@ -20,14 +20,28 @@ leg the x402 greeting bootstrap (connector #617) needs, and as the BTP
 transport's own fallback; an explicitly pinned `proxyUrl`/`btpUrl` is never
 overridden. Reads, fee estimates and the channel open are unchanged.
 
-When discovery names no BTP endpoint the fallback is a new
-`OFFICIAL_BTP_URL` — the RELAY box of the two-box devnet
-(`wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp`, the publish route every
-push terminates at). Deliberately NOT `@toon-protocol/core`'s genesis seed,
-which still names the retired apex `proxy.devnet.toonprotocol.dev`: that host
-resolves but refuses connections since the two-box cutover, and the embedded
-client dials BTP during `start()`, so adopting it would turn a late 401 into
-rig refusing to run at all.
+**Both official default endpoints move off the retired apex.** The two-box
+cutover destroyed `proxy.devnet.toonprotocol.dev`; it still resolves but
+refuses connections, and rig's defaults both pointed at it:
+
+- `OFFICIAL_PROXY_URL` was `https://proxy.devnet.toonprotocol.dev/rust/ilp`
+  and is now `https://proxy.relay.devnet.toonprotocol.dev/ilp` — exactly what
+  the relay's own live kind:10032 announce advertises as its `httpEndpoint`.
+  The PATH moved too: `/rust/ilp` was a legacy path from when the Rust and TS
+  fleets ran side by side, and the live edge answers `410 Gone` on it while
+  serving the ingress at plain `/ilp`. This one is load-bearing beyond paid
+  writes — it is the endpoint the x402 greeting bootstrap dials, so a dead
+  value fails a FRESH channel open even when claims ride BTP.
+- `OFFICIAL_BTP_URL` is new: `wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp`,
+  the fallback when discovery names no BTP endpoint. Deliberately NOT
+  `@toon-protocol/core`'s genesis seed, which still names the retired apex —
+  and because the embedded client dials BTP during `start()`, adopting a dead
+  endpoint would turn a late 401 into rig refusing to run at all.
+
+Both now sit on the relay box, which is the one that terminates
+`OFFICIAL_PUBLISH_DESTINATION` (`g.toon.relay`). After this change no rig
+default references the retired apex anywhere — a property the tests pin
+directly, so the next topology move fails loudly rather than silently.
 
 Because a derived endpoint is only a discovery guess, an unreachable one now
 DEGRADES instead of failing the run: a bootstrap failure classified as a BTP

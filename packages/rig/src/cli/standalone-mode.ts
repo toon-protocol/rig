@@ -158,17 +158,31 @@ export interface ClientConfigFile {
 /** An identity was resolved, but there is no way to send paid writes. */
 /**
  * The official TOON relay implementation's client edge — the Rust connector
- * on the devnet apex (connector #616: the parallel-fleet comparison
- * concluded and the Rust fleet serves the protocol's own `g.toon`
- * namespace). This is rig's DEFAULT uplink: paid writes go here unless an
- * entry is explicitly configured (`rig entry <url>` / `rig entry sandbox` /
- * the TOON_CLIENT_* env overrides). The channel bootstrap needs no
- * announce: the edge's x402 greeting carries the channel-opening facts
- * (connector #617), which the embedded client synthesizes a negotiation
- * from.
+ * (connector #616: the parallel-fleet comparison concluded and the Rust
+ * fleet serves the protocol's own `g.toon` namespace). This is rig's DEFAULT
+ * HTTP uplink: paid writes go here unless an entry is explicitly configured
+ * (`rig entry <url>` / `rig entry sandbox` / the TOON_CLIENT_* env
+ * overrides). It is also the endpoint the channel bootstrap needs, since the
+ * x402 greeting carries the channel-opening facts (connector #617) the
+ * embedded client synthesizes a negotiation from — so a dead value here
+ * fails a FRESH channel open even when paid writes ride BTP.
+ *
+ * BOTH the host and the path moved in the two-box cutover, and the old value
+ * (`https://proxy.devnet.toonprotocol.dev/rust/ilp`) was dead on both counts:
+ *
+ *   - Host: the apex was RETIRED and destroyed. `proxy.devnet.toonprotocol.dev`
+ *     still resolves but refuses connections; the relay box
+ *     (`g.toon.relay`) is where the publish route now lives.
+ *   - Path: `/rust/ilp` was a legacy apex path from the period when the Rust
+ *     and TS fleets ran side by side. The live edge serves the ILP-over-HTTP
+ *     ingress at plain `/ilp` (a GET answers `405 allow: POST`), and answers
+ *     `410 Gone` on `/rust/ilp` — the retirement is explicit, not incidental.
+ *
+ * This value is exactly what the relay's own live kind:10032 announce
+ * advertises as its `httpEndpoint`, so discovery and this fallback agree.
  */
 export const OFFICIAL_PROXY_URL =
-  'https://proxy.devnet.toonprotocol.dev/rust/ilp';
+  'https://proxy.relay.devnet.toonprotocol.dev/ilp';
 /** The official relay-write route on that edge. */
 export const OFFICIAL_PUBLISH_DESTINATION = 'g.toon.relay';
 
