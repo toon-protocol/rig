@@ -6,9 +6,9 @@ import {
 } from '@toon-protocol/client';
 import { ClientJobDeliveryPort } from './factory-job-delivery-client.js';
 
-function jobRequestFor(conditionHex: string): JobRequest {
+function jobRequestFor(conditionHex: string, amount = 1_000_000n): JobRequest {
   return {
-    amount: 1_000_000n,
+    amount,
     destination: 'g.toon.provider',
     executionCondition: Buffer.from(conditionHex, 'hex'),
     expiresAt: new Date(Date.now() + 30_000),
@@ -90,6 +90,32 @@ describe('ClientJobDeliveryPort', () => {
 
     // The first port's increment is still armed and can still be paid.
     port.handleJob(jobRequestFor(encrypted.conditionHex));
+    expect(await paid).toBe(true);
+  });
+
+  it('refuses a PREPARE for the armed condition whose amount is below the armed price, without releasing the key (#87)', async () => {
+    const port = new ClientJobDeliveryPort();
+    const encrypted = await port.encryptArtifact(
+      new TextEncoder().encode('work')
+    );
+    const paid = port.waitForPayment({
+      offerEventId: 'event1',
+      conditionHex: encrypted.conditionHex,
+      priceUsdc: '500000',
+    });
+
+    // The condition is public; a zero-amount PREPARE carrying it must not
+    // collect the decryption key.
+    expect(() =>
+      port.handleJob(jobRequestFor(encrypted.conditionHex, 0n))
+    ).toThrow(/below the armed price/);
+    // Nor may a PREPARE that merely underpays.
+    expect(() =>
+      port.handleJob(jobRequestFor(encrypted.conditionHex, 499_999n))
+    ).toThrow(/below the armed price/);
+
+    // The increment is still armed and payable at the correct price.
+    port.handleJob(jobRequestFor(encrypted.conditionHex, 500_000n));
     expect(await paid).toBe(true);
   });
 

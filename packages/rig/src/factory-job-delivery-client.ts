@@ -45,6 +45,8 @@ function toHex(bytes: Uint8Array): string {
 interface ArmedIncrement {
   key: Uint8Array;
   conditionHex: string;
+  /** Decimal micro-USDC, the same units as `JobRequest.amount` (#87). */
+  priceUsdc: string;
   resolve: (paid: boolean) => void;
 }
 
@@ -68,14 +70,25 @@ export class ClientJobDeliveryPort implements JobDeliveryPort {
   /**
    * The `JobHandler` to register as `ToonClientConfig.jobHandler`. Throws
    * (answered F99 by `createJobMessageHandler`) when no increment is armed
-   * for the PREPARE's `executionCondition` — this is the only path that
-   * releases a key, and it releases exactly the one the buyer paid for.
+   * for the PREPARE's `executionCondition`, or when the PREPARE's `amount`
+   * is below the armed increment's advertised price (#87 — the condition is
+   * public, published on the kind:7000 offer, so anyone can send a PREPARE
+   * carrying it; only a PREPARE that actually pays the armed price may
+   * release the key). An underpaying PREPARE is rejected without consuming
+   * the arming, so a correctly-priced PREPARE can still land before the
+   * payment timeout. This is the only path that releases a key, and it
+   * releases exactly the one the buyer paid for.
    */
   readonly handleJob: JobHandler = (job: JobRequest): JobAnswer => {
     const conditionHex = toHex(job.executionCondition);
     if (!this.armed || conditionHex !== this.armed.conditionHex) {
       throw new Error(
         `no factory-job increment is awaiting payment for condition ${conditionHex}`
+      );
+    }
+    if (job.amount < BigInt(this.armed.priceUsdc)) {
+      throw new Error(
+        `PREPARE amount ${job.amount} is below the armed price ${this.armed.priceUsdc} for condition ${conditionHex}`
       );
     }
     const { key, resolve } = this.armed;
@@ -104,6 +117,7 @@ export class ClientJobDeliveryPort implements JobDeliveryPort {
       );
     }
     const { key, conditionHex } = this.staged;
+    const { priceUsdc } = offer;
     this.staged = undefined;
 
     return new Promise<boolean>((resolve) => {
@@ -114,6 +128,7 @@ export class ClientJobDeliveryPort implements JobDeliveryPort {
       this.armed = {
         key,
         conditionHex,
+        priceUsdc,
         resolve: (paid) => {
           clearTimeout(timer);
           resolve(paid);
