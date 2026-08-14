@@ -204,16 +204,27 @@ describe('rig payout set/clear (paid, owner-only)', () => {
     });
   });
 
-  it('clear republishes the 30617 without the payout tag', async () => {
+  it('clear removes ONLY the payout tag (metadata + maintainers survive)', async () => {
     const io = makeIo();
     const fake = makeStandalone();
     const code = await runPayout(
       ['clear', ...ADDR, '--yes'],
-      makeDeps(io, fake, [announcement(OWNER, { payout: ADDR1 })])
+      makeDeps(io, fake, [
+        announcement(OWNER, {
+          name: 'Keep Me',
+          description: 'Keep this',
+          maintainers: [M1],
+          payout: ADDR1,
+        }),
+      ])
     );
     expect(code).toBe(0);
     expect(fake.published).toHaveLength(1);
-    expect(parsePayout(fake.published[0]!.event.tags)).toBeNull();
+    const { event } = fake.published[0]!;
+    expect(parsePayout(event.tags)).toBeNull();
+    expect(event.tags).toContainEqual(['name', 'Keep Me']);
+    expect(event.tags).toContainEqual(['description', 'Keep this']);
+    expect(parseMaintainers(event.tags)).toEqual([M1]);
   });
 
   it('set is a no-op (nothing published) when already set to the same address', async () => {

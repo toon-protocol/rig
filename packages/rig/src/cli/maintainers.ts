@@ -31,27 +31,24 @@ import {
   type GitEventResponse,
 } from '../routes.js';
 import type { EventCommandDeps } from './events.js';
-import {
-  emitCliError,
-  InvalidRelayUrlError,
-  UnconfiguredRepoAddressError,
-} from './errors.js';
-import { readToonConfig, resolveRepoRoot } from './git-config.js';
+import { emitCliError, InvalidRelayUrlError } from './errors.js';
 import {
   defaultLoadStandalone,
   identityReport,
   type IdentityReport,
 } from './push.js';
 import { feeLabel } from './render.js';
+import { singleRelayRefusal } from './remote.js';
 import {
-  resolveRelays,
-  singleRelayRefusal,
-  type ResolvedRelays,
-} from './remote.js';
+  pickRepoCommandFlags,
+  REPO_COMMAND_OPTIONS,
+  resolveRepoContext,
+  WS_URL_RE,
+  type RepoCommandFlags,
+} from './repo-command.js';
 import type { StandaloneContext } from './standalone-context.js';
 
 const HEX64_RE = /^[0-9a-f]{64}$/;
-const WS_URL_RE = /^wss?:\/\//i;
 
 export const MAINTAINERS_USAGE = `Usage: rig maintainers <list|add|remove> [<pubkey>] [options]
 
@@ -77,85 +74,6 @@ Options:
   --yes                skip the fee confirmation (required when not a TTY)
   --json               machine-readable envelope
   -h, --help           show this help`;
-
-interface MaintFlags {
-  json: boolean;
-  yes: boolean;
-  help: boolean;
-  relay: string[];
-  remote?: string;
-  repoId?: string;
-  owner?: string;
-}
-
-const MAINT_OPTIONS = {
-  json: { type: 'boolean', default: false },
-  yes: { type: 'boolean', default: false },
-  relay: { type: 'string', multiple: true },
-  remote: { type: 'string' },
-  'repo-id': { type: 'string' },
-  owner: { type: 'string' },
-  help: { type: 'boolean', short: 'h', default: false },
-} as const;
-
-function pickFlags(values: Record<string, unknown>): MaintFlags {
-  const flags: MaintFlags = {
-    json: values['json'] === true,
-    yes: values['yes'] === true,
-    help: values['help'] === true,
-    relay: Array.isArray(values['relay']) ? (values['relay'] as string[]) : [],
-  };
-  if (typeof values['remote'] === 'string') flags.remote = values['remote'];
-  if (typeof values['repo-id'] === 'string') flags.repoId = values['repo-id'];
-  if (typeof values['owner'] === 'string')
-    flags.owner = ownerToHex(values['owner']);
-  return flags;
-}
-
-interface RepoContext {
-  repoId: string;
-  owner: string;
-  relays: string[];
-  /** The full relay resolution (source/nudge) — for the single-relay refusal. */
-  resolved: ResolvedRelays;
-  repoRoot?: string;
-}
-
-/** Resolve repo address (repoId + owner) and relays from flags + git config. */
-async function resolveContext(
-  flags: MaintFlags,
-  deps: EventCommandDeps
-): Promise<RepoContext> {
-  let repoRoot: string | undefined;
-  let toonConfig: { repoId?: string; owner?: string; relays: string[] } = {
-    relays: [],
-  };
-  try {
-    repoRoot = await resolveRepoRoot(deps.cwd);
-    toonConfig = await readToonConfig(repoRoot);
-  } catch {
-    // Not inside a git repo — flags must carry everything.
-  }
-  const repoId = flags.repoId ?? toonConfig.repoId;
-  if (!repoId) throw new UnconfiguredRepoAddressError('repository id');
-  const owner = flags.owner ?? toonConfig.owner;
-  if (!owner) throw new UnconfiguredRepoAddressError('repository owner');
-
-  const resolved = await resolveRelays({
-    relayFlags: flags.relay,
-    remoteName: flags.remote,
-    repoRoot,
-    toonRelays: toonConfig.relays,
-  });
-  if (resolved.nudge !== undefined) deps.io.err(resolved.nudge);
-  return {
-    repoId,
-    owner,
-    relays: resolved.relays,
-    resolved,
-    ...(repoRoot !== undefined ? { repoRoot } : {}),
-  };
-}
 
 /** Run `rig maintainers …`; returns the process exit code. */
 export async function runMaintainers(
@@ -196,17 +114,17 @@ async function runList(
   deps: EventCommandDeps
 ): Promise<number> {
   const { io } = deps;
-  let flags: MaintFlags;
+  let flags: RepoCommandFlags;
   try {
     const { values, positionals } = parseArgs({
       args,
-      options: MAINT_OPTIONS,
+      options: REPO_COMMAND_OPTIONS,
       allowPositionals: true,
     });
     if (positionals.length > 0) {
       throw new Error('rig maintainers list takes no positional arguments');
     }
-    flags = pickFlags(values);
+    flags = pickRepoCommandFlags(values);
   } catch (err) {
     io.err(err instanceof Error ? err.message : String(err));
     io.err(MAINTAINERS_USAGE);
@@ -218,7 +136,7 @@ async function runList(
   }
 
   try {
-    const ctx = await resolveContext(flags, deps);
+    const ctx = await resolveRepoContext(flags, deps);
     const wsRelays = ctx.relays.filter((url) => WS_URL_RE.test(url));
     if (wsRelays.length === 0) {
       throw new InvalidRelayUrlError(
@@ -288,15 +206,15 @@ async function runMutate(
     | 'maintainers add'
     | 'maintainers remove';
 
-  let flags: MaintFlags;
+  let flags: RepoCommandFlags;
   let pubkey: string;
   try {
     const { values, positionals } = parseArgs({
       args,
-      options: MAINT_OPTIONS,
+      options: REPO_COMMAND_OPTIONS,
       allowPositionals: true,
     });
-    flags = pickFlags(values);
+    flags = pickRepoCommandFlags(values);
     if (flags.help) {
       io.out(MAINTAINERS_USAGE);
       return 0;
@@ -316,7 +234,7 @@ async function runMutate(
 
   let standaloneCtx: StandaloneContext | undefined;
   try {
-    const ctx = await resolveContext(flags, deps);
+    const ctx = await resolveRepoContext(flags, deps);
     // A single relay for a paid publish (mirror push/events guard).
     if (ctx.relays.length > 1) {
       io.err(singleRelayRefusal(ctx.resolved, 'Nothing was published or paid.'));

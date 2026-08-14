@@ -112,6 +112,11 @@ const SUPPORTED_PAYOUT_CHAINS: ReadonlySet<string> = new Set<PayoutChain>([
   'evm',
 ]);
 
+/** True when `chain` is a chain the payout pointer supports today. */
+function isSupportedPayoutChain(chain: string): chain is PayoutChain {
+  return SUPPORTED_PAYOUT_CHAINS.has(chain);
+}
+
 /** A repo's declared payout pointer (parsed from / built into the `payout` tag). */
 export interface PayoutPointer {
   chain: PayoutChain;
@@ -148,11 +153,11 @@ export function parsePayout(tags: string[][]): PayoutPointer | null {
     if (
       result === null &&
       chain !== undefined &&
-      SUPPORTED_PAYOUT_CHAINS.has(chain) &&
+      isSupportedPayoutChain(chain) &&
       address !== undefined &&
-      isAddress(address)
+      isValidEvmPayoutAddress(address)
     ) {
-      result = { chain: chain as PayoutChain, address: getAddress(address) };
+      result = { chain, address: getAddress(address) };
     } else {
       ignored++;
     }
