@@ -117,8 +117,8 @@ export class ClientJobDeliveryPort implements JobDeliveryPort {
       );
     }
     const { key, conditionHex } = this.staged;
-    this.staged = undefined;
     const { priceUsdc } = offer;
+    this.staged = undefined;
 
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
