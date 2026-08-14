@@ -11,11 +11,13 @@ import {
   writeFileSync,
   existsSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_TOPOLOGY_TTL_MS,
+  TOPOLOGY_SCHEMA_VERSION,
   TOPOLOGY_TTL_ENV,
   TopologyCache,
   explicitConfigFingerprint,
@@ -70,6 +72,17 @@ describe('topologyCacheKey / explicitConfigFingerprint', () => {
       key
     );
     expect(topologyCacheKey({ ...base, fingerprint: '{"a":1}' })).not.toBe(key);
+  });
+
+  // A release that changes WHAT resolution produces for the same inputs (the
+  // BTP companion uplink) must not be shadowed by the previous release's
+  // entries for a whole TTL — the schema tag is what makes those miss.
+  it('is namespaced by the schema version', () => {
+    expect(TOPOLOGY_SCHEMA_VERSION).toBeGreaterThan(1);
+    const legacy = createHash('sha256')
+      .update(`${base.relayUrl}\n${base.identity}\n${base.fingerprint}`)
+      .digest('hex');
+    expect(topologyCacheKey(base)).not.toBe(legacy);
   });
 
   it('fingerprints every explicit topology input (env + file), nothing else', () => {
