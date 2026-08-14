@@ -102,6 +102,7 @@ function makeRemoteState(shaToTxId: Map<string, string>): RemoteState {
     description: null,
     relays: [],
     maintainers: [],
+    payout: null,
     resolveMissing: async (shas) => {
       const out = new Map<string, string>();
       for (const s of shas) {

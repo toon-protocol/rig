@@ -185,6 +185,7 @@ describe('fetchRemoteState', () => {
       'wss://relay-one.example',
       'wss://relay-two.example',
     ]);
+    expect(state.payout).toBeNull();
 
     // The REQ carried the NIP-01 filter for both kinds, scoped to owner+repo
     expect(r.reqFilters[0]).toEqual({
@@ -288,6 +289,27 @@ describe('fetchRemoteState', () => {
     expect(state.name).toBeNull();
     expect(state.description).toBeNull();
     expect(state.relays).toEqual([]);
+    expect(state.payout).toBeNull();
+  });
+
+  it('parses a declared payout pointer (rig#92)', async () => {
+    const address = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045';
+    const r = await relay([
+      makeAnnounceEvent({
+        tags: [
+          ...makeAnnounceEvent().tags,
+          ['payout', 'evm', address.toLowerCase()],
+        ],
+      }),
+    ]);
+
+    const state = await fetchRemoteState({
+      relayUrls: [r.url],
+      ownerPubkey: OWNER,
+      repoId: REPO,
+    });
+
+    expect(state.payout).toEqual({ chain: 'evm', address });
   });
 
   it('ignores events from other authors or other repos (untrusted relay)', async () => {

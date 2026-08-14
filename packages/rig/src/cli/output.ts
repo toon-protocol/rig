@@ -159,6 +159,7 @@ export const RIG_OWNED_VERBS: ReadonlySet<string> = new Set([
   'comment',
   'pr',
   'maintainers',
+  'payout',
   'channel',
   'channels',
   'fund',

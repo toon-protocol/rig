@@ -1,27 +1,29 @@
 /**
- * `rig maintainers list|add|remove` tests (#287): the FREE list read, the
- * PAID add/remove republish of the kind:30617 (owner-only), preservation of
- * name/description, and the non-owner refusal. The Publisher is mocked at the
- * StandaloneContext seam and a hermetic mock relay serves the current 30617.
+ * `rig payout set|clear|show` tests (rig#92): the FREE show read, the PAID
+ * set/clear republish of the kind:30617 (owner-only), preservation of
+ * name/description/maintainers, and the non-owner/unannounced/malformed-
+ * address refusals. Mirrors maintainers.test.ts's harness: the Publisher is
+ * mocked at the StandaloneContext seam and a hermetic mock relay serves the
+ * current 30617.
  */
 
 import { describe, it, expect } from 'vitest';
 import type { NostrEvent } from '../remote-state.js';
 import type { Publisher } from '../publisher.js';
 import type { UnsignedEvent } from '../nip34-events.js';
-import { parseMaintainers } from '../nip34-events.js';
+import { parseMaintainers, parsePayout } from '../nip34-events.js';
 import type { CliIo } from './output.js';
 import type { EventCommandDeps } from './events.js';
-import { runMaintainers } from './maintainers.js';
+import { runPayout } from './payout.js';
 import type { StandaloneContext } from './standalone-context.js';
 import { filterEvents, makeMockRelayFactory } from './read-testkit.js';
 
 const OWNER = 'ab'.repeat(32);
 const M1 = 'cd'.repeat(32);
-const M2 = 'ef'.repeat(32);
 const REPO = 'demo';
 const RELAY = 'wss://relay.test.example';
 const PUBLISHED_ID = '99'.repeat(32);
+const ADDR1 = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045';
 
 interface Recorder {
   io: CliIo;
@@ -54,7 +56,7 @@ function makeStandalone(identity = OWNER): Fake {
   const publisher: Publisher = {
     getFeeRates: async () => ({ uploadFee: 1000n, eventFee: 5n }),
     uploadGitObject: async () => {
-      throw new Error('maintainers never uploads objects');
+      throw new Error('payout never uploads objects');
     },
     publishEvent: async (event, relayUrls) => {
       published.push({ event, relayUrls });
@@ -70,7 +72,7 @@ function makeStandalone(identity = OWNER): Fake {
       publisher,
       defaultRelayUrls: [RELAY],
       fetchRemote: async () => {
-        throw new Error('maintainers uses fetchRemoteState, not fetchRemote');
+        throw new Error('payout uses fetchRemoteState, not fetchRemote');
       },
       stop: async () => undefined,
     },
@@ -79,9 +81,14 @@ function makeStandalone(identity = OWNER): Fake {
 
 function announcement(
   owner: string,
-  maintainers: string[],
-  overrides: { name?: string; description?: string; payout?: string } = {}
+  overrides: {
+    name?: string;
+    description?: string;
+    maintainers?: string[];
+    payout?: string;
+  } = {}
 ): NostrEvent {
+  const maintainers = overrides.maintainers ?? [];
   return {
     id: '30'.repeat(32),
     pubkey: owner,
@@ -118,131 +125,140 @@ function makeDeps(
 
 const ADDR = ['--repo-id', REPO, '--owner', OWNER, '--relay', RELAY];
 
-describe('rig maintainers list (free)', () => {
-  it('prints the owner + declared maintainers', async () => {
+describe('rig payout show (free)', () => {
+  it('prints the declared payout pointer', async () => {
     const io = makeIo();
     const fake = makeStandalone();
-    const code = await runMaintainers(
-      ['list', ...ADDR, '--json'],
-      makeDeps(io, fake, [announcement(OWNER, [M1])])
+    const code = await runPayout(
+      ['show', ...ADDR, '--json'],
+      makeDeps(io, fake, [announcement(OWNER, { payout: ADDR1 })])
     );
     expect(code).toBe(0);
     expect(io.json[0]).toMatchObject({
-      command: 'maintainers list',
-      owner: OWNER,
-      maintainers: [M1],
+      command: 'payout show',
       announced: true,
+      payout: { chain: 'evm', address: ADDR1 },
     });
     expect(fake.published).toHaveLength(0); // free — nothing published
   });
 
-  it('reports owner-only when there is no announcement', async () => {
+  it('reports payout: null when no pointer is declared', async () => {
     const io = makeIo();
     const fake = makeStandalone();
-    const code = await runMaintainers(
-      ['list', ...ADDR, '--json'],
+    const code = await runPayout(
+      ['show', ...ADDR, '--json'],
+      makeDeps(io, fake, [announcement(OWNER)])
+    );
+    expect(code).toBe(0);
+    expect(io.json[0]).toMatchObject({ announced: true, payout: null });
+  });
+
+  it('reports announced: false when there is no announcement', async () => {
+    const io = makeIo();
+    const fake = makeStandalone();
+    const code = await runPayout(
+      ['show', ...ADDR, '--json'],
       makeDeps(io, fake, [])
     );
     expect(code).toBe(0);
-    expect(io.json[0]).toMatchObject({ announced: false, maintainers: [] });
+    expect(io.json[0]).toMatchObject({ announced: false, payout: null });
   });
 });
 
-describe('rig maintainers add/remove (paid, owner-only)', () => {
-  it('add republishes the 30617 with the new maintainer, preserving metadata', async () => {
+describe('rig payout set/clear (paid, owner-only)', () => {
+  it('set republishes the 30617 with the payout tag, preserving metadata + maintainers', async () => {
     const io = makeIo();
     const fake = makeStandalone();
-    const code = await runMaintainers(
-      ['add', M1, ...ADDR, '--yes'],
+    const code = await runPayout(
+      ['set', ADDR1, ...ADDR, '--yes'],
       makeDeps(io, fake, [
-        announcement(OWNER, [], { name: 'Keep Me', description: 'Keep this' }),
+        announcement(OWNER, {
+          name: 'Keep Me',
+          description: 'Keep this',
+          maintainers: [M1],
+        }),
       ])
     );
     expect(code).toBe(0);
     expect(fake.published).toHaveLength(1);
     const { event, relayUrls } = fake.published[0]!;
     expect(event.kind).toBe(30617);
-    expect(parseMaintainers(event.tags)).toEqual([M1]);
-    // name/description preserved from the existing announcement.
+    expect(parsePayout(event.tags)).toEqual({ chain: 'evm', address: ADDR1 });
     expect(event.tags).toContainEqual(['name', 'Keep Me']);
     expect(event.tags).toContainEqual(['description', 'Keep this']);
+    expect(parseMaintainers(event.tags)).toEqual([M1]);
     expect(relayUrls).toEqual([RELAY]);
   });
 
-  it('add preserves an existing payout pointer (rig#92)', async () => {
-    const payoutAddr = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045';
+  it('set normalizes a lowercase address to its EIP-55 checksummed form', async () => {
     const io = makeIo();
     const fake = makeStandalone();
-    const code = await runMaintainers(
-      ['add', M1, ...ADDR, '--yes'],
-      makeDeps(io, fake, [announcement(OWNER, [], { payout: payoutAddr })])
+    const code = await runPayout(
+      ['set', ADDR1.toLowerCase(), ...ADDR, '--yes'],
+      makeDeps(io, fake, [announcement(OWNER)])
+    );
+    expect(code).toBe(0);
+    expect(parsePayout(fake.published[0]!.event.tags)).toEqual({
+      chain: 'evm',
+      address: ADDR1,
+    });
+  });
+
+  it('clear republishes the 30617 without the payout tag', async () => {
+    const io = makeIo();
+    const fake = makeStandalone();
+    const code = await runPayout(
+      ['clear', ...ADDR, '--yes'],
+      makeDeps(io, fake, [announcement(OWNER, { payout: ADDR1 })])
     );
     expect(code).toBe(0);
     expect(fake.published).toHaveLength(1);
-    expect(fake.published[0]!.event.tags).toContainEqual([
-      'payout',
-      'evm',
-      payoutAddr,
-    ]);
+    expect(parsePayout(fake.published[0]!.event.tags)).toBeNull();
   });
 
-  it('remove republishes the 30617 without the removed maintainer', async () => {
+  it('set is a no-op (nothing published) when already set to the same address', async () => {
     const io = makeIo();
     const fake = makeStandalone();
-    const code = await runMaintainers(
-      ['remove', M1, ...ADDR, '--yes'],
-      makeDeps(io, fake, [announcement(OWNER, [M1, M2])])
-    );
-    expect(code).toBe(0);
-    expect(fake.published).toHaveLength(1);
-    expect(parseMaintainers(fake.published[0]!.event.tags)).toEqual([M2]);
-  });
-
-  it('add is a no-op (nothing published) when already a maintainer', async () => {
-    const io = makeIo();
-    const fake = makeStandalone();
-    const code = await runMaintainers(
-      ['add', M1, ...ADDR, '--yes'],
-      makeDeps(io, fake, [announcement(OWNER, [M1])])
+    const code = await runPayout(
+      ['set', ADDR1, ...ADDR, '--yes'],
+      makeDeps(io, fake, [announcement(OWNER, { payout: ADDR1 })])
     );
     expect(code).toBe(0);
     expect(fake.published).toHaveLength(0);
-    expect(io.err.join('\n')).toContain('already a maintainer');
+    expect(io.err.join('\n')).toContain('already set');
   });
 
-  it('remove is a no-op when the pubkey is not a maintainer', async () => {
+  it('clear is a no-op when no payout pointer is set', async () => {
     const io = makeIo();
     const fake = makeStandalone();
-    const code = await runMaintainers(
-      ['remove', M1, ...ADDR, '--yes'],
-      makeDeps(io, fake, [announcement(OWNER, [M2])])
+    const code = await runPayout(
+      ['clear', ...ADDR, '--yes'],
+      makeDeps(io, fake, [announcement(OWNER)])
     );
     expect(code).toBe(0);
     expect(fake.published).toHaveLength(0);
-    expect(io.err.join('\n')).toContain('not a declared maintainer');
+    expect(io.err.join('\n')).toContain('no payout pointer is set');
   });
 
-  it('REFUSES a non-owner republish (only the owner is authoritative, #287)', async () => {
+  it('REFUSES a non-owner republish', async () => {
     const io = makeIo();
     // The standalone identity is M1, but the repo owner (--owner) is OWNER.
     const fake = makeStandalone(M1);
-    const code = await runMaintainers(
-      ['add', M2, ...ADDR, '--yes'],
-      makeDeps(io, fake, [announcement(OWNER, [])])
+    const code = await runPayout(
+      ['set', ADDR1, ...ADDR, '--yes'],
+      makeDeps(io, fake, [announcement(OWNER)])
     );
     expect(code).toBe(1);
     expect(fake.published).toHaveLength(0);
     expect(io.err.join('\n')).toContain('only the repo owner');
   });
 
-  it('REFUSES add/remove on an unannounced repo (no phantom 30617, #287)', async () => {
-    // No existing announcement on the relay → republishing would mint a
-    // placeholder 30617 for real money that `rig push` could never fix.
-    for (const op of ['add', 'remove'] as const) {
+  it('REFUSES set/clear on an unannounced repo (no phantom 30617)', async () => {
+    for (const args of [['set', ADDR1], ['clear']]) {
       const io = makeIo();
       const fake = makeStandalone();
-      const code = await runMaintainers(
-        [op, M1, ...ADDR, '--yes'],
+      const code = await runPayout(
+        [...args, ...ADDR, '--yes'],
         makeDeps(io, fake, []) // remoteEvents: [] ⇒ announced === false
       );
       expect(code).toBe(1);
@@ -252,31 +268,54 @@ describe('rig maintainers add/remove (paid, owner-only)', () => {
     }
   });
 
+  it('REFUSES a malformed address client-side (bad checksum) — no relay/identity work, exit 2', async () => {
+    const io = makeIo();
+    const fake = makeStandalone();
+    const badChecksum =
+      ADDR1.slice(0, -1) + (ADDR1.slice(-1) === 'a' ? 'A' : 'a');
+    const code = await runPayout(
+      ['set', badChecksum, ...ADDR, '--yes'],
+      makeDeps(io, fake, [announcement(OWNER)])
+    );
+    expect(code).toBe(2);
+    expect(fake.published).toHaveLength(0);
+    expect(io.err.join('\n')).toContain('toon-meta#391');
+  });
+
+  it('REFUSES a malformed address shape client-side — no relay/identity work, exit 2', async () => {
+    const io = makeIo();
+    const fake = makeStandalone();
+    const code = await runPayout(
+      ['set', 'not-an-address', ...ADDR, '--yes'],
+      makeDeps(io, fake, [announcement(OWNER)])
+    );
+    expect(code).toBe(2);
+    expect(fake.published).toHaveLength(0);
+  });
+
   it('estimate only: --json without --yes publishes nothing', async () => {
     const io = makeIo();
     const fake = makeStandalone();
-    const code = await runMaintainers(
-      ['add', M1, ...ADDR, '--json'],
-      makeDeps(io, fake, [announcement(OWNER, [])])
+    const code = await runPayout(
+      ['set', ADDR1, ...ADDR, '--json'],
+      makeDeps(io, fake, [announcement(OWNER)])
     );
     expect(code).toBe(0);
     expect(fake.published).toHaveLength(0);
     expect(io.json[0]).toMatchObject({
-      command: 'maintainers add',
+      command: 'payout set',
       executed: false,
-      maintainers: [M1],
+      payout: { chain: 'evm', address: ADDR1 },
     });
   });
 
-  it('validates the pubkey and subcommand (exit 2)', async () => {
+  it('validates the address and subcommand (exit 2)', async () => {
     const io = makeIo();
     const fake = makeStandalone();
     expect(
-      await runMaintainers(['add', 'nothex', ...ADDR], makeDeps(io, fake, []))
-    ).toBe(2);
-    expect(await runMaintainers(['bogus'], makeDeps(makeIo(), fake, []))).toBe(
-      2
-    );
+      await runPayout(['set', ...ADDR], makeDeps(io, fake, []))
+    ).toBe(2); // missing <address>
+    expect(await runPayout(['bogus'], makeDeps(makeIo(), fake, []))).toBe(2);
     expect(fake.published).toHaveLength(0);
   });
 });
