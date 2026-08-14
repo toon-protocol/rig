@@ -26,6 +26,12 @@
  * `../standalone/network-bootstrap.ts`. The pure resolution lives in
  * {@link resolveNetworkTopology} (unit-testable without any network).
  *
+ * PAID-WRITE TRANSPORT: with no explicit uplink, the resolution places BOTH
+ * the official proxy (ILP-over-HTTP, which the x402 greeting bootstrap needs)
+ * and the payment peer's announced BTP endpoint, and the embedded client is
+ * built with `preferBtpForPaidWrites` so claims ride the authenticated BTP
+ * session instead of an unauthenticated `POST /ilp` the edge answers 401.
+ *
  * TOPOLOGY CACHE (#279): the resolved topology is persisted under
  * `TOON_CLIENT_HOME` (`../standalone/topology-cache.ts`) keyed by
  * relay-origin + identity + an explicit-config fingerprint, with a 15-min
@@ -470,9 +476,30 @@ export async function resolveNetworkTopology(
   // overrides are for, and those are all EXPLICIT. `MissingUplinkError`
   // can no longer fire from here — an uplink always resolves.
   let proxyUrl = explicitProxyUrl;
-  const btpUrl = explicitBtpUrl;
+  let btpUrl = explicitBtpUrl;
   if (!proxyUrl && !btpUrl) {
     proxyUrl = OFFICIAL_PROXY_URL;
+  }
+
+  // ── Paid-write BTP companion ─────────────────────────────────────────────
+  // The proxy default above places an ILP-over-HTTP uplink and NOTHING else,
+  // so the embedded client builds no BTP session at all and every paid write
+  // goes out as `POST /ilp` — which the live edge answers `401 Unauthorized:
+  // identity 'g.toon.client' failed to authenticate`, because the HTTP
+  // one-shot carries only an unauthenticated `ILP-Peer-Id` header while the
+  // BTP session authenticates on connect. Adopting the payment peer's
+  // ANNOUNCED BTP endpoint (genesis seed as the fallback) gives the client
+  // both transports; `preferBtpForPaidWrites` (set alongside this in
+  // `createStandaloneContext`) then sends claims over BTP first and keeps
+  // HTTP as the transport's own fallback. The x402 greeting bootstrap
+  // (connector #617) still rides the proxy, so the channel-open path is
+  // unchanged.
+  //
+  // Only when NO uplink was configured explicitly: someone who pinned
+  // `TOON_CLIENT_PROXY_URL` / `proxyUrl` pinned the transport too, and a
+  // silently-added announce endpoint would route their paid writes off it.
+  if (!explicitProxyUrl && !explicitBtpUrl) {
+    btpUrl = announce?.info.btpEndpoint || genesisSeed?.btpEndpoint;
   }
 
   // ── Destination anchor + publish/store routes ────────────────────────────
@@ -815,6 +842,58 @@ export async function resolveNetworkTopology(
       : {}),
     ...(solanaChannel ? { solanaChannel } : {}),
     ...(minaChannel ? { minaChannel } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Embedded-client transport config
+// ---------------------------------------------------------------------------
+
+/** The transport slice of the embedded client's config. */
+export type UplinkConfig = Pick<
+  ToonClientConfig,
+  | 'proxyUrl'
+  | 'connectorUrl'
+  | 'btpUrl'
+  | 'btpAuthToken'
+  | 'preferBtpForPaidWrites'
+>;
+
+/**
+ * Turn a resolved topology's uplinks into the client's transport config.
+ *
+ * `preferBtpForPaidWrites` is the load-bearing part. The client's default
+ * precedence is HTTP-first, so a proxy-configured client sends every paid
+ * write as a `POST /ilp` one-shot carrying only an unauthenticated
+ * `ILP-Peer-Id` header — which the live edge answers `401 Unauthorized:
+ * identity 'g.toon.client' failed to authenticate`, making `rig push`
+ * impossible. The flag (toon-client#482) swaps the order so claims ride the
+ * BTP session, which authenticates on connect; the BTP transport keeps the
+ * HTTP one as its OWN fallback, so a proxy+BTP topology loses nothing when
+ * BTP is the broken side. Reads, the x402 greeting and the channel open are
+ * untouched either way.
+ *
+ * The client's `requiredTransport` guard (toon-client#558) does not cover
+ * this: no live kind:10032 announce carries that field, so the guard never
+ * fires against the current fleet.
+ */
+export function resolveUplinkConfig(
+  topo: Pick<NetworkTopology, 'proxyUrl' | 'btpUrl'>
+): UplinkConfig {
+  return {
+    // validateConfig requires connectorUrl OR proxyUrl; with BTP-only
+    // config a dummy connectorUrl satisfies it (unused at runtime — same
+    // convention as the daemon).
+    ...(topo.proxyUrl
+      ? { proxyUrl: topo.proxyUrl }
+      : { connectorUrl: 'http://127.0.0.1:1' }),
+    ...(topo.btpUrl
+      ? {
+          btpUrl: topo.btpUrl,
+          btpAuthToken: '',
+          preferBtpForPaidWrites: true,
+        }
+      : {}),
   };
 }
 
@@ -1167,12 +1246,7 @@ export async function createStandaloneContext(
 
   const buildPublisher = (topo: NetworkTopology): StandalonePublisher => {
     const clientConfig: ToonClientConfig = {
-      // validateConfig requires connectorUrl OR proxyUrl; with BTP-only
-      // config a dummy connectorUrl satisfies it (unused at runtime — same
-      // convention as the daemon).
-      ...(topo.proxyUrl
-        ? { proxyUrl: topo.proxyUrl }
-        : { connectorUrl: 'http://127.0.0.1:1' }),
+      ...resolveUplinkConfig(topo),
       mnemonic: identity.mnemonic,
       mnemonicAccountIndex: identity.accountIndex,
       ilpInfo: {
@@ -1184,7 +1258,6 @@ export async function createStandaloneContext(
       },
       toonEncoder: encodeEventToToon,
       toonDecoder: decodeEventFromToon,
-      ...(topo.btpUrl ? { btpUrl: topo.btpUrl, btpAuthToken: '' } : {}),
       destinationAddress: topo.destination,
       // The embedded client bootstraps against the known peer above; its
       // `relayUrl` config only seeds ArDrive-merged peers, so it stays unset.

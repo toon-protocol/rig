@@ -702,6 +702,13 @@ describe('StandalonePublisher', () => {
       tokenNetwork: '0x' + '22'.repeat(20),
     };
 
+    /** `ChannelManager.bindingKey` — the key `peerChannels` really uses. */
+    const bindingKey = (
+      peerId: string,
+      negotiation: typeof NEGOTIATION
+    ): string =>
+      `${peerId}|${negotiation.chain}|${negotiation.tokenNetwork ?? ''}`;
+
     interface ChannelMockCalls extends MockCalls {
       onChainOpens: number;
       trackChannel: { channelId: string; context: PersistedChannelContext }[];
@@ -743,11 +750,22 @@ describe('StandalonePublisher', () => {
         },
         async openChannel(destination?: string) {
           calls.openChannel.push(destination);
-          const existing = peerChannels.get(PEER_ID);
+          // Mirrors ChannelManager.ensureChannel: `peerChannels` is keyed by
+          // the COMPOSITE binding key `<peerId>|<chain>|<tokenNetwork>`
+          // (toon-client#489), never the bare peer id. Spelling it the way
+          // the real client does is load-bearing — a bare-peer-id mock hides
+          // both halves of the leak (a resume seed ensureChannel never finds,
+          // and a recorded "peer id" that is really a whole binding key).
+          const [peerId, negotiation] = [...peerNegotiations.entries()][0] ?? [
+            PEER_ID,
+            NEGOTIATION,
+          ];
+          const key = bindingKey(peerId, negotiation);
+          const existing = peerChannels.get(key);
           if (existing) return existing; // ensureChannel: reuse, no on-chain
           calls.onChainOpens += 1;
           const channelId = `0xchannel-${calls.onChainOpens}`;
-          peerChannels.set(PEER_ID, channelId);
+          peerChannels.set(key, channelId);
           return channelId;
         },
         async signBalanceProof(channelId: string, amount: bigint) {
@@ -822,6 +840,45 @@ describe('StandalonePublisher', () => {
         cumulativeAmount: '0',
       });
       expect(warnings).toEqual([]);
+    });
+
+    // Regression: `peerChannels` is keyed by `<peerId>|<chain>|<tokenNetwork>`
+    // (toon-client#489). Reading that key back as if it were a peer id made
+    // `peerNegotiations.get(...)` miss, so a fresh open was NEVER recorded —
+    // rig warned "could not record the peer→channel mapping" and the next
+    // invocation had nothing to resume, leaking an on-chain channel (and the
+    // gas to open it) per `rig push`.
+    it('records the BARE peer id even though peerChannels is keyed by the composite binding key', async () => {
+      const { client } = mockChannelClient();
+      const publisher = buildPersistent(client);
+      await publisher.publishEvent(EVENT, []);
+      await publisher.stop();
+
+      expect(map.list()[0]?.peerId).toBe(PEER_ID);
+      expect(warnings.join('\n')).not.toMatch(/could not record/);
+    });
+
+    // The other half of the same mismatch: a resume seeded under the bare peer
+    // id is invisible to `ensureChannel`, which opens a second channel anyway.
+    it('seeds a resumed channel under the composite binding key', async () => {
+      const { client: clientA } = mockChannelClient();
+      const runA = buildPersistent(clientA);
+      await runA.publishEvent(EVENT, []);
+      await runA.stop();
+
+      const { client: clientB } = mockChannelClient();
+      const runB = buildPersistent(clientB);
+      await runB.publishEvent(EVENT, []);
+      await runB.stop();
+
+      const peerChannels = (
+        clientB as unknown as {
+          channelManager: { peerChannels: Map<string, string> };
+        }
+      ).channelManager.peerChannels;
+      expect([...peerChannels.keys()]).toEqual([
+        bindingKey(PEER_ID, NEGOTIATION),
+      ]);
     });
 
     it('REUSES the channel across invocations: second run resumes, zero on-chain opens', async () => {
@@ -980,8 +1037,8 @@ describe('StandalonePublisher', () => {
       const { client: clientB, calls: callsB } = mockChannelClient({
         negotiations: rotated,
       });
-      // Process B's openChannel keys peerChannels by PEER_ID, so a resume
-      // seed for the OLD peer id must not be found: assert no resume happened.
+      // The recorded peer is no longer negotiated, so the resume candidate is
+      // skipped outright: assert no resume happened.
       const runB = buildPersistent(clientB);
       await runB.publishEvent(EVENT, []);
       await runB.stop();

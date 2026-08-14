@@ -23,6 +23,7 @@ import {
   OFFICIAL_PUBLISH_DESTINATION,
   buildMinaAutoDeploy,
   resolveNetworkTopology,
+  resolveUplinkConfig,
   type ClientConfigFile,
   type GenesisSeedLike,
   type NetworkTopologyInputs,
@@ -113,7 +114,6 @@ describe('resolveNetworkTopology — uplink', () => {
   it('defaults the uplink to the official edge, announce or not', async () => {
     const topology = await resolveNetworkTopology(inputs());
     expect(topology.proxyUrl).toBe(OFFICIAL_PROXY_URL);
-    expect(topology.btpUrl).toBeUndefined();
   });
 
   it('explicit env proxy beats the official default', async () => {
@@ -136,7 +136,6 @@ describe('resolveNetworkTopology — uplink', () => {
       inputs({ announce: apexAnnounce({ httpEndpoint: undefined }) })
     );
     expect(topology.proxyUrl).toBe(OFFICIAL_PROXY_URL);
-    expect(topology.btpUrl).toBeUndefined();
   });
 
   it('needs neither an announce nor a genesis seed for an uplink', async () => {
@@ -144,6 +143,121 @@ describe('resolveNetworkTopology — uplink', () => {
       inputs({ announce: undefined, genesisSeed: undefined })
     );
     expect(topology.proxyUrl).toBe(OFFICIAL_PROXY_URL);
+    expect(topology.btpUrl).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Paid-write BTP companion
+//
+// The proxy default alone leaves the embedded client with no BTP session, so
+// every paid write goes out as an unauthenticated `POST /ilp` — which the
+// live edge answers `401 Unauthorized: identity 'g.toon.client' failed to
+// authenticate`. NOTE the announces on the live fleet carry NO
+// `requiredTransport` field, so the client's own #558 guard never fires:
+// placing the endpoint (and preferring it, in createStandaloneContext) is
+// what actually gets a claim onto BTP.
+// ---------------------------------------------------------------------------
+
+describe('resolveNetworkTopology — paid-write BTP companion', () => {
+  it("adopts the announce's btpEndpoint alongside the official proxy", async () => {
+    const topology = await resolveNetworkTopology(inputs());
+    expect(topology.proxyUrl).toBe(OFFICIAL_PROXY_URL);
+    expect(topology.btpUrl).toBe('wss://proxy.devnet.toonprotocol.dev:443');
+  });
+
+  it('does so even though the announce declares no requiredTransport', async () => {
+    // The live corpus: not one kind:10032 announce carries the field. The BTP
+    // endpoint must be adopted on its presence alone.
+    const announce = apexAnnounce();
+    expect(
+      (announce.info as unknown as Record<string, unknown>)['requiredTransport']
+    ).toBeUndefined();
+    const topology = await resolveNetworkTopology(inputs({ announce }));
+    expect(topology.btpUrl).toBe('wss://proxy.devnet.toonprotocol.dev:443');
+  });
+
+  it('falls back to the genesis seed when no announce is discovered', async () => {
+    const topology = await resolveNetworkTopology(
+      inputs({ announce: undefined })
+    );
+    expect(topology.btpUrl).toBe(GENESIS.btpEndpoint);
+  });
+
+  it('ignores an announce whose btpEndpoint is empty, using the seed', async () => {
+    const topology = await resolveNetworkTopology(
+      inputs({ announce: apexAnnounce({ btpEndpoint: '' }) })
+    );
+    expect(topology.btpUrl).toBe(GENESIS.btpEndpoint);
+  });
+
+  it('leaves the topology BTP-less when neither announce nor seed has one', async () => {
+    const topology = await resolveNetworkTopology(
+      inputs({
+        announce: apexAnnounce({ btpEndpoint: '' }),
+        genesisSeed: undefined,
+      })
+    );
+    expect(topology.btpUrl).toBeUndefined();
+    expect(topology.proxyUrl).toBe(OFFICIAL_PROXY_URL);
+  });
+
+  // An operator who pinned an uplink pinned the transport with it — silently
+  // adding an announced BTP endpoint would route their paid writes off it.
+  it('never overrides an explicitly pinned proxy uplink', async () => {
+    const topology = await resolveNetworkTopology(
+      inputs({ env: { TOON_CLIENT_PROXY_URL: 'https://my-proxy.example' } })
+    );
+    expect(topology.proxyUrl).toBe('https://my-proxy.example');
+    expect(topology.btpUrl).toBeUndefined();
+  });
+
+  it('never overrides an explicitly pinned BTP uplink', async () => {
+    const topology = await resolveNetworkTopology(
+      inputs({ file: { btpUrl: 'wss://my-btp.example:443' } })
+    );
+    expect(topology.btpUrl).toBe('wss://my-btp.example:443');
+    expect(topology.proxyUrl).toBeUndefined();
+  });
+});
+
+describe('resolveUplinkConfig', () => {
+  it('prefers BTP for paid writes whenever a BTP uplink is available', () => {
+    expect(
+      resolveUplinkConfig({
+        proxyUrl: OFFICIAL_PROXY_URL,
+        btpUrl: 'wss://proxy.devnet.toonprotocol.dev/ilp/btp',
+      })
+    ).toEqual({
+      proxyUrl: OFFICIAL_PROXY_URL,
+      btpUrl: 'wss://proxy.devnet.toonprotocol.dev/ilp/btp',
+      btpAuthToken: '',
+      preferBtpForPaidWrites: true,
+    });
+  });
+
+  it('keeps the proxy as the HTTP leg the x402 greeting bootstrap needs', () => {
+    const config = resolveUplinkConfig({
+      proxyUrl: OFFICIAL_PROXY_URL,
+      btpUrl: 'wss://btp.example:443',
+    });
+    expect(config.proxyUrl).toBe(OFFICIAL_PROXY_URL);
+    expect(config.connectorUrl).toBeUndefined();
+  });
+
+  it('sets the flag on a BTP-only topology too (ordered claim dispatch)', () => {
+    const config = resolveUplinkConfig({ btpUrl: 'wss://btp.example:443' });
+    expect(config.preferBtpForPaidWrites).toBe(true);
+    // validateConfig demands one of connectorUrl/proxyUrl; the dummy is
+    // never dialled (the BTP session is the runtime transport).
+    expect(config.connectorUrl).toBe('http://127.0.0.1:1');
+    expect(config.proxyUrl).toBeUndefined();
+  });
+
+  it('leaves a proxy-only topology on its historical HTTP-first path', () => {
+    expect(
+      resolveUplinkConfig({ proxyUrl: 'https://my-proxy.example' })
+    ).toEqual({ proxyUrl: 'https://my-proxy.example' });
   });
 });
 
