@@ -179,11 +179,9 @@ describe('rig maintainers add/remove (paid, owner-only)', () => {
     );
     expect(code).toBe(0);
     expect(fake.published).toHaveLength(1);
-    expect(fake.published[0]!.event.tags).toContainEqual([
-      'payout',
-      'evm',
-      payoutAddr,
-    ]);
+    const first = fake.published[0];
+    if (!first) throw new Error('expected a published event');
+    expect(first.event.tags).toContainEqual(['payout', 'evm', payoutAddr]);
   });
 
   it('remove republishes the 30617 without the removed maintainer', async () => {

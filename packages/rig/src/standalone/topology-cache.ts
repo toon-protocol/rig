@@ -50,9 +50,20 @@ export function topologyCacheTtlMs(env: NodeJS.ProcessEnv): number {
 }
 
 /**
- * Stable cache key: relay-origin + identity pubkey + the explicit-config
- * fingerprint. Hashed so the key is filename/JSON-safe and the mnemonic-side
- * inputs never appear in the cache file verbatim.
+ * Schema tag mixed into every cache key. A rig release that changes WHAT the
+ * resolution produces for the same inputs (not just its values) must bump
+ * this: entries written by the previous release then miss instead of
+ * shadowing the new behaviour for a whole TTL. Bumped to 2 when the default
+ * resolution started placing a BTP uplink alongside the proxy — a cached
+ * v1 topology has no `btpUrl`, so paid writes would have kept 401ing for 15
+ * minutes after the upgrade.
+ */
+export const TOPOLOGY_SCHEMA_VERSION = 2;
+
+/**
+ * Stable cache key: schema tag + relay-origin + identity pubkey + the
+ * explicit-config fingerprint. Hashed so the key is filename/JSON-safe and
+ * the mnemonic-side inputs never appear in the cache file verbatim.
  */
 export function topologyCacheKey(args: {
   relayUrl: string;
@@ -60,7 +71,10 @@ export function topologyCacheKey(args: {
   fingerprint: string;
 }): string {
   return createHash('sha256')
-    .update(`${args.relayUrl}\n${args.identity}\n${args.fingerprint}`)
+    .update(
+      `v${TOPOLOGY_SCHEMA_VERSION}\n${args.relayUrl}\n${args.identity}\n` +
+        args.fingerprint
+    )
     .digest('hex');
 }
 

@@ -181,7 +181,9 @@ describe('rig payout set/clear (paid, owner-only)', () => {
     );
     expect(code).toBe(0);
     expect(fake.published).toHaveLength(1);
-    const { event, relayUrls } = fake.published[0]!;
+    const first = fake.published[0];
+    if (!first) throw new Error('expected a published event');
+    const { event, relayUrls } = first;
     expect(event.kind).toBe(30617);
     expect(parsePayout(event.tags)).toEqual({ chain: 'evm', address: ADDR1 });
     expect(event.tags).toContainEqual(['name', 'Keep Me']);
@@ -198,7 +200,9 @@ describe('rig payout set/clear (paid, owner-only)', () => {
       makeDeps(io, fake, [announcement(OWNER)])
     );
     expect(code).toBe(0);
-    expect(parsePayout(fake.published[0]!.event.tags)).toEqual({
+    const first = fake.published[0];
+    if (!first) throw new Error('expected a published event');
+    expect(parsePayout(first.event.tags)).toEqual({
       chain: 'evm',
       address: ADDR1,
     });
@@ -220,7 +224,9 @@ describe('rig payout set/clear (paid, owner-only)', () => {
     );
     expect(code).toBe(0);
     expect(fake.published).toHaveLength(1);
-    const { event } = fake.published[0]!;
+    const first = fake.published[0];
+    if (!first) throw new Error('expected a published event');
+    const { event } = first;
     expect(parsePayout(event.tags)).toBeNull();
     expect(event.tags).toContainEqual(['name', 'Keep Me']);
     expect(event.tags).toContainEqual(['description', 'Keep this']);

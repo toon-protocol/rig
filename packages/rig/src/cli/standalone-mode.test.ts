@@ -19,14 +19,20 @@ import {
 } from '../standalone/network-bootstrap.js';
 import { MinaZkAppStore } from '../standalone/mina-zkapp-store.js';
 import {
+  OFFICIAL_BTP_URL,
   OFFICIAL_PROXY_URL,
   OFFICIAL_PUBLISH_DESTINATION,
+  bootstrapRecoveries,
   buildMinaAutoDeploy,
+  isBtpTransportError,
   resolveNetworkTopology,
+  resolveUplinkConfig,
   type ClientConfigFile,
   type GenesisSeedLike,
+  type NetworkTopology,
   type NetworkTopologyInputs,
 } from './standalone-mode.js';
+import type { StandalonePublisher } from '../standalone/standalone-publisher.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -39,7 +45,14 @@ const MNEMONIC =
 const APEX_PUBKEY = 'a1'.repeat(32);
 const RELAY = 'wss://relay-ws.devnet.toonprotocol.dev';
 
-/** Live-devnet-shaped apex announce. */
+/**
+ * Live-devnet-shaped apex announce. Its endpoints deliberately sit on a
+ * DIFFERENT host from the `OFFICIAL_*` constants so precedence is provable
+ * either way — that the announce does not place the HTTP uplink, and that it
+ * DOES place the BTP one. Trusting a live announce over the baked constant is
+ * intentional: the announce is current where a constant is baked, and an
+ * unreachable announced endpoint is caught by the degrade recovery.
+ */
 function apexAnnounce(
   overrides: Partial<Record<string, unknown>> = {}
 ): AnnouncedPeer {
@@ -101,6 +114,48 @@ function inputs(
 }
 
 // ---------------------------------------------------------------------------
+// Official defaults
+//
+// The two baked-in endpoints rig falls back to. They are the ONLY network
+// addresses a default install dials, so they get pinned here: the two-box
+// cutover retired the apex, and a default still pointing at it fails a fresh
+// channel open (the x402 greeting) even when paid writes ride BTP.
+// ---------------------------------------------------------------------------
+
+describe('official default endpoints', () => {
+  /** The apex destroyed in the two-box cutover — resolves, refuses connections. */
+  const RETIRED_APEX_HOST = 'proxy.devnet.toonprotocol.dev';
+
+  it('no default references the retired apex', () => {
+    for (const url of [OFFICIAL_PROXY_URL, OFFICIAL_BTP_URL]) {
+      expect(new URL(url).hostname).not.toBe(RETIRED_APEX_HOST);
+    }
+  });
+
+  it('both defaults live on the relay box that serves the publish route', () => {
+    // OFFICIAL_PUBLISH_DESTINATION is `g.toon.relay`, so the uplink that
+    // terminates it must be the relay box — not the ario/store box.
+    expect(OFFICIAL_PUBLISH_DESTINATION).toBe('g.toon.relay');
+    for (const url of [OFFICIAL_PROXY_URL, OFFICIAL_BTP_URL]) {
+      expect(new URL(url).hostname).toBe('proxy.relay.devnet.toonprotocol.dev');
+    }
+  });
+
+  it('uses the live ingress paths, not the legacy apex ones', () => {
+    // The edge serves ILP-over-HTTP at plain `/ilp` (a GET answers `405
+    // allow: POST`) and answers `410 Gone` on the old `/rust/ilp`.
+    const proxy = new URL(OFFICIAL_PROXY_URL);
+    expect(proxy.protocol).toBe('https:');
+    expect(proxy.pathname).toBe('/ilp');
+    expect(OFFICIAL_PROXY_URL).not.toContain('/rust/');
+
+    const btp = new URL(OFFICIAL_BTP_URL);
+    expect(btp.protocol).toBe('wss:');
+    expect(btp.pathname).toBe('/ilp/btp');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Uplink resolution order
 // ---------------------------------------------------------------------------
 
@@ -113,7 +168,6 @@ describe('resolveNetworkTopology — uplink', () => {
   it('defaults the uplink to the official edge, announce or not', async () => {
     const topology = await resolveNetworkTopology(inputs());
     expect(topology.proxyUrl).toBe(OFFICIAL_PROXY_URL);
-    expect(topology.btpUrl).toBeUndefined();
   });
 
   it('explicit env proxy beats the official default', async () => {
@@ -136,7 +190,6 @@ describe('resolveNetworkTopology — uplink', () => {
       inputs({ announce: apexAnnounce({ httpEndpoint: undefined }) })
     );
     expect(topology.proxyUrl).toBe(OFFICIAL_PROXY_URL);
-    expect(topology.btpUrl).toBeUndefined();
   });
 
   it('needs neither an announce nor a genesis seed for an uplink', async () => {
@@ -144,6 +197,275 @@ describe('resolveNetworkTopology — uplink', () => {
       inputs({ announce: undefined, genesisSeed: undefined })
     );
     expect(topology.proxyUrl).toBe(OFFICIAL_PROXY_URL);
+    // Both legs are official constants — discovery only ever refines them.
+    expect(topology.btpUrl).toBe(OFFICIAL_BTP_URL);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Paid-write BTP companion
+//
+// The proxy default alone leaves the embedded client with no BTP session, so
+// every paid write goes out as an unauthenticated `POST /ilp` — which the
+// live edge answers `401 Unauthorized: identity 'g.toon.client' failed to
+// authenticate`. NOTE the announces on the live fleet carry NO
+// `requiredTransport` field, so the client's own #558 guard never fires:
+// placing the endpoint (and preferring it, in createStandaloneContext) is
+// what actually gets a claim onto BTP.
+// ---------------------------------------------------------------------------
+
+describe('resolveNetworkTopology — paid-write BTP companion', () => {
+  it("adopts the announce's btpEndpoint alongside the official proxy", async () => {
+    const topology = await resolveNetworkTopology(inputs());
+    expect(topology.proxyUrl).toBe(OFFICIAL_PROXY_URL);
+    expect(topology.btpUrl).toBe('wss://proxy.devnet.toonprotocol.dev:443');
+  });
+
+  it('does so even though the announce declares no requiredTransport', async () => {
+    // The live corpus: not one kind:10032 announce carries the field. The BTP
+    // endpoint must be adopted on its presence alone.
+    const announce = apexAnnounce();
+    expect(
+      (announce.info as unknown as Record<string, unknown>)['requiredTransport']
+    ).toBeUndefined();
+    const topology = await resolveNetworkTopology(inputs({ announce }));
+    expect(topology.btpUrl).toBe('wss://proxy.devnet.toonprotocol.dev:443');
+  });
+
+  it('falls back to the official relay BTP ingress, NOT the genesis seed', async () => {
+    // The committed seed in @toon-protocol/core still names the RETIRED apex
+    // (`proxy.devnet.toonprotocol.dev`), a host that resolves but refuses
+    // connections since the two-box cutover. Because the embedded client
+    // dials BTP during start(), adopting it would turn a late 401 into rig
+    // refusing to run at all.
+    const topology = await resolveNetworkTopology(
+      inputs({ announce: undefined })
+    );
+    expect(topology.btpUrl).toBe(OFFICIAL_BTP_URL);
+    expect(topology.btpUrl).not.toBe(GENESIS.btpEndpoint);
+    expect(OFFICIAL_BTP_URL).not.toContain('//proxy.devnet.');
+  });
+
+  it('ignores an announce whose btpEndpoint is empty', async () => {
+    const topology = await resolveNetworkTopology(
+      inputs({ announce: apexAnnounce({ btpEndpoint: '' }) })
+    );
+    expect(topology.btpUrl).toBe(OFFICIAL_BTP_URL);
+  });
+
+  it('marks a discovered endpoint as derived (droppable when unreachable)', async () => {
+    for (const announce of [apexAnnounce(), undefined]) {
+      const topology = await resolveNetworkTopology(inputs({ announce }));
+      expect(topology.btpUrlDerived).toBe(true);
+    }
+  });
+
+  // An operator who pinned an uplink pinned the transport with it — silently
+  // adding an announced BTP endpoint would route their paid writes off it.
+  it('never overrides an explicitly pinned proxy uplink', async () => {
+    const topology = await resolveNetworkTopology(
+      inputs({ env: { TOON_CLIENT_PROXY_URL: 'https://my-proxy.example' } })
+    );
+    expect(topology.proxyUrl).toBe('https://my-proxy.example');
+    expect(topology.btpUrl).toBeUndefined();
+  });
+
+  it('never overrides an explicitly pinned BTP uplink, and never marks it derived', async () => {
+    const topology = await resolveNetworkTopology(
+      inputs({ file: { btpUrl: 'wss://my-btp.example:443' } })
+    );
+    expect(topology.btpUrl).toBe('wss://my-btp.example:443');
+    expect(topology.proxyUrl).toBeUndefined();
+    expect(topology.btpUrlDerived).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unreachable-BTP classification
+//
+// The gate on dropping a derived BTP leg. Narrow on purpose: it decides
+// whether rig may abandon a configured transport, so anything broader would
+// paper over unrelated bootstrap failures.
+// ---------------------------------------------------------------------------
+
+describe('isBtpTransportError', () => {
+  const named = (name: string, message = 'boom'): Error => {
+    const err = new Error(message);
+    err.name = name;
+    return err;
+  };
+
+  it('matches the client BTP socket/auth failures', () => {
+    // @toon-protocol/client throws these (unexported) for a websocket that
+    // would not open or would not authenticate.
+    expect(
+      isBtpTransportError(
+        named('BtpConnectionError', 'WebSocket connection error: ECONNREFUSED')
+      )
+    ).toBe(true);
+    expect(isBtpTransportError(named('BtpAuthError'))).toBe(true);
+  });
+
+  it('does NOT match unrelated bootstrap failures', () => {
+    expect(isBtpTransportError(named('Error', 'connect ECONNREFUSED'))).toBe(
+      false
+    );
+    expect(isBtpTransportError(named('ToonClientError'))).toBe(false);
+    expect(isBtpTransportError(named('ChannelMapCorruptError'))).toBe(false);
+    expect(isBtpTransportError(named('MinaFeePayerUnfundedError'))).toBe(false);
+    expect(isBtpTransportError('BtpConnectionError')).toBe(false);
+    expect(isBtpTransportError(undefined)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bootstrap recoveries
+//
+// The safety net behind the BTP companion: the embedded client dials BTP
+// during start(), so an unreachable DERIVED endpoint must degrade to HTTP
+// rather than stop rig from running — a strictly worse failure than the 401
+// it replaces.
+// ---------------------------------------------------------------------------
+
+describe('bootstrapRecoveries', () => {
+  const DERIVED: NetworkTopology = {
+    proxyUrl: OFFICIAL_PROXY_URL,
+    btpUrl: OFFICIAL_BTP_URL,
+    btpUrlDerived: true,
+    destination: 'g.toon.relay',
+    knownPeers: [],
+  };
+  const btpDown = (): Error => {
+    const err = new Error('WebSocket connection error: ECONNREFUSED');
+    err.name = 'BtpConnectionError';
+    return err;
+  };
+
+  /** Records every topology a rebuild built from. */
+  function harness(
+    topology: NetworkTopology,
+    reresolve?: () => Promise<NetworkTopology>
+  ) {
+    const built: NetworkTopology[] = [];
+    const recoveries = bootstrapRecoveries({
+      topology,
+      buildPublisher: (topo) => {
+        built.push(topo);
+        return {} as StandalonePublisher;
+      },
+      ...(reresolve ? { reresolve } : {}),
+    });
+    return { built, recoveries };
+  }
+
+  it('drops an unreachable DERIVED BTP leg, keeping the HTTP uplink', async () => {
+    const { built, recoveries } = harness(DERIVED);
+    const btp = recoveries.find((r) => r.applies(btpDown()));
+    expect(btp).toBeDefined();
+    await btp?.rebuild();
+    expect(built).toHaveLength(1);
+    expect(built[0]?.btpUrl).toBeUndefined();
+    expect(built[0]?.btpUrlDerived).toBeUndefined();
+    // Everything else survives — this degrades one transport, not the topology.
+    expect(built[0]?.proxyUrl).toBe(OFFICIAL_PROXY_URL);
+    expect(built[0]?.destination).toBe('g.toon.relay');
+  });
+
+  it('names the dead endpoint and the remedy in the warning', () => {
+    const { recoveries } = harness(DERIVED);
+    const line = recoveries[recoveries.length - 1]?.describe(btpDown()) ?? '';
+    expect(line).toContain(OFFICIAL_BTP_URL);
+    expect(line).toContain('ECONNREFUSED');
+    expect(line).toContain('rig entry');
+  });
+
+  it('never drops an EXPLICITLY pinned BTP uplink', () => {
+    const { recoveries } = harness({
+      ...DERIVED,
+      btpUrl: 'wss://pinned.example:443',
+      btpUrlDerived: undefined,
+    });
+    expect(recoveries.some((r) => r.applies(btpDown()))).toBe(false);
+  });
+
+  it('does not fire for a non-BTP bootstrap failure', () => {
+    const { recoveries } = harness(DERIVED);
+    expect(
+      recoveries.some((r) => r.applies(new Error('chain misconfig')))
+    ).toBe(false);
+  });
+
+  it('registers no cache recovery for a live-resolved topology', () => {
+    const { recoveries } = harness(DERIVED);
+    expect(recoveries).toHaveLength(1);
+  });
+
+  // The two recoveries COMPOSE: the degrade must drop the BTP leg of whatever
+  // the cache recovery re-resolved, not of the topology it started from.
+  it('degrades the RE-RESOLVED topology after a cache recovery', async () => {
+    const fresh: NetworkTopology = {
+      ...DERIVED,
+      btpUrl: 'wss://rotated.example/ilp/btp',
+      destination: 'g.toon.relay',
+    };
+    const { built, recoveries } = harness(DERIVED, async () => fresh);
+    expect(recoveries).toHaveLength(2);
+
+    await recoveries[0]?.rebuild(); // cache miss → live re-resolve
+    expect(built[0]?.btpUrl).toBe('wss://rotated.example/ilp/btp');
+
+    expect(recoveries[1]?.applies(btpDown())).toBe(true);
+    expect(recoveries[1]?.describe(btpDown())).toContain(
+      'wss://rotated.example/ilp/btp'
+    );
+    await recoveries[1]?.rebuild();
+    expect(built[1]?.btpUrl).toBeUndefined();
+    expect(built[1]?.proxyUrl).toBe(OFFICIAL_PROXY_URL);
+  });
+
+  it('the cache recovery applies to ANY failure (staleness is untypeable)', () => {
+    const { recoveries } = harness(DERIVED, async () => DERIVED);
+    expect(recoveries[0]?.applies(new Error('anything at all'))).toBe(true);
+  });
+});
+
+describe('resolveUplinkConfig', () => {
+  it('prefers BTP for paid writes whenever a BTP uplink is available', () => {
+    expect(
+      resolveUplinkConfig({
+        proxyUrl: OFFICIAL_PROXY_URL,
+        btpUrl: 'wss://proxy.devnet.toonprotocol.dev/ilp/btp',
+      })
+    ).toEqual({
+      proxyUrl: OFFICIAL_PROXY_URL,
+      btpUrl: 'wss://proxy.devnet.toonprotocol.dev/ilp/btp',
+      btpAuthToken: '',
+      preferBtpForPaidWrites: true,
+    });
+  });
+
+  it('keeps the proxy as the HTTP leg the x402 greeting bootstrap needs', () => {
+    const config = resolveUplinkConfig({
+      proxyUrl: OFFICIAL_PROXY_URL,
+      btpUrl: 'wss://btp.example:443',
+    });
+    expect(config.proxyUrl).toBe(OFFICIAL_PROXY_URL);
+    expect(config.connectorUrl).toBeUndefined();
+  });
+
+  it('sets the flag on a BTP-only topology too (ordered claim dispatch)', () => {
+    const config = resolveUplinkConfig({ btpUrl: 'wss://btp.example:443' });
+    expect(config.preferBtpForPaidWrites).toBe(true);
+    // validateConfig demands one of connectorUrl/proxyUrl; the dummy is
+    // never dialled (the BTP session is the runtime transport).
+    expect(config.connectorUrl).toBe('http://127.0.0.1:1');
+    expect(config.proxyUrl).toBeUndefined();
+  });
+
+  it('leaves a proxy-only topology on its historical HTTP-first path', () => {
+    expect(
+      resolveUplinkConfig({ proxyUrl: 'https://my-proxy.example' })
+    ).toEqual({ proxyUrl: 'https://my-proxy.example' });
   });
 });
 

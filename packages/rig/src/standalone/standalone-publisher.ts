@@ -320,6 +320,33 @@ interface ChannelInternals {
   };
 }
 
+/**
+ * The key `ChannelManager` binds a peer's channel under —
+ * `<peerId>|<chain>|<tokenNetwork>` (toon-client#489: the same peer on a
+ * second chain, or a redeployed token network, is a DIFFERENT channel).
+ * `peerChannels` used to be keyed by the bare peer id, so rig both wrote
+ * resumed channels under a key `ensureChannel` never looks up (a fresh
+ * on-chain channel per invocation) and read the composite key back as if it
+ * were a peer id (so `peerNegotiations.get(...)` missed and nothing was ever
+ * recorded). Keep in sync with `@toon-protocol/client`'s
+ * `ChannelManager.bindingKey`.
+ */
+function channelBindingKey(
+  peerId: string,
+  chain: string,
+  tokenNetwork: string
+): string {
+  return `${peerId}|${chain}|${tokenNetwork}`;
+}
+
+/**
+ * The peer id inside a {@link channelBindingKey}. A pre-#489 bare-peer-id key
+ * has no separator and passes through unchanged, so this reads either shape.
+ */
+function peerIdFromBindingKey(key: string): string {
+  return key.split('|')[0] ?? key;
+}
+
 /** Best-effort access to the client's private negotiation/channel state. */
 function channelInternals(client: ToonClientLike): ChannelInternals {
   const c = client as unknown as ChannelInternals;
@@ -630,9 +657,13 @@ export class StandalonePublisher implements Publisher {
       }
 
       // trackChannel rehydrates nonce/cumulative from the watermark store;
-      // seeding peerChannels makes ensureChannel/openChannel reuse the id.
+      // seeding peerChannels makes ensureChannel/openChannel reuse the id —
+      // but ONLY under the composite binding key it looks up.
       cm.trackChannel(record.channelId, record.context);
-      cm.peerChannels.set(record.peerId, record.channelId);
+      cm.peerChannels.set(
+        channelBindingKey(record.peerId, record.chain, record.tokenNetwork),
+        record.channelId
+      );
 
       // Persisted channel state omits the on-chain deposit — re-read it so
       // fee/balance accounting is right (EVM only; mirrors the daemon).
@@ -679,11 +710,13 @@ export class StandalonePublisher implements Publisher {
     destination: string,
     channelId: string
   ): void {
+    // `peerChannels` is keyed by the COMPOSITE binding key, not the peer id
+    // (toon-client#489) — read the peer id back out of it.
     let peerId: string | undefined;
-    for (const [peer, channel] of internals.channelManager?.peerChannels ??
+    for (const [key, channel] of internals.channelManager?.peerChannels ??
       []) {
       if (channel === channelId) {
-        peerId = peer;
+        peerId = peerIdFromBindingKey(key);
         break;
       }
     }
@@ -818,7 +851,10 @@ export class StandalonePublisher implements Publisher {
     const cm = internals.channelManager;
     if (cm?.trackChannel && cm.peerChannels) {
       cm.trackChannel(record.channelId, record.context);
-      cm.peerChannels.set(record.peerId, record.channelId);
+      cm.peerChannels.set(
+        channelBindingKey(record.peerId, record.chain, record.tokenNetwork),
+        record.channelId
+      );
     }
     const contextCache = internals.onChainChannelClient?.channelContext;
     if (contextCache && !contextCache.has(record.channelId)) {

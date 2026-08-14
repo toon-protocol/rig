@@ -51,8 +51,8 @@ importers:
         specifier: ^1.0.0
         version: 1.4.0
       '@toon-protocol/client':
-        specifier: ^0.29.0
-        version: 0.29.0(typescript@5.9.3)(zod@3.25.76)
+        specifier: ^0.29.7
+        version: 0.29.7(typescript@5.9.3)(zod@3.25.76)
       '@toon-protocol/core':
         specifier: ^3.2.0
         version: 3.2.0(typescript@5.9.3)
@@ -8370,8 +8370,8 @@ packages:
       - zod
     dev: true
 
-  /@toon-protocol/client@0.29.0(typescript@5.9.3)(zod@3.25.76):
-    resolution: {integrity: sha512-98zydohZcCAv2w7yoAoWwBHtd6+3Un3f5pXZI26I7YfakOKqi4qXaKZdmBejiOZ+7mpaPhKG6RIprKEqqafxAw==}
+  /@toon-protocol/client@0.29.7(typescript@5.9.3)(zod@3.25.76):
+    resolution: {integrity: sha512-boI9yU7gKLgH0CeLuNy6CIsZKd7or4n4uuvTaATOpSONh45kil6LWUURANkNSSHE43YJgV/W0A6vNW+7CTVmQw==}
     dependencies:
       '@noble/ciphers': 2.1.1
       '@noble/curves': 2.2.0
@@ -8379,8 +8379,8 @@ packages:
       '@noble/hashes': 1.8.0
       '@scure/bip32': 1.7.0
       '@scure/bip39': 1.6.0
-      '@toon-protocol/core': 3.2.0(typescript@5.9.3)
-      '@toon-protocol/sdk': 3.1.3(mina-signer@3.1.0)(typescript@5.9.3)
+      '@toon-protocol/core': 3.3.0(typescript@5.9.3)
+      '@toon-protocol/sdk': 3.1.7(mina-signer@3.1.0)(typescript@5.9.3)
       nostr-tools: 2.24.1(typescript@5.9.3)
       viem: 2.55.5(typescript@5.9.3)(zod@3.25.76)
     optionalDependencies:
@@ -8685,69 +8685,6 @@ packages:
       - utf-8-validate
     dev: true
 
-  /@toon-protocol/core@3.1.3(typescript@5.9.3):
-    resolution: {integrity: sha512-qN+RXHwriLXDl67hjBWiWXo49aqLBBtOnuh+aykpjKDyuMe26cKEHraV7ydiSpHFefgzA/yOAmuKl+ArmKcpZw==}
-    engines: {node: '>=22'}
-    peerDependencies:
-      '@toon-protocol/connector': '>=3.3.3'
-    peerDependenciesMeta:
-      '@toon-protocol/connector':
-        optional: true
-    dependencies:
-      '@ardrive/turbo-sdk': 1.42.0(typescript@5.9.3)
-      '@noble/hashes': 2.2.0
-      '@scure/bip32': 2.2.0
-      '@scure/bip39': 2.2.0
-      '@toon-format/toon': 1.4.0
-      '@toon-protocol/settlement-digest': 1.0.0
-      arweave: 1.15.7
-      nostr-tools: 2.24.1(typescript@5.9.3)
-      simple-git: 3.36.0
-      ws: 8.21.2(bufferutil@4.1.0)(utf-8-validate@6.0.6)
-    transitivePeerDependencies:
-      - '@azure/app-configuration'
-      - '@azure/cosmos'
-      - '@azure/data-tables'
-      - '@azure/identity'
-      - '@azure/keyvault-secrets'
-      - '@azure/storage-blob'
-      - '@capacitor/preferences'
-      - '@deno/kv'
-      - '@netlify/blobs'
-      - '@planetscale/database'
-      - '@react-native-async-storage/async-storage'
-      - '@solana/sysvars'
-      - '@tanstack/query-core'
-      - '@tanstack/react-query'
-      - '@types/react'
-      - '@upstash/redis'
-      - '@vercel/blob'
-      - '@vercel/functions'
-      - '@vercel/kv'
-      - '@x402/core'
-      - '@x402/evm'
-      - '@x402/extensions'
-      - '@x402/svm'
-      - aws4fetch
-      - bufferutil
-      - db0
-      - debug
-      - encoding
-      - expo-auth-session
-      - expo-crypto
-      - expo-web-browser
-      - fastestsmallesttextencoderdecoder
-      - immer
-      - ioredis
-      - preact-render-to-string
-      - react
-      - react-native
-      - supports-color
-      - typescript
-      - uploadthing
-      - utf-8-validate
-    dev: false
-
   /@toon-protocol/core@3.2.0(@types/react@19.2.17)(react@19.2.8)(typescript@5.9.3):
     resolution: {integrity: sha512-mNl4Oje+vz7g+C4nIHGRxB/W8/ySsFnaMN8kJkUsZ1muMgzl0srIskaauedWn4oMSC7pn1DXM7KVi9f0JW1yMw==}
     engines: {node: '>=22'}
@@ -8830,6 +8767,69 @@ packages:
       nostr-tools: 2.24.1(typescript@5.9.3)
       simple-git: 3.36.0
       ws: 8.21.1
+    transitivePeerDependencies:
+      - '@azure/app-configuration'
+      - '@azure/cosmos'
+      - '@azure/data-tables'
+      - '@azure/identity'
+      - '@azure/keyvault-secrets'
+      - '@azure/storage-blob'
+      - '@capacitor/preferences'
+      - '@deno/kv'
+      - '@netlify/blobs'
+      - '@planetscale/database'
+      - '@react-native-async-storage/async-storage'
+      - '@solana/sysvars'
+      - '@tanstack/query-core'
+      - '@tanstack/react-query'
+      - '@types/react'
+      - '@upstash/redis'
+      - '@vercel/blob'
+      - '@vercel/functions'
+      - '@vercel/kv'
+      - '@x402/core'
+      - '@x402/evm'
+      - '@x402/extensions'
+      - '@x402/svm'
+      - aws4fetch
+      - bufferutil
+      - db0
+      - debug
+      - encoding
+      - expo-auth-session
+      - expo-crypto
+      - expo-web-browser
+      - fastestsmallesttextencoderdecoder
+      - immer
+      - ioredis
+      - preact-render-to-string
+      - react
+      - react-native
+      - supports-color
+      - typescript
+      - uploadthing
+      - utf-8-validate
+    dev: false
+
+  /@toon-protocol/core@3.3.0(typescript@5.9.3):
+    resolution: {integrity: sha512-X/snuKfBIpX83qMngtuns883iqIyJ6No5RXf3zGxrggoqyYxLQ8tCjjen4BPKWLvnw1KPrKSXdSZjvqyaJ1oyw==}
+    engines: {node: '>=22'}
+    peerDependencies:
+      '@toon-protocol/connector': '>=3.3.3'
+    peerDependenciesMeta:
+      '@toon-protocol/connector':
+        optional: true
+    dependencies:
+      '@ardrive/turbo-sdk': 1.42.0(typescript@5.9.3)
+      '@noble/hashes': 2.2.0
+      '@scure/bip32': 2.2.0
+      '@scure/bip39': 2.2.0
+      '@toon-format/toon': 1.4.0
+      '@toon-protocol/settlement-digest': 1.0.0
+      arweave: 1.15.7
+      nostr-tools: 2.24.1(typescript@5.9.3)
+      simple-git: 3.36.0
+      ws: 8.21.2(bufferutil@4.1.0)(utf-8-validate@6.0.6)
     transitivePeerDependencies:
       - '@azure/app-configuration'
       - '@azure/cosmos'
@@ -9090,8 +9090,8 @@ packages:
       - utf-8-validate
     dev: true
 
-  /@toon-protocol/sdk@3.1.3(mina-signer@3.1.0)(typescript@5.9.3):
-    resolution: {integrity: sha512-QD9nh7t2X7H6T7N8X0fSCWhFoz6ljz2o98+iega5wQMziPSdMh90gcaeS8Z2dxYljfr2v2WG95j0gBW7qHIOOA==}
+  /@toon-protocol/sdk@3.1.7(mina-signer@3.1.0)(typescript@5.9.3):
+    resolution: {integrity: sha512-88bFFaan2eV3YzE1bkoA8PzZseVENYXcuMb7iGGmQkKQMrsraqgUx22gONz2BZh6jkUbYgne21YZi044HAP0NA==}
     engines: {node: '>=22'}
     peerDependencies:
       '@toon-protocol/connector': '>=3.3.3'
@@ -9107,7 +9107,7 @@ packages:
       '@noble/hashes': 2.2.0
       '@scure/bip32': 2.2.0
       '@scure/bip39': 2.2.0
-      '@toon-protocol/core': 3.1.3(typescript@5.9.3)
+      '@toon-protocol/core': 3.3.0(typescript@5.9.3)
       '@toon-protocol/settlement-digest': 1.0.0
       mina-signer: 3.1.0
       nostr-tools: 2.24.1(typescript@5.9.3)
