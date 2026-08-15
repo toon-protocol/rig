@@ -1278,3 +1278,91 @@ describe('buildMinaAutoDeploy — zkApp key persistence', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Store leg
+//
+// The store route can terminate on a DIFFERENT node than publishes, and that
+// node holds its own payment channel. A claim signed on the publish channel
+// is refused by it outright (`F01 - claim rejected: names a channel this
+// connector has no record of`), which is what made every `rig push` fail on
+// the two-box fleet: rig had one uplink and paid the store from the publish
+// channel. Each node also prices its OWN routes, so the store price has to be
+// read from the store node's announce, not the payment peer's — reading the
+// wrong one leaves the fee at 0 and the connector answers `F03 - claim
+// rejected: advances value by 0, less than this route's price`.
+// ---------------------------------------------------------------------------
+
+function storeAnnounce(
+  overrides: Partial<Record<string, unknown>> = {}
+): AnnouncedPeer {
+  const content: Record<string, unknown> = {
+    ilpAddress: 'g.proxy.store',
+    btpEndpoint: 'wss://store.example.test/ilp/btp',
+    assetCode: 'USDC',
+    assetScale: 6,
+    routePrices: { 'g.proxy.store': '1000' },
+    ...overrides,
+  };
+  return {
+    pubkey: 'ab'.repeat(32),
+    info: content as unknown as AnnouncedPeer['info'],
+    routes: { publish: 'g.proxy.store', store: 'g.proxy.store' },
+    ...(content['routePrices']
+      ? { routePrices: content['routePrices'] as Record<string, string> }
+      : {}),
+    createdAt: 1001,
+  };
+}
+
+describe('resolveNetworkTopology — store leg', () => {
+  it('takes the store uplink from the STORE node announce, not the payment peer', async () => {
+    const topology = await resolveNetworkTopology(
+      inputs({ peers: [apexAnnounce(), storeAnnounce()] })
+    );
+    expect(topology.storeDestination).toBe('g.proxy.store');
+    expect(topology.storeBtpUrl).toBe('wss://store.example.test/ilp/btp');
+    // Never the payment peer's own endpoint — that is the publish leg's.
+    expect(topology.storeBtpUrl).not.toBe(topology.btpUrl);
+  });
+
+  it('prices the store route from the store node announce', async () => {
+    const topology = await resolveNetworkTopology(
+      inputs({ peers: [apexAnnounce(), storeAnnounce()] })
+    );
+    // Without this the upload fee floors at 0 and the store answers F03.
+    expect(topology.routePrices?.store).toBe('1000');
+  });
+
+  it('resolves no store uplink when the store terminates on the publish node', async () => {
+    // Single-box: one node, one channel — a second uplink would open a
+    // redundant on-chain channel against the same counterparty.
+    const announce = apexAnnounce();
+    announce.routes = { publish: 'g.proxy.relay', store: 'g.proxy.relay' };
+    const topology = await resolveNetworkTopology(
+      inputs({ announce, peers: [announce] })
+    );
+    expect(topology.storeBtpUrl).toBeUndefined();
+  });
+
+  it('never guesses a store uplink when no announce claims the route', async () => {
+    // A guessed store endpoint would send real claims to a node nobody
+    // advertised. Undiscovered stays undiscovered.
+    const warnings: string[] = [];
+    const topology = await resolveNetworkTopology(
+      inputs({ peers: [apexAnnounce()], warn: (l) => warnings.push(l) })
+    );
+    expect(topology.storeBtpUrl).toBeUndefined();
+    expect(warnings.join('\n')).toContain('g.proxy.store');
+  });
+
+  it('lets an explicit pin override the announced store uplink', async () => {
+    const topology = await resolveNetworkTopology(
+      inputs({
+        peers: [apexAnnounce(), storeAnnounce()],
+        file: { storeBtpUrl: 'wss://pinned.example.test/ilp/btp' },
+      })
+    );
+    expect(topology.storeBtpUrl).toBe('wss://pinned.example.test/ilp/btp');
+  });
+});

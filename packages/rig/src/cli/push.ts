@@ -395,32 +395,34 @@ export interface RigPageReport {
 }
 
 /**
- * Gateway for printed Rig-page URLs. Must be a gateway that serves the
- * store's FRESH uploads — `ar-io.dev` (the head of the fetch-redundancy
- * list): the store currently uploads to the ar.io testnet, which
- * `arweave.net` (mainnet) never serves, and even for mainnet uploads it
- * lags until the bundle settles. The mirror URL printed alongside covers
- * the other gateway. Distinct from the BUNDLE gateway embedded in the
- * pointer HTML ({@link DEFAULT_RIG_WEB_GATEWAY}), which tracks where the
- * rig-web deploy lives. `RIG_ARWEAVE_GATEWAY` overrides, same as
- * `rig site`.
+ * Gateway for printed Rig-page URLs — the head of the SHARED fetch-redundancy
+ * list ({@link ARWEAVE_GATEWAYS}), not a literal, so rig prints whatever the
+ * one gateway list says is preferred and cannot drift from it.
+ *
+ * It must be a gateway that serves the store's FRESH uploads: the store
+ * currently uploads to the ar.io testnet, which `arweave.net` (mainnet) never
+ * serves, and even for mainnet uploads it lags until the bundle settles.
+ * Distinct from the BUNDLE gateway embedded in the pointer HTML
+ * ({@link DEFAULT_RIG_WEB_GATEWAY}), which tracks where the rig-web deploy
+ * lives. `RIG_ARWEAVE_GATEWAY` overrides, same as `rig site`.
  */
 function pointerGateway(env: NodeJS.ProcessEnv): string {
-  return (env['RIG_ARWEAVE_GATEWAY'] ?? 'https://ar-io.dev').replace(
-    /\/+$/,
-    ''
-  );
+  const preferred = ARWEAVE_GATEWAYS[0] ?? 'https://arweave.net';
+  return (env['RIG_ARWEAVE_GATEWAY'] ?? preferred).replace(/\/+$/, '');
 }
 
 /**
- * A second gateway to print alongside the primary pointer URL. Gateways
- * index fresh uploads at different speeds (arweave.net serves Turbo
- * uploads immediately; ar-io.dev can lag until the bundle is unbundled —
- * and vice versa for older data), so printing two addresses gives the
- * user a working link whichever side is behind.
+ * Every OTHER gateway from the shared list, printed under the primary.
+ *
+ * All of them, not just one: a gateway can be flat DOWN, not merely behind.
+ * Observed 2026-08-15 — `ar-io.dev` answered `503` on its own root while the
+ * page was live and byte-identical on both other gateways, and a single
+ * printed alternate is one outage away from leaving the reader with no
+ * working link and the impression their push failed. The count follows the
+ * shared list, so adding a gateway there adds it here.
  */
-function mirrorGateway(primary: string): string | undefined {
-  return ARWEAVE_GATEWAYS.find((g) => g !== primary);
+function mirrorGateways(primary: string): string[] {
+  return ARWEAVE_GATEWAYS.filter((g) => g.replace(/\/+$/, '') !== primary);
 }
 
 /** Build the Rig-pointer plan: deterministic pointer + content-addressed skip. */
@@ -729,11 +731,17 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
               : '') +
             '  (renders this repo from Arweave)'
         );
-        const mirror = rigPage.txId ? mirrorGateway(gateway) : undefined;
-        if (mirror) {
+        const mirrors = rigPage.txId ? mirrorGateways(gateway) : [];
+        if (mirrors.length > 0 && rigPage.txId) {
+          const txId = rigPage.txId;
           io.out(
-            `     also: ${mirror}/${rigPage.txId}  (same page; gateways index fresh uploads at different speeds)`
+            '     also: (same page — try these if the address above does ' +
+              'not load; gateways index fresh uploads at different speeds, ' +
+              'and any one of them can be down)'
           );
+          for (const mirror of mirrors) {
+            io.out(`           ${mirror}/${txId}`);
+          }
         }
       } else if (rigPage.detail) {
         io.err(`rig page: ${rigPage.detail}`);

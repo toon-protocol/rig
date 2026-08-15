@@ -58,7 +58,7 @@ export function topologyCacheTtlMs(env: NodeJS.ProcessEnv): number {
  * v1 topology has no `btpUrl`, so paid writes would have kept 401ing for 15
  * minutes after the upgrade.
  */
-export const TOPOLOGY_SCHEMA_VERSION = 2;
+export const TOPOLOGY_SCHEMA_VERSION = 3;
 
 /**
  * Stable cache key: schema tag + relay-origin + identity pubkey + the

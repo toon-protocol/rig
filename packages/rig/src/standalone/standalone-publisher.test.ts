@@ -1412,3 +1412,107 @@ describe('extractArweaveTxId', () => {
     expect(() => extractArweaveTxId(answer(500, 'oops'))).toThrow(/HTTP 500/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Store leg
+//
+// When the store route terminates on its own node, that node holds its own
+// payment channel. Paying it with a claim signed on the PUBLISH channel is
+// refused outright — `F01 - claim rejected: names a channel this connector
+// has no record of, so there is no counterparty to verify its signature
+// against` — which is what made every `rig push` against the two-box fleet
+// fail on the first git object. These assert on WHICH channel the claim is
+// signed against, because a test that only checks the upload succeeds would
+// still pass with both legs sharing one channel.
+// ---------------------------------------------------------------------------
+
+describe('store leg — a store write is paid on the STORE channel', () => {
+  function twoLeg(lockDir: string) {
+    const publish = mockClient();
+    const store = mockClient();
+    // Distinguish the two legs by the channel each opens.
+    store.client.openChannel = async (destination?: string) => {
+      store.calls.openChannel.push(destination);
+      return 'store-channel-1';
+    };
+    const publisher = new StandalonePublisher({
+      client: publish.client,
+      storeClient: store.client,
+      channelDestination: 'g.proxy.relay',
+      storeDestination: 'g.proxy.store',
+      publishDestination: 'g.proxy.relay',
+      lockDir,
+      fetchImpl: noDaemon,
+    });
+    return { publisher, publish, store };
+  }
+
+  it('signs the git-object claim on the store channel, not the publish channel', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rig-store-leg-'));
+    const { publisher, publish, store } = twoLeg(dir);
+    await publisher.uploadGitObject({
+      sha: 'a'.repeat(40),
+      type: 'blob',
+      body: Buffer.from('hello'),
+      repoId: 'demo',
+    });
+
+    // The claim the store node verifies must name ITS channel.
+    expect(store.calls.claims.map((c) => c.channelId)).toEqual([
+      'store-channel-1',
+    ]);
+    // and the publish channel must not have been charged for it.
+    expect(publish.calls.claims).toEqual([]);
+    expect(store.calls.publishes[0]?.options?.destination).toBe(
+      'g.proxy.store'
+    );
+    await publisher.stop();
+  });
+
+  it('opens the store channel against the STORE destination', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rig-store-leg-'));
+    const { publisher, store } = twoLeg(dir);
+    await publisher.uploadGitObject({
+      sha: 'b'.repeat(40),
+      type: 'blob',
+      body: Buffer.from('hi'),
+      repoId: 'demo',
+    });
+    expect(store.calls.openChannel).toEqual(['g.proxy.store']);
+    await publisher.stop();
+  });
+
+  it('builds the store leg lazily — a publish-only run opens no store channel', async () => {
+    // A second on-chain channel costs gas; a run with nothing to upload must
+    // not open one.
+    const dir = mkdtempSync(join(tmpdir(), 'rig-store-leg-'));
+    const { publisher, store } = twoLeg(dir);
+    await publisher.publishEvent(
+      { kind: 30618, content: '', created_at: 1, tags: [] },
+      ['wss://relay.example.test']
+    );
+    expect(store.calls.start).toBe(0);
+    expect(store.calls.openChannel).toEqual([]);
+    await publisher.stop();
+  });
+
+  it('falls back to the publish channel when no store leg is configured', async () => {
+    // Single-node topology: one client, one channel — unchanged behaviour.
+    const dir = mkdtempSync(join(tmpdir(), 'rig-store-leg-'));
+    const publish = mockClient();
+    const publisher = new StandalonePublisher({
+      client: publish.client,
+      channelDestination: 'g.proxy.relay.store',
+      lockDir: dir,
+      fetchImpl: noDaemon,
+    });
+    await publisher.uploadGitObject({
+      sha: 'c'.repeat(40),
+      type: 'blob',
+      body: Buffer.from('x'),
+      repoId: 'demo',
+    });
+    expect(publish.calls.claims.map((c) => c.channelId)).toEqual(['channel-1']);
+    await publisher.stop();
+  });
+});

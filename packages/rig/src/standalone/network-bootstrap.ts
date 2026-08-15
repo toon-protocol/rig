@@ -108,6 +108,13 @@ export interface AnnouncedPeer {
   /** Out-of-band `capabilities` content field (route prices), when valid. */
   capabilities?: AnnouncedCapability[];
   /**
+   * Out-of-band `routePrices` map (ILP address → base-unit price string) —
+   * the shape the live connector publishes, alongside/instead of
+   * `capabilities`. Each node prices its OWN routes, so the store route's
+   * price comes from the store node's announce, not the payment peer's.
+   */
+  routePrices?: Record<string, string>;
+  /**
    * Out-of-band `minaTokenIds` content field: chain id → Mina token id
    * (decimal string). The zkApp address for a Mina channel already rides the
    * standard `tokenNetworks` map (mirroring Solana's program id), but the Mina
@@ -188,6 +195,42 @@ function parseRoutes(content: string): AnnouncedRoutes | undefined {
       ...(typeof store === 'string' && store.length > 0 ? { store } : {}),
     };
     return out.publish || out.store ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Parse the announce's `routePrices` map (ILP address → base-unit price
+ * string), the shape the live connector actually publishes.
+ *
+ * This is a SEPARATE surface from `capabilities`, not a rename of it: the
+ * connector emits `routePrices` on every kind:10032 while `capabilities` is
+ * the older, richer array carrying a capability name alongside the price.
+ * A fleet publishing only `routePrices` left the price floor unset, which
+ * the store route surfaces as `F03 - claim rejected: advances value by 0,
+ * less than this route's price` — the floor exists precisely so a
+ * bytes-derived fee that rounds to nothing is lifted to what the route
+ * charges. Values are validated like every other announced amount.
+ */
+function parseRoutePrices(
+  content: string
+): Record<string, string> | undefined {
+  try {
+    const parsed = JSON.parse(content) as { routePrices?: unknown };
+    const raw = parsed.routePrices;
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      return undefined;
+    }
+    const out: Record<string, string> = {};
+    for (const [address, price] of Object.entries(
+      raw as Record<string, unknown>
+    )) {
+      if (address.length > 0 && typeof price === 'string' && /^\d+$/.test(price)) {
+        out[address] = price;
+      }
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
   } catch {
     return undefined;
   }
@@ -316,6 +359,7 @@ export async function discoverAnnouncedPeers(
     }
     const routes = parseRoutes(event.content);
     const capabilities = parseCapabilities(event.content);
+    const routePrices = parseRoutePrices(event.content);
     const minaTokenIds = parseMinaTokenIds(event.content);
     const chainRpcUrls = parseChainRpcUrls(event.content);
     peers.push({
@@ -323,6 +367,7 @@ export async function discoverAnnouncedPeers(
       info,
       ...(routes ? { routes } : {}),
       ...(capabilities ? { capabilities } : {}),
+      ...(routePrices ? { routePrices } : {}),
       ...(minaTokenIds ? { minaTokenIds } : {}),
       ...(chainRpcUrls ? { chainRpcUrls } : {}),
       createdAt: event.created_at,

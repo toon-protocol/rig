@@ -26,6 +26,7 @@
  * start, no relay query, no payment.
  */
 
+import { ARWEAVE_GATEWAYS } from '@toon-protocol/arweave';
 import { parseArgs } from 'node:util';
 import {
   buildArweaveManifest,
@@ -52,11 +53,17 @@ import type { StandaloneContext } from './standalone-context.js';
 export const MANIFEST_CONTENT_TYPE = 'application/x.arweave-manifest+json';
 
 /**
- * Default Arweave/ar.io gateway the printed site URL uses. `ar-io.dev`
- * because it serves the store's fresh uploads (currently ar.io testnet,
- * which mainnet `arweave.net` never indexes).
+ * Default Arweave/ar.io gateway the printed site URL uses: the head of the
+ * SHARED fetch-redundancy list ({@link ARWEAVE_GATEWAYS}) rather than a
+ * literal, so this and `rig push` cannot drift apart and adding a gateway to
+ * the one list moves both.
+ *
+ * The head must serve the store's fresh uploads (currently ar.io testnet,
+ * which mainnet `arweave.net` never indexes). A site is ONE manifest txid, so
+ * only the primary is printed here — pass `--gateway` (or
+ * `RIG_ARWEAVE_GATEWAY`) to re-print against another when one is down.
  */
-export const DEFAULT_GATEWAY = 'https://ar-io.dev';
+export const DEFAULT_GATEWAY = ARWEAVE_GATEWAYS[0] ?? 'https://arweave.net';
 
 export const SITE_USAGE = `Usage: rig site <publish|url> [ref] [options]
 
