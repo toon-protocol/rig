@@ -142,6 +142,13 @@ export interface ClientConfigFile {
   destination?: string;
   publishDestination?: string;
   storeDestination?: string;
+  /**
+   * BTP ingress of the node terminating `storeDestination`, when that is a
+   * different node than publishes go to. Normally discovered from that
+   * node's own kind:10032 announce; pin it here (or via
+   * `TOON_CLIENT_STORE_BTP_URL`) to skip discovery entirely.
+   */
+  storeBtpUrl?: string;
   feePerEvent?: string;
   channelStorePath?: string;
   /** Settlement chain: family (`evm`) or full id (`evm:31337`). */
@@ -255,6 +262,17 @@ export interface NetworkTopologyInputs {
   relayUrl: string;
   /** The discovered payment-peer announce, if any. */
   announce: AnnouncedPeer | undefined;
+  /**
+   * Every announce discovery returned, not just the picked payment peer.
+   * The store node announces itself SEPARATELY from the publish node (on
+   * this fleet, `g.toon.ario` alongside `g.toon.relay`), and its own
+   * `btpEndpoint` is the only place its BTP ingress is published — the
+   * payment peer's announce names the store ROUTE but not how to reach it.
+   * Optional so existing callers (and every test that builds inputs by
+   * hand) keep working: absent means "no store uplink discovered", which
+   * degrades to the single-uplink behaviour that predates this field.
+   */
+  peers?: AnnouncedPeer[];
   /** The committed genesis seed entry, if any. */
   genesisSeed: GenesisSeedLike | undefined;
   identity: { mnemonic: string; accountIndex: number; pubkey: string };
@@ -295,6 +313,23 @@ export interface NetworkTopology {
   destination: string;
   publishDestination?: string;
   storeDestination?: string;
+  /**
+   * BTP ingress of the node that TERMINATES {@link storeDestination}, when
+   * that is a different node from the publish peer.
+   *
+   * A payment-channel claim is only verifiable by the connector that holds
+   * the channel: the claim names a channel id, and a connector with no
+   * record of it refuses the packet outright (`F01 - claim rejected: names
+   * a channel this connector has no record of`). On the two-box fleet the
+   * store lives on its own node with its own settlement address, and the
+   * publish node has NO route to it — its only route is its own publish
+   * prefix — so a store write cannot be carried by the publish session and
+   * has to reach the store node directly, on its own channel.
+   *
+   * Absent when the store terminates on the same node as publishes (the
+   * single-box case), which needs no second uplink.
+   */
+  storeBtpUrl?: string;
   /** The peer the embedded client bootstraps + negotiates with. */
   knownPeers: { pubkey: string; relayUrl: string; btpEndpoint: string }[];
   /**
@@ -567,6 +602,36 @@ export async function resolveNetworkTopology(
       : undefined);
   const storeDestination = explicitStore ?? announce?.routes?.store;
 
+  // ── Store uplink ─────────────────────────────────────────────────────────
+  // Resolved from the STORE node's own announce, matched by the ilpAddress it
+  // publishes for itself — not from the payment peer's, which names the store
+  // route but carries no way to reach it. Only when the store terminates
+  // somewhere other than the publish peer: same-node stores ride the session
+  // that is already open, and handing them a second identical uplink would
+  // open a redundant on-chain channel against the same counterparty.
+  //
+  // No baked fallback here on purpose. `OFFICIAL_BTP_URL` can name the
+  // publish edge because that is where an unconfigured rig must end up
+  // anyway, but guessing a STORE endpoint would send claims — real money —
+  // to a node nobody advertised. Undiscovered means undiscovered.
+  const explicitStoreBtpUrl =
+    env['TOON_CLIENT_STORE_BTP_URL'] ?? file.storeBtpUrl;
+  let storeBtpUrl: string | undefined;
+  if (storeDestination && storeDestination !== publishDestination) {
+    const storePeer = inputs.peers?.find(
+      (peer) => peer.info.ilpAddress === storeDestination
+    );
+    storeBtpUrl = explicitStoreBtpUrl || storePeer?.info.btpEndpoint || undefined;
+    if (!storeBtpUrl && inputs.peers?.length) {
+      warn(
+        `rig: no announce found for the store route "${storeDestination}" — ` +
+          'store writes (git objects, the rig page) will be attempted on the ' +
+          'publish uplink and the terminating connector will refuse them if ' +
+          'it does not hold that channel'
+      );
+    }
+  }
+
   // ── Route-price floors ───────────────────────────────────────────────────
   // The announce's `capabilities` carry a FLAT price per destination route,
   // and the connector gates every paid packet at it (a claim advancing the
@@ -576,11 +641,21 @@ export async function resolveNetworkTopology(
   // exactly when a paid write would actually target the priced route. An
   // unmatched destination gets no floor (behavior unchanged).
   let routePrices: NetworkTopology['routePrices'];
-  const capabilities = announce?.capabilities;
-  if (capabilities && capabilities.length > 0) {
+  {
     const derived = deriveRouteDestinations(destination);
-    const priceOf = (address: string): string | undefined =>
-      capabilities.find((c) => c.address === address)?.price;
+    // Each node prices its OWN routes, so a price is looked up in the
+    // announce of whichever peer terminates that address — the store route's
+    // price lives in the store node's announce, not the payment peer's.
+    // Falls back to the payment peer for addresses no discovered peer claims,
+    // which is the single-node case and the pre-discovery behaviour.
+    const priceOf = (address: string): string | undefined => {
+      const owner =
+        inputs.peers?.find((p) => p.info.ilpAddress === address) ?? announce;
+      return (
+        owner?.routePrices?.[address] ??
+        owner?.capabilities?.find((c) => c.address === address)?.price
+      );
+    };
     const publishPrice = priceOf(publishDestination ?? derived.publish);
     const storePrice = priceOf(storeDestination ?? derived.store);
     if (publishPrice !== undefined || storePrice !== undefined) {
@@ -874,6 +949,8 @@ export async function resolveNetworkTopology(
     destination,
     ...(publishDestination ? { publishDestination } : {}),
     ...(storeDestination ? { storeDestination } : {}),
+    ...(storeBtpUrl ? { storeBtpUrl } : {}),
+
     ...(routePrices ? { routePrices } : {}),
     knownPeers,
     ...(selection ? { selection } : {}),
@@ -1271,6 +1348,12 @@ export async function createStandaloneContext(
 
   // ── Peer→channel persistence (#262) ──────────────────────────────────────
   const channelStorePath = file.channelStorePath ?? join(dir, 'channels.json');
+  // Sibling watermark file for the store leg's client — see the
+  // `channelStorePath` note where the store client config is built.
+  const storeChannelStorePath = channelStorePath.replace(
+    /(\.json)?$/,
+    '.store.json'
+  );
   const channelMap = new ChannelMapStore({
     mapPath: join(dir, RIG_CHANNEL_MAP_FILENAME),
     watermarkPath: channelStorePath,
@@ -1324,6 +1407,20 @@ export async function createStandaloneContext(
     const minaExplicitlyComplete = (file.supportedChains ?? []).every(
       (chain) => !chain.startsWith('mina:') || Boolean(file.minaChannel)
     );
+    // A config that pins a store route on a DIFFERENT node than it publishes
+    // to is not fully explicit unless it also pins that node's uplink. The
+    // store node holds its own channel, and a claim signed on the publish
+    // channel is refused by it (F01) — so without a store uplink the store
+    // route is unreachable, and only its own announce publishes one. Pinning
+    // the publish transport says nothing about how to reach the store.
+    const explicitStoreDest =
+      env['TOON_CLIENT_STORE_DESTINATION'] ?? file.storeDestination;
+    const explicitPublishDest =
+      env['TOON_CLIENT_PUBLISH_DESTINATION'] ?? file.publishDestination;
+    const storeUplinkKnown =
+      !explicitStoreDest ||
+      explicitStoreDest === explicitPublishDest ||
+      Boolean(env['TOON_CLIENT_STORE_BTP_URL'] ?? file.storeBtpUrl);
     const fullyExplicit =
       Boolean(
         (env['TOON_CLIENT_PROXY_URL'] ?? file.proxyUrl) ||
@@ -1331,14 +1428,19 @@ export async function createStandaloneContext(
       ) &&
       Boolean(env['TOON_CLIENT_DESTINATION'] ?? file.destination) &&
       Boolean(file.supportedChains?.length) &&
+      storeUplinkKnown &&
       solanaExplicitlyComplete &&
       minaExplicitlyComplete;
     let announce: AnnouncedPeer | undefined;
+    // Retained beyond the pick: the store node announces itself
+    // separately, and only its own announce carries its BTP ingress.
+    let discoveredPeers: AnnouncedPeer[] | undefined;
     if (!fullyExplicit) {
       try {
         const peers = await discoverAnnouncedPeers(relayUrl, {
           timeoutMs: DISCOVERY_TIMEOUT_MS,
         });
+        discoveredPeers = peers;
         const seedPubkeys = genesisSeedPubkeys();
         announce = pickPaymentPeer(peers, seedPubkeys);
         if (!announce) {
@@ -1367,6 +1469,7 @@ export async function createStandaloneContext(
       configPath,
       relayUrl,
       announce,
+      ...(discoveredPeers ? { peers: discoveredPeers } : {}),
       genesisSeed,
       identity: {
         mnemonic: identity.mnemonic,
@@ -1461,8 +1564,39 @@ export async function createStandaloneContext(
           : {}),
     };
 
+    // Store leg (#96 follow-up): when the store route terminates on its own
+    // node, it needs its own uplink and its own channel — a claim signed on
+    // the publish channel is refused by the store connector, which has no
+    // record of it (F01). Same identity and same channel store; only the
+    // transport and the destination differ, so the two legs stay one wallet.
+    const storeClientConfig: ToonClientConfig | undefined = topo.storeBtpUrl
+      ? {
+          ...clientConfig,
+          proxyUrl: undefined,
+          connectorUrl: 'http://127.0.0.1:1',
+          btpUrl: topo.storeBtpUrl,
+          btpAuthToken: '',
+          preferBtpForPaidWrites: true,
+          // Its OWN watermark file. A client's channel store and its
+          // `.peers.json` binding sidecar are one unit that the client
+          // rewrites wholesale, so pointing two live clients at one path has
+          // them clobber each other's watermarks — observed as the publish
+          // leg losing its channel ("is not being tracked", then F01) the
+          // moment the store leg opened. Separate files; the legs stay
+          // correlated through rig's own channel map, which is keyed by
+          // anchor and records both.
+          channelStorePath: storeChannelStorePath,
+          ilpInfo: {
+            ...clientConfig.ilpInfo,
+            btpEndpoint: topo.storeBtpUrl,
+          },
+          destinationAddress: topo.storeDestination ?? topo.destination,
+        }
+      : undefined;
+
     return new StandalonePublisher({
       clientConfig,
+      ...(storeClientConfig ? { storeClientConfig } : {}),
       eventFee,
       channelMap,
       warn,

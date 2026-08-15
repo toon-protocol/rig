@@ -146,6 +146,16 @@ export interface WalletViewFallback {
   minaChannel?: ToonClientConfig['minaChannel'];
 }
 
+/**
+ * The client + channel one leg of the write path pays on. Two legs exist
+ * only when the store route terminates on a different node than publishes;
+ * otherwise both names point at the same client and channel.
+ */
+interface StoreLeg {
+  client: ToonClientLike;
+  channelId: string;
+}
+
 export interface StandalonePublisherOptions {
   /**
    * ToonClient config (mnemonic + mnemonicAccountIndex + proxy/BTP uplink +
@@ -171,6 +181,32 @@ export interface StandalonePublisherOptions {
    * config's `destinationAddress`.
    */
   channelDestination?: string;
+  /**
+   * Client config for a SECOND uplink dedicated to store writes, when the
+   * store route terminates on a different node than publishes.
+   *
+   * A balance-proof claim is only verifiable by the connector holding that
+   * channel — one with no record of it refuses the packet (`F01 - claim
+   * rejected: names a channel this connector has no record of`). The store
+   * node has its own settlement address and its own channel, and on the
+   * two-box fleet the publish node has no route to it, so a store write
+   * cannot ride the publish session. Given this, store writes go out on
+   * their own client, against their own channel, recorded under their own
+   * anchor so `rig channel` still sees it.
+   *
+   * A separate CLIENT rather than a second destination on the existing one
+   * because `@toon-protocol/client` carries a single `btpUrl` per instance —
+   * there is no per-destination uplink to configure. Omitted (the
+   * single-node case) keeps the historical behaviour: one client, one
+   * channel, store writes on the publish session.
+   */
+  storeClientConfig?: ToonClientConfig;
+  /**
+   * Pre-built store-leg client (tests / advanced callers) — the store-side
+   * counterpart of `client`, and mutually exclusive with
+   * `storeClientConfig` in the same way.
+   */
+  storeClient?: ToonClientLike;
   /** Flat fee per published event (daemon `feePerEvent` convention). Default 1n. */
   eventFee?: bigint;
   /**
@@ -396,6 +432,13 @@ export class StandalonePublisher implements Publisher {
     | undefined;
   private readonly warn: (line: string) => void;
 
+  private readonly storeClientConfig: ToonClientConfig | undefined;
+  private readonly injectedStoreClient: ToonClientLike | undefined;
+  /** Lazily built on the first store write — see {@link storeLeg}. */
+  private storeClient: ToonClientLike | undefined;
+  private storeChannelId: string | undefined;
+  private storeLegPromise: Promise<StoreLeg> | undefined;
+
   private lock: NonceLock | undefined;
   private channelId: string | undefined;
   private readyPromise: Promise<void> | undefined;
@@ -439,6 +482,13 @@ export class StandalonePublisher implements Publisher {
     this.fetchImpl = options.fetchImpl;
     this.channelMap = options.channelMap;
     this.channelAnchor = anchor;
+    if (options.storeClient && options.storeClientConfig) {
+      throw new Error(
+        'StandalonePublisher: provide either `storeClientConfig` or `storeClient`, not both'
+      );
+    }
+    this.storeClientConfig = options.storeClientConfig;
+    this.injectedStoreClient = options.storeClient;
     this.negotiationFallbacks = options.negotiationFallbacks;
     this.warn = options.warn ?? ((line) => process.stderr.write(`${line}\n`));
   }
@@ -564,40 +614,72 @@ export class StandalonePublisher implements Publisher {
    * file throws BEFORE anything is opened — never a silent duplicate open.
    */
   private async openOrResumeChannel(): Promise<string> {
+    return this.openOrResumeChannelOn(this.client, this.channelDestination, {
+      anchor: this.channelAnchor,
+      trackResumeState: true,
+    });
+  }
+
+  /**
+   * {@link openOrResumeChannel} for an arbitrary client + destination, so
+   * the store leg gets the same resume-before-open guarantee (and the same
+   * corruption check) as the publish leg rather than a second, weaker path.
+   *
+   * `anchor` defaults to the destination: a leg other than the publish one
+   * is keyed in the channel map by the route it pays for.
+   * `trackResumeState` is publish-only — {@link lastOpenResumed} feeds the
+   * `resumed` field of this publisher's channel status, which describes the
+   * publish channel and would be wrong to overwrite from a store open.
+   */
+  private async openOrResumeChannelOn(
+    client: ToonClientLike,
+    destination: string | undefined,
+    opts: { anchor?: string; trackResumeState?: boolean } = {}
+  ): Promise<string> {
     const map = this.channelMap;
+    const trackResumeState = opts.trackResumeState ?? false;
     if (!map) {
       // No persistence configured: historical lazy open, nothing recorded.
-      return this.client.openChannel(this.channelDestination);
+      return client.openChannel(destination);
     }
-    if (!this.channelAnchor) {
+    const anchorFor = opts.anchor ?? destination;
+    if (!anchorFor) {
       this.warn(
         'rig: no channel anchor destination configured — the peer→channel ' +
           'mapping cannot be persisted, so this run may open a fresh channel'
       );
-      return this.client.openChannel(this.channelDestination);
+      return client.openChannel(destination);
     }
 
-    const anchor = this.channelAnchor;
-    const identity = this.client.getPublicKey();
+    const anchor = anchorFor;
+    const identity = client.getPublicKey();
     // Corruption check happens HERE, before any on-chain open (throws).
     const candidates = map.listFor(identity, anchor);
-    const internals = channelInternals(this.client);
+    const internals = channelInternals(client);
     const resumed = await this.resumeRecordedChannel(
       map,
       candidates,
-      internals
+      internals,
+      client
     );
 
     // Idempotent — returns the (resumed or existing) channel for the peer if
     // one is tracked, else opens lazily on-chain.
-    const channelId = await this.client.openChannel(this.channelDestination);
+    const channelId = await client.openChannel(destination);
 
     if (resumed && channelId === resumed.channelId) {
-      this.lastOpenResumed = true;
+      if (trackResumeState) this.lastOpenResumed = true;
       map.touch(recordKey(resumed));
     } else {
-      this.lastOpenResumed = false;
-      this.recordOpenedChannel(map, internals, identity, anchor, channelId);
+      if (trackResumeState) this.lastOpenResumed = false;
+      this.recordOpenedChannel(
+        map,
+        internals,
+        identity,
+        anchor,
+        channelId,
+        client
+      );
     }
     return channelId;
   }
@@ -610,7 +692,12 @@ export class StandalonePublisher implements Publisher {
   private async resumeRecordedChannel(
     map: ChannelMapStore,
     candidates: ChannelMapRecord[],
-    internals: ChannelInternals
+    internals: ChannelInternals,
+    // The client this leg pays on. Deposit bookkeeping must read from the
+    // SAME client that tracks the channel — reading the publish client for a
+    // store channel reports "is not being tracked" and records a deposit of
+    // undefined against a real, funded channel.
+    client: ToonClientLike
   ): Promise<ChannelMapRecord | undefined> {
     if (candidates.length === 0) return undefined;
     const cm = internals.channelManager;
@@ -675,10 +762,10 @@ export class StandalonePublisher implements Publisher {
       if (
         record.context.chainType === 'evm' &&
         record.depositTotal === undefined &&
-        this.client.rehydrateChannelDeposit
+        client.rehydrateChannelDeposit
       ) {
         try {
-          const deposit = await this.client.rehydrateChannelDeposit(
+          const deposit = await client.rehydrateChannelDeposit(
             record.channelId,
             {
               chain: record.chain,
@@ -708,7 +795,11 @@ export class StandalonePublisher implements Publisher {
     internals: ChannelInternals,
     identity: string,
     destination: string,
-    channelId: string
+    channelId: string,
+    // The client this leg pays on — the deposit must be read from the client
+    // that actually tracks the channel, not from whichever one happens to be
+    // the publish client.
+    client: ToonClientLike
   ): void {
     // `peerChannels` is keyed by the COMPOSITE binding key, not the peer id
     // (toon-client#489) — read the peer id back out of it.
@@ -735,7 +826,7 @@ export class StandalonePublisher implements Publisher {
 
     let depositTotal: bigint | undefined;
     try {
-      depositTotal = this.client.getChannelDepositTotal?.(channelId);
+      depositTotal = client.getChannelDepositTotal?.(channelId);
     } catch {
       // deposit unknown — recorded without it; a later resume re-reads it
     }
@@ -777,6 +868,16 @@ export class StandalonePublisher implements Publisher {
     this.channelId = undefined;
     // Never stop a client that was never started (`ToonClient.stop()` throws
     // INVALID_STATE) — e.g. after a free `rig balance` read (#263).
+    // The store leg owns its client outright (it is only ever built here),
+    // so it is stopped regardless of `ownsClient` — that flag describes the
+    // caller-injectable publish client.
+    if (this.storeClient) {
+      const storeClient = this.storeClient;
+      this.storeClient = undefined;
+      this.storeLegPromise = undefined;
+      this.storeChannelId = undefined;
+      await storeClient.stop();
+    }
     if (this.ownsClient && this.client.isStarted?.() !== false) {
       await this.client.stop();
     }
@@ -983,7 +1084,7 @@ export class StandalonePublisher implements Publisher {
       );
     }
     await this.start();
-    const channelId = this.requireChannel();
+    const leg = await this.storeLeg();
 
     const contentType =
       upload.type === 'blob'
@@ -991,7 +1092,7 @@ export class StandalonePublisher implements Publisher {
         : DEFAULT_CONTENT_TYPE;
 
     const fee = this.uploadFee();
-    const event = this.client.signEvent({
+    const event = leg.client.signEvent({
       kind: 5094,
       content: '',
       created_at: nowSeconds(),
@@ -1005,8 +1106,8 @@ export class StandalonePublisher implements Publisher {
       ],
     });
 
-    const claim = await this.client.signBalanceProof(channelId, fee);
-    const result = await this.client.publishEvent(event, {
+    const claim = await leg.client.signBalanceProof(leg.channelId, fee);
+    const result = await leg.client.publishEvent(event, {
       ...(this.storeDestination ? { destination: this.storeDestination } : {}),
       claim,
       ilpAmount: fee,
@@ -1041,10 +1142,10 @@ export class StandalonePublisher implements Publisher {
       );
     }
     await this.start();
-    const channelId = this.requireChannel();
+    const leg = await this.storeLeg();
 
     const fee = this.uploadFee();
-    const event = this.client.signEvent({
+    const event = leg.client.signEvent({
       kind: 5094,
       content: '',
       created_at: nowSeconds(),
@@ -1056,8 +1157,8 @@ export class StandalonePublisher implements Publisher {
       ],
     });
 
-    const claim = await this.client.signBalanceProof(channelId, fee);
-    const result = await this.client.publishEvent(event, {
+    const claim = await leg.client.signBalanceProof(leg.channelId, fee);
+    const result = await leg.client.publishEvent(event, {
       ...(this.storeDestination ? { destination: this.storeDestination } : {}),
       claim,
       ilpAmount: fee,
@@ -1122,6 +1223,45 @@ export class StandalonePublisher implements Publisher {
       );
     }
     return this.channelId;
+  }
+
+  /**
+   * The client + channel a STORE write must be paid on.
+   *
+   * With no `storeClientConfig` this is the publish leg unchanged — the
+   * single-node case, where the store terminates on the connector that
+   * already holds the channel. With one, the store node is a different
+   * connector holding a different channel, and paying it from the publish
+   * channel is precisely the `F01 - claim rejected: names a channel this
+   * connector has no record of` failure this exists to prevent.
+   *
+   * Built on FIRST STORE WRITE, not in `start()`: `rig push` with nothing to
+   * upload, and every read-only command, should not open a second on-chain
+   * channel (gas) for a leg they never use. Memoised on the promise so
+   * concurrent uploads share one open rather than racing two.
+   */
+  private async storeLeg(): Promise<StoreLeg> {
+    const injected = this.injectedStoreClient;
+    const config = this.storeClientConfig;
+    if (!config && !injected) {
+      return { client: this.client, channelId: this.requireChannel() };
+    }
+    this.storeLegPromise ??= (async (): Promise<StoreLeg> => {
+      const client = injected ?? new ToonClient(config as ToonClientConfig);
+      this.storeClient = client;
+      await client.start();
+      // The store node is a distinct peer: its channel is recorded under the
+      // store destination as its own anchor, so `rig channel list/close/
+      // settle` enumerate it alongside the publish channel instead of it
+      // becoming invisible collateral.
+      const channelId = await this.openOrResumeChannelOn(
+        client,
+        this.storeDestination
+      );
+      this.storeChannelId = channelId;
+      return { client, channelId };
+    })();
+    return this.storeLegPromise;
   }
 }
 
