@@ -51,8 +51,8 @@ importers:
         specifier: ^1.0.0
         version: 1.4.0
       '@toon-protocol/client':
-        specifier: ^0.29.7
-        version: 0.29.7(typescript@5.9.3)(zod@3.25.76)
+        specifier: ^0.29.8
+        version: 0.29.8(typescript@5.9.3)(zod@3.25.76)
       '@toon-protocol/core':
         specifier: ^3.2.0
         version: 3.2.0(typescript@5.9.3)
@@ -8367,8 +8367,8 @@ packages:
       - zod
     dev: true
 
-  /@toon-protocol/client@0.29.7(typescript@5.9.3)(zod@3.25.76):
-    resolution: {integrity: sha512-boI9yU7gKLgH0CeLuNy6CIsZKd7or4n4uuvTaATOpSONh45kil6LWUURANkNSSHE43YJgV/W0A6vNW+7CTVmQw==}
+  /@toon-protocol/client@0.29.8(typescript@5.9.3)(zod@3.25.76):
+    resolution: {integrity: sha512-obBrcM4b5E3nCNEMgiV5DoxRTQr/mBtaMOwXOQtAqIa7lv9HN+xrl16h9I6iPn+lulyqfH4w3qZ0xVnUMb+Rjg==}
     dependencies:
       '@noble/ciphers': 2.1.1
       '@noble/curves': 2.2.0
