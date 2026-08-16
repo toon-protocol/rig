@@ -490,7 +490,8 @@ describe('StandalonePublisher', () => {
       expect(calls.claims).toEqual([
         { channelId: 'channel-1', amount: expectedFee },
       ]);
-      const pub = calls.publishes[0]!;
+      const [pub] = calls.publishes;
+      if (!pub) throw new Error('expected exactly one paid publish');
       expect(pub.event.kind).toBe(5095);
       expect(pub.event.content).toBe('');
       // `param` tags, then the bid the handler reads to see the job funded.
@@ -598,12 +599,14 @@ describe('StandalonePublisher', () => {
         params: [['phase', 'quote']],
       });
       expect(answer.accept).toBe(true);
-      expect(calls.publishes[0]!.event.kind).toBe(5096);
-      expect(calls.publishes[0]!.event.tags).toEqual([
+      const [pub] = calls.publishes;
+      if (!pub) throw new Error('expected exactly one paid publish');
+      expect(pub.event.kind).toBe(5096);
+      expect(pub.event.tags).toEqual([
         ['param', 'phase', 'quote'],
         ['bid', '1000', 'usdc'],
       ]);
-      expect(calls.publishes[0]!.options?.proxyPath).toBe('/store');
+      expect(pub.options?.proxyPath).toBe('/store');
       await publisher.stop();
     });
   });

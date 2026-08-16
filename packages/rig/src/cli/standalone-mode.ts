@@ -1429,14 +1429,25 @@ export async function createStandaloneContext(
     // channel is refused by it (F01) — so without a store uplink the store
     // route is unreachable, and only its own announce publishes one. Pinning
     // the publish transport says nothing about how to reach the store.
+    // A per-invocation `--via` override (#101) has to be weighed here too, or
+    // the gate answers for a store route the run will not use: a config that
+    // pins store == publish looks fully explicit, discovery is skipped, and
+    // the overridden node's announce — the only thing carrying its uplink,
+    // price and channel — is never fetched.
     const explicitStoreDest =
-      env['TOON_CLIENT_STORE_DESTINATION'] ?? file.storeDestination;
+      options.storeDestination ??
+      env['TOON_CLIENT_STORE_DESTINATION'] ??
+      file.storeDestination;
     const explicitPublishDest =
       env['TOON_CLIENT_PUBLISH_DESTINATION'] ?? file.publishDestination;
     const storeUplinkKnown =
       !explicitStoreDest ||
       explicitStoreDest === explicitPublishDest ||
-      Boolean(env['TOON_CLIENT_STORE_BTP_URL'] ?? file.storeBtpUrl);
+      // A pinned `storeBtpUrl` was pinned for whatever the CONFIG named, so it
+      // vouches for nothing once `--via` names a different node. Only a
+      // configured store route may lean on it.
+      (options.storeDestination === undefined &&
+        Boolean(env['TOON_CLIENT_STORE_BTP_URL'] ?? file.storeBtpUrl));
     const fullyExplicit =
       Boolean(
         (env['TOON_CLIENT_PROXY_URL'] ?? file.proxyUrl) ||

@@ -1061,7 +1061,7 @@ mnemonic that pays for pushes (derived at m/44'/501'/0'/0'). Fund it with
 registry program — NOT through TOON ILP payment channels.
 
 Commands:
-  name buy <name> [--years n | --permabuy] [--via <dvm-url>]
+  name buy <name> [--years n | --permabuy] [--via <destination>]
                        quote (mARIO) → confirm → register. The spawned ANT is
                        owned by this identity's Solana key. Default: 1-year
                        lease. PAID — spends mARIO from the Solana wallet.
@@ -1069,7 +1069,7 @@ Commands:
                        the ANT (dust SOL only), then a store DVM executes the
                        kind:5095 buy job and pays the mARIO from ITS wallet;
                        the name is owned by your ANT from inception.
-  name set <name> <txId> [--undername <sub>] [--ttl <seconds>] [--via <dvm-url>]
+  name set <name> <txId> [--undername <sub>] [--ttl <seconds>] [--via <destination>]
                        point the name (or an undername) at an Arweave txId
                        (typically a deployed path manifest). Signs an ANT
                        record update with the Solana key. With --via: the
