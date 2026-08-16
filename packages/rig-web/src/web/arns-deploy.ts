@@ -1,7 +1,7 @@
 /**
  * ArNS (ar.io Name System) step for the permanent Arweave deploy of rig-web.
  *
- * A raw manifest txId (`https://ar-io.dev/<manifest-txid>/`) is unreadable and,
+ * A raw manifest txId (`https://permagate.io/<manifest-txid>/`) is unreadable and,
  * worse, changes on every redeploy — so there is no stable permanent URL even
  * once the underlying Arweave deploy unblocks. ArNS is the naming layer for
  * exactly this: a registered name resolves at every ar.io gateway as
@@ -52,8 +52,17 @@ import { isValidArweaveTxId } from '@toon-protocol/arweave';
 /** Purchase model for an ArNS name. */
 export type ArnsPurchaseType = 'lease' | 'permabuy';
 
-/** Default ar.io gateway used to build the resulting URL. */
-export const DEFAULT_ARNS_GATEWAY = 'https://ar-io.dev';
+/**
+ * Default ar.io gateway used to build the resulting URL.
+ *
+ * Must be a MAINNET gateway, because the registry defaults to the SDK's mainnet
+ * process. `ar-io.dev` is the ar.io TESTNET gateway (its ArNS resolver runs
+ * against the Solana devnet contracts, see `programIds` on `/ar-io/info`), so
+ * a mainnet name printed as `https://<name>.ar-io.dev/` is a guaranteed 404.
+ * `arweave.net` is no longer an ar.io gateway and runs a forked ArNS, so new
+ * names never appear there either. Confirmed by ar.io on ar-io-node#860.
+ */
+export const DEFAULT_ARNS_GATEWAY = 'https://permagate.io';
 
 /** Default TTL for the ANT base-name record, in seconds. */
 export const DEFAULT_ARNS_TTL_SECONDS = 3600;
@@ -75,7 +84,7 @@ export interface ArnsDeployConfig {
   years?: number;
   /** TTL for the ANT base-name record, in seconds. */
   ttlSeconds: number;
-  /** ar.io gateway origin used to build the result URL, e.g. `https://ar-io.dev`. */
+  /** ar.io MAINNET gateway origin used to build the result URL, e.g. `https://permagate.io`. */
   gateway: string;
   /** Relay URL baked into the `#relay=` fragment of the result URL. */
   relay: string;
@@ -119,7 +128,8 @@ export function isValidArnsName(name: string): boolean {
  *   RIG_ARNS_TYPE         'lease' (default) | 'permabuy'
  *   RIG_ARNS_YEARS        lease length, 1–5 (default 1; ignored for permabuy)
  *   RIG_ARNS_TTL_SECONDS  ANT record TTL (default 3600)
- *   RIG_ARNS_GATEWAY      result-URL gateway origin (default https://ar-io.dev)
+ *   RIG_ARNS_GATEWAY      result-URL gateway origin (default https://permagate.io;
+ *                         must be a mainnet gateway, ar-io.dev is testnet)
  *   RIG_ARNS_RELAY        relay for the #relay= fragment (falls back to
  *                         VITE_DEFAULT_RELAY)
  *   RIG_ARNS_PROCESS_ID   registry process id (default: SDK mainnet)

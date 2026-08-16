@@ -6,7 +6,10 @@
  * Extracted here for testability; also used by scripts/deploy-rig-pointer.mjs.
  */
 
-const GATEWAY = 'https://ar-io.dev';
+// Mainnet gateway for the rig-web bundle assets. Matches the CLI's
+// DEFAULT_RIG_WEB_GATEWAY (packages/rig/src/rig-pointer.ts). `ar-io.dev` is
+// the ar.io testnet gateway and must not be a production default.
+const GATEWAY = 'https://arweave.net';
 
 export interface PointerConfig {
   relay: string;
