@@ -451,6 +451,163 @@ describe('StandalonePublisher', () => {
     });
   });
 
+  describe('submitStoreJob (brokered ArNS + gas station over the paid path, #101)', () => {
+    const buyJob = {
+      kind: 5095,
+      params: [
+        ['name', 'boughtviatoonnode'],
+        ['type', 'lease'],
+        ['years', '1'],
+        ['processId', 'ANT-PROCESS-ID'],
+      ] as [string, string][],
+    };
+
+    it('carries the job as a paid kind:5095 packet with /store beneath the handler', async () => {
+      const { client, calls } = mockClient({
+        publishResult: (event) => ({
+          success: true,
+          eventId: event.id,
+          response: storeAnswer(
+            JSON.stringify({
+              accept: true,
+              result: { registryTxId: 'REGISTRY-TX', quotedMario: '1748629680' },
+            })
+          ),
+        }),
+      });
+      const publisher = build(client, { routePrices: { store: 61000n } });
+
+      const answer = await publisher.submitStoreJob(buyJob);
+      const expectedFee = 61000n;
+      expect(answer).toEqual({
+        status: 200,
+        accept: true,
+        result: { registryTxId: 'REGISTRY-TX', quotedMario: '1748629680' },
+        feePaid: expectedFee,
+      });
+
+      // One claim, at the store route's flat price — same as a kind:5094.
+      expect(calls.claims).toEqual([
+        { channelId: 'channel-1', amount: expectedFee },
+      ]);
+      const pub = calls.publishes[0]!;
+      expect(pub.event.kind).toBe(5095);
+      expect(pub.event.content).toBe('');
+      // `param` tags, then the bid the handler reads to see the job funded.
+      expect(pub.event.tags).toEqual([
+        ['param', 'name', 'boughtviatoonnode'],
+        ['param', 'type', 'lease'],
+        ['param', 'years', '1'],
+        ['param', 'processId', 'ANT-PROCESS-ID'],
+        ['bid', expectedFee.toString(), 'usdc'],
+      ]);
+      // The whole point of #101: `/store` as the envelope target beneath the
+      // route's handler path, NOT a public URL path.
+      expect(pub.options?.destination).toBe('g.proxy.store');
+      expect(pub.options?.proxyPath).toBe('/store');
+      expect(pub.options?.ilpAmount).toBe(expectedFee);
+      await publisher.stop();
+    });
+
+    it('returns a DVM refusal as DATA rather than throwing (the zero-ARIO rehearsal)', async () => {
+      // Omitting `processId` makes the handler refuse BY NAME before it quotes
+      // or touches the registry. That is the cheapest proof the whole paid path
+      // works, and it only works if the refusal comes back as a value. Under
+      // ADR 0020 the payer was charged either way, so `feePaid` still reports.
+      const { client, calls } = mockClient({
+        publishResult: (event) => ({
+          success: true,
+          eventId: event.id,
+          response: storeAnswer(
+            JSON.stringify({
+              accept: false,
+              code: 'MISSING_PARAM',
+              message: 'missing required param tag: processId',
+            }),
+            422
+          ),
+        }),
+      });
+      const publisher = build(client, { routePrices: { store: 1000n } });
+
+      const answer = await publisher.submitStoreJob({
+        kind: 5095,
+        params: [['name', 'boughtviatoonnode']],
+      });
+      expect(answer).toEqual({
+        status: 422,
+        accept: false,
+        code: 'MISSING_PARAM',
+        message: 'missing required param tag: processId',
+        feePaid: 1000n,
+      });
+      expect(calls.claims).toHaveLength(1);
+      await publisher.stop();
+    });
+
+    it('throws when the packet never reached the store', async () => {
+      const { client } = mockClient({
+        publishResult: () => ({ success: false, error: 'F01 - claim rejected' }),
+      });
+      const publisher = build(client, { routePrices: { store: 1000n } });
+      await expect(publisher.submitStoreJob(buyJob)).rejects.toThrow(
+        /kind:5095 job rejected: F01/
+      );
+      await publisher.stop();
+    });
+
+    it('throws when a FULFILL carries no sealed answer', async () => {
+      const { client } = mockClient({
+        publishResult: (event) => ({ success: true, eventId: event.id }),
+      });
+      const publisher = build(client, { routePrices: { store: 1000n } });
+      await expect(publisher.submitStoreJob(buyJob)).rejects.toThrow(
+        /carried no sealed response/
+      );
+      await publisher.stop();
+    });
+
+    it('throws with the body when the answer is not JSON', async () => {
+      const { client } = mockClient({
+        publishResult: (event) => ({
+          success: true,
+          eventId: event.id,
+          response: storeAnswer('<html>502 Bad Gateway</html>', 502),
+        }),
+      });
+      const publisher = build(client, { routePrices: { store: 1000n } });
+      await expect(publisher.submitStoreJob(buyJob)).rejects.toThrow(
+        /was not valid JSON \(HTTP 502\)/
+      );
+      await publisher.stop();
+    });
+
+    it('carries a kind:5096 gas-station job the same way', async () => {
+      const { client, calls } = mockClient({
+        publishResult: (event) => ({
+          success: true,
+          eventId: event.id,
+          response: storeAnswer(
+            JSON.stringify({ accept: true, result: { quoteId: 'quote-1' } })
+          ),
+        }),
+      });
+      const publisher = build(client, { routePrices: { store: 1000n } });
+      const answer = await publisher.submitStoreJob({
+        kind: 5096,
+        params: [['phase', 'quote']],
+      });
+      expect(answer.accept).toBe(true);
+      expect(calls.publishes[0]!.event.kind).toBe(5096);
+      expect(calls.publishes[0]!.event.tags).toEqual([
+        ['param', 'phase', 'quote'],
+        ['bid', '1000', 'usdc'],
+      ]);
+      expect(calls.publishes[0]!.options?.proxyPath).toBe('/store');
+      await publisher.stop();
+    });
+  });
+
   describe('flat route pricing (the connector gates packets at the route price — F06)', () => {
     const gitUpload = (bytes: number) => ({
       sha: '1234567890abcdef1234567890abcdef12345678',

@@ -273,6 +273,12 @@ export interface NetworkTopologyInputs {
    * degrades to the single-uplink behaviour that predates this field.
    */
   peers?: AnnouncedPeer[];
+  /**
+   * Per-invocation store-route override (`rig name --via`, #101). Wins over
+   * `TOON_CLIENT_STORE_DESTINATION` and the config file, since it is a choice
+   * made for one command rather than a configured default.
+   */
+  storeDestinationOverride?: string;
   /** The committed genesis seed entry, if any. */
   genesisSeed: GenesisSeedLike | undefined;
   identity: { mnemonic: string; accountIndex: number; pubkey: string };
@@ -521,8 +527,16 @@ function deriveSolanaChannel(
 export async function resolveNetworkTopology(
   inputs: NetworkTopologyInputs
 ): Promise<NetworkTopology> {
-  const { env, file, configPath, relayUrl, announce, genesisSeed, warn } =
-    inputs;
+  const {
+    env,
+    file,
+    configPath,
+    relayUrl,
+    announce,
+    genesisSeed,
+    warn,
+    storeDestinationOverride,
+  } = inputs;
 
   // ── Explicit config (always wins, per field) ─────────────────────────────
   const explicitProxyUrl = env['TOON_CLIENT_PROXY_URL'] ?? file.proxyUrl;
@@ -532,7 +546,9 @@ export async function resolveNetworkTopology(
   const explicitPublish =
     env['TOON_CLIENT_PUBLISH_DESTINATION'] ?? file.publishDestination;
   const explicitStore =
-    env['TOON_CLIENT_STORE_DESTINATION'] ?? file.storeDestination;
+    storeDestinationOverride ??
+    env['TOON_CLIENT_STORE_DESTINATION'] ??
+    file.storeDestination;
   const explicitChain = env['TOON_CLIENT_CHAIN'] ?? file.chain;
   const explicitMaps: ExplicitChainConfig = {
     ...(file.chainRpcUrls ? { chainRpcUrls: file.chainRpcUrls } : {}),
@@ -1470,6 +1486,9 @@ export async function createStandaloneContext(
       relayUrl,
       announce,
       ...(discoveredPeers ? { peers: discoveredPeers } : {}),
+      ...(options.storeDestination
+        ? { storeDestinationOverride: options.storeDestination }
+        : {}),
       genesisSeed,
       identity: {
         mnemonic: identity.mnemonic,

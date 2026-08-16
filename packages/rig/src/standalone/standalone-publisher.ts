@@ -46,6 +46,8 @@ import {
   type GitObjectUpload,
   type PublishReceipt,
   type Publisher,
+  type StoreJobRequest,
+  type StoreJobResponse,
   type UploadReceipt,
 } from '../publisher.js';
 import {
@@ -1220,6 +1222,87 @@ export class StandalonePublisher implements Publisher {
       );
     }
     return { txId: extractArweaveTxId(result.response), feePaid: fee };
+  }
+
+  /**
+   * Submit one NIP-90 job (kind:5095 brokered ArNS buy, kind:5096 gas station)
+   * to the store node's DVM over the PAID path, and return its answer (#101).
+   *
+   * Identical carriage to {@link uploadGitObject}: the store leg's own channel,
+   * one balance-proof claim for the store route's flat price, and `/store` as
+   * the envelope target beneath the route's handler path. What differs is only
+   * the event body — `["param", k, v]` tags instead of `["i", ...]` inputs.
+   *
+   * The `bid` tag carries the same figure as the claim. It is what the handler
+   * reads to decide the job was funded, and a mismatch between it and the claim
+   * is the kind of thing that gets a packet refused after it has already been
+   * charged for (connector#869).
+   *
+   * ⚠️ Does NOT throw on a DVM refusal. `accept: false` and a non-2xx status
+   * are envelope content, not packet outcomes (ADR 0020) — the answer arrived
+   * and the payer was charged — so both come back as data for the caller to
+   * interpret. Only the absence of an answer is an error here.
+   */
+  async submitStoreJob(request: StoreJobRequest): Promise<StoreJobResponse> {
+    await this.start();
+    const leg = await this.storeLeg();
+
+    const fee = this.uploadFee();
+    const event = leg.client.signEvent({
+      kind: request.kind,
+      content: '',
+      created_at: nowSeconds(),
+      tags: [
+        ...request.params.map(([key, value]) => ['param', key, value]),
+        ['bid', fee.toString(), 'usdc'],
+      ],
+    });
+
+    const claim = await leg.client.signBalanceProof(leg.channelId, fee);
+    const result = await leg.client.publishEvent(event, {
+      ...(this.storeDestination ? { destination: this.storeDestination } : {}),
+      claim,
+      ilpAmount: fee,
+      // The store backend serves POST /store (not the relay's /write).
+      proxyPath: '/store',
+    });
+    if (!result.success) {
+      throw new StandalonePublishError(
+        `kind:${request.kind} job rejected: ${result.error ?? 'the packet did not reach the store'}`
+      );
+    }
+    if (!result.response) {
+      throw new StandalonePublishError(
+        `kind:${request.kind} job FULFILL carried no sealed response; expected the DVM's answer`
+      );
+    }
+
+    const text = new TextDecoder().decode(result.response.body);
+    let body: {
+      accept?: unknown;
+      code?: unknown;
+      message?: unknown;
+      result?: unknown;
+    };
+    try {
+      body = JSON.parse(text) as typeof body;
+    } catch {
+      throw new StandalonePublishError(
+        `kind:${request.kind} job answer was not valid JSON ` +
+          `(HTTP ${result.response.status}): ${JSON.stringify(text.slice(0, 200))}`
+      );
+    }
+
+    return {
+      status: result.response.status,
+      accept: body.accept === true,
+      ...(typeof body.code === 'string' ? { code: body.code } : {}),
+      ...(typeof body.message === 'string' ? { message: body.message } : {}),
+      ...(body.result !== null && typeof body.result === 'object'
+        ? { result: body.result as Record<string, unknown> }
+        : {}),
+      feePaid: fee,
+    };
   }
 
   /**

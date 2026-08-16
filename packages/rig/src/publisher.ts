@@ -84,6 +84,49 @@ export interface PublishReceipt {
 }
 
 /**
+ * One NIP-90 job for a store node's DVM, carried on the PAID path (#101).
+ *
+ * The store sits behind the connector's payment termination, so there is no
+ * public HTTP endpoint to POST these to — a reachable one would be an
+ * anonymous free gateway to a paid handler, which is the failure ADR 0020
+ * exists to close. The job therefore travels exactly as a kind:5094 store
+ * write does: inside a paid ILP packet, with `/store` as the envelope target
+ * BENEATH the route's handler path rather than as a URL path.
+ */
+export interface StoreJobRequest {
+  /** NIP-90 job kind — 5095 brokered ArNS buy, 5096 gas station. */
+  kind: number;
+  /** Job arguments, sent as `["param", key, value]` tags. */
+  params: [string, string][];
+}
+
+/**
+ * A store DVM's answer, opened from the sealed FULFILL.
+ *
+ * ⚠️ A refusal is a RESULT, not an error. Under ADR 0020 an HTTP status is
+ * envelope content and never a packet outcome, so `accept: false` arrives on a
+ * FULFILL and the payer was charged for it either way. Implementations must
+ * return it rather than throw: the zero-ARIO rehearsal (submit a buy with no
+ * `processId` and watch the handler refuse by name before it quotes or touches
+ * the registry) is the cheapest proof the whole paid path works, and it only
+ * works if the refusal comes back as data.
+ */
+export interface StoreJobResponse {
+  /** HTTP status the app answered with, inside the envelope. */
+  status: number;
+  /** The DVM's own accept flag. `false` is a refusal, not a transport fault. */
+  accept: boolean;
+  /** Machine-readable refusal reason, when the DVM sent one. */
+  code?: string;
+  /** Human-readable detail, when the DVM sent one. */
+  message?: string;
+  /** The job's output, shape depending on `kind`. */
+  result?: Record<string, unknown>;
+  /** Fee paid to carry this job, in the smallest asset unit. */
+  feePaid: bigint;
+}
+
+/**
  * Fee rates used by `planPush` for the pre-push estimate.
  *
  * Both figures are FLAT per packet. ADR 0020 (toon-client#452) removed
@@ -131,6 +174,16 @@ export interface Publisher {
    * implement it — `rig site` requires it and errors clearly when absent.
    */
   uploadBlob?(upload: BlobUpload): Promise<UploadReceipt>;
+  /**
+   * Submit one NIP-90 job to the store node's DVM over the paid path and
+   * return its answer; paid. Used by `rig name buy/set --via` (#101) for the
+   * brokered kind:5095 buy and the kind:5096 gas station.
+   *
+   * Optional for the same reason as {@link uploadBlob}: transports that only
+   * move git objects (and pre-#101 test fakes) need not implement it, and
+   * `rig name --via` errors clearly when it is absent.
+   */
+  submitStoreJob?(request: StoreJobRequest): Promise<StoreJobResponse>;
   /**
    * Sign (implementation-held key) and pay-to-publish one event to the
    * given relay(s).
