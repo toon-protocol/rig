@@ -37,6 +37,44 @@ jobs:
             fi
           fi
 
+      # The step above asserts only that a `.changeset/*.md` FILE EXISTS. It
+      # never parses one, so a changeset that is well-formed YAML but an invalid
+      # RELEASE PLAN passes it, and `release.yml` — which runs after merge, where
+      # its failure gates nothing — is the first thing to read the file.
+      #
+      # toon-client had the byte-identical job, and that is exactly what happened
+      # there (toon-client#611): a changeset naming both `@toon-protocol/client`
+      # and the `ignore`d `@toon-protocol/client-mcp` merged, `changeset version`
+      # refuses a changeset that mixes ignored and non-ignored packages, and
+      # `release.yml` was red on EVERY push to main for a day — so no fix could
+      # reach npm. Because `changeset version` stops at the first offender, FIVE
+      # such changesets had piled up behind that error before anyone looked.
+      #
+      # This repo has the same shape and the same exposure:
+      # `.changeset/config.json` lists `@toon-protocol/rig-web` in `ignore`, so
+      # one hand-written changeset naming both it and `@toon-protocol/rig` would
+      # wedge releases here the same way. Nothing is wrong today — both pending
+      # changesets name only `@toon-protocol/rig` — so this is the guard ported
+      # BEFORE it is needed rather than after.
+      #
+      # `changeset version` rather than `changeset status`: it is the
+      # byte-identical command `release.yml`'s `changesets/action` runs as its
+      # `version:` input, so green here means the release gets past versioning,
+      # with no second implementation to drift. `status` additionally resolves
+      # `baseBranch` through git and errors when IT decides packages changed with
+      # no changeset — duplicating the step above with a different definition of
+      # "changed". Mutating the tree is free: this job is a throwaway checkout
+      # that commits, pushes and publishes nothing, and has no later steps.
+      - uses: ./.github/actions/setup-workspace
+
+      - name: Assert the changesets form a valid release plan
+        run: |
+          set -euo pipefail
+          pnpm changeset version
+          echo "--- the release plan this PR would produce ---"
+          git --no-pager diff --stat
+          echo "✅ changeset version succeeds — release.yml can get past versioning"
+
   build:
     runs-on: ubuntu-latest
     steps:
