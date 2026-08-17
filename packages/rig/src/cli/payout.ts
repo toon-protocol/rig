@@ -1,35 +1,43 @@
 /**
- * `rig maintainers list|add|remove <pubkey>` (#287) — manage the declared
- * maintainer set on a repo's kind:30617 announcement.
+ * `rig payout set|clear|show` (rig#92, part of the payout epic
+ * toon-protocol/toon-meta#391) — manage the declared payout pointer on a
+ * repo's kind:30617 announcement.
  *
- * Status authority is CONSUMER-side: rig and rig-web resolve an issue/PR's
- * state ONLY from kind:1630-1633 events signed by the repo owner ∪ its
- * declared maintainers. The owner is ALWAYS an implicit maintainer; this
- * command edits the EXPLICIT set carried by the `["maintainers", …]` tag.
+ * The payout pointer is the ONLY thing that turns on a serving node's
+ * node-declared `ownerFeeShare` split on repo-scoped paid writes
+ * (toon-meta#391 decision 2): no pointer on the announcement → no split, the
+ * node keeps 100%. v1 accepts exactly one chain, `evm` — the payout accrual
+ * ledger is EVM-only today (`crates/connector-client-edge/src/btp.rs:270-272`)
+ * — but the tag shape (`['payout', '<chain>', '<address>']`) carries the
+ * chain label so nothing re-shapes later.
  *
- *   list            FREE relay read — print owner + declared maintainers
- *   add <pubkey>    PAID — republish the 30617 with <pubkey> added
- *   remove <pubkey> PAID — republish the 30617 with <pubkey> removed
+ *   show           FREE relay read — print the pointer or "none"
+ *   set <address>  PAID — republish the 30617 with the payout tag set to
+ *                  `evm <checksummed address>`
+ *   clear          PAID — republish the 30617 with the payout tag removed
  *
- * add/remove republish the WHOLE announcement (a replaceable event keyed by
- * author + `d` tag), so they preserve the existing name/description and only
- * mutate the maintainers list. Because the 30617 is addressed by its author,
- * only the OWNER's republish is authoritative — running add/remove under a
- * non-owner identity writes that identity's own (irrelevant) announcement, so
- * we refuse it. The daemon has no announcement route, so this always runs the
- * embedded standalone publisher; the confirm gate matches every other paid
- * write (`--yes` skips; a non-TTY without it refuses; `--json` without `--yes`
- * is a pure estimate).
+ * set/clear republish the WHOLE announcement (a replaceable event keyed by
+ * author + `d` tag), so they preserve the existing name/description/
+ * maintainers and only mutate the payout pointer — mirrors `rig maintainers`
+ * exactly (`./maintainers.ts:1-23`). Because the 30617 is addressed by its
+ * author, only the OWNER's republish is authoritative, so a non-owner
+ * republish is refused (same shape as maintainers.ts:344-351), as is a
+ * republish on an unannounced repo (maintainers.ts:369-377). The daemon has
+ * no announcement route, so this always runs the embedded standalone
+ * publisher; the confirm gate matches every other paid write (`--yes` skips;
+ * a non-TTY without it refuses; `--json` without `--yes` is a pure
+ * estimate).
  */
 
 import { parseArgs } from 'node:util';
-import { buildRepoAnnouncement, parseMaintainers } from '../nip34-events.js';
-import { ownerToHex } from '../npub.js';
-import { fetchRemoteState } from '../remote-state.js';
+import { getAddress } from 'viem';
 import {
-  serializeEventReceipt,
-  type GitEventResponse,
-} from '../routes.js';
+  buildRepoAnnouncement,
+  isValidEvmPayoutAddress,
+  type PayoutPointer,
+} from '../nip34-events.js';
+import { fetchRemoteState } from '../remote-state.js';
+import { serializeEventReceipt, type GitEventResponse } from '../routes.js';
 import type { EventCommandDeps } from './events.js';
 import { emitCliError, InvalidRelayUrlError } from './errors.js';
 import {
@@ -48,68 +56,69 @@ import {
 } from './repo-command.js';
 import type { StandaloneContext } from './standalone-context.js';
 
-const HEX64_RE = /^[0-9a-f]{64}$/;
+export const PAYOUT_USAGE = `Usage: rig payout <set|clear|show> [<address>] [options]
 
-export const MAINTAINERS_USAGE = `Usage: rig maintainers <list|add|remove> [<pubkey>] [options]
-
-Manage a repo's declared maintainers (#287). Status authority is consumer-side:
-rig and rig-web honor an issue/PR status (kind:1630-1633) ONLY when its author
-is the repo owner or a declared maintainer. The owner is always an implicit
-maintainer; this command edits the explicit set on the kind:30617 announcement.
+Manage a repo's declared payout pointer (rig#92, part of the payout epic
+toon-protocol/toon-meta#391). No pointer on the kind:30617 announcement means
+a serving node keeps 100% of repo-scoped write fees; a pointer opts the repo
+into that node's declared ownerFeeShare split.
 
 Subcommands:
-  list             show the owner + declared maintainers — FREE (relay read)
-  add <pubkey>     add a maintainer (npub or 64-char hex) — PAID: republishes
-                   the kind:30617 (permanent, non-refundable)
-  remove <pubkey>  remove a maintainer — PAID: republishes the kind:30617
+  show             show the declared payout pointer — FREE (relay read)
+  set <address>    declare the payout pointer (EVM address, EIP-55
+                   checksummed or all-lowercase) — PAID: republishes the
+                   kind:30617 (permanent, non-refundable). v1 accepts evm
+                   addresses only.
+  clear            remove the payout pointer — PAID: republishes the
+                   kind:30617
 
-add/remove must run under the repo OWNER's identity (only the owner's
+set/clear must run under the repo OWNER's identity (only the owner's
 announcement is authoritative).
 
 Options:
   --repo-id <id>       repository id / NIP-34 d-tag (default: git config)
   --owner <pubkey>     repository owner (npub or hex; default: git config)
   --remote <name>      publish/read via this configured git remote (default: origin)
-  --relay <url>        ad-hoc relay override (exactly one for add/remove)
+  --relay <url>        ad-hoc relay override (exactly one for set/clear)
   --yes                skip the fee confirmation (required when not a TTY)
   --json               machine-readable envelope
   -h, --help           show this help`;
 
-/** Run `rig maintainers …`; returns the process exit code. */
-export async function runMaintainers(
+/** Run `rig payout …`; returns the process exit code. */
+export async function runPayout(
   args: string[],
   deps: EventCommandDeps
 ): Promise<number> {
   const { io } = deps;
   const [sub, ...rest] = args;
   switch (sub) {
-    case 'list':
-      return runList(rest, deps);
-    case 'add':
-      return runMutate('add', rest, deps);
-    case 'remove':
-      return runMutate('remove', rest, deps);
+    case 'show':
+      return runShow(rest, deps);
+    case 'set':
+      return runMutate('set', rest, deps);
+    case 'clear':
+      return runMutate('clear', rest, deps);
     case '--help':
     case '-h':
     case 'help':
-      io.out(MAINTAINERS_USAGE);
+      io.out(PAYOUT_USAGE);
       return 0;
     default:
       io.err(
         sub === undefined
-          ? 'missing subcommand: rig maintainers <list|add|remove>'
-          : `unknown rig maintainers subcommand: ${sub}`
+          ? 'missing subcommand: rig payout <set|clear|show>'
+          : `unknown rig payout subcommand: ${sub}`
       );
-      io.err(MAINTAINERS_USAGE);
+      io.err(PAYOUT_USAGE);
       return 2;
   }
 }
 
 // ---------------------------------------------------------------------------
-// list (FREE)
+// show (FREE)
 // ---------------------------------------------------------------------------
 
-async function runList(
+async function runShow(
   args: string[],
   deps: EventCommandDeps
 ): Promise<number> {
@@ -122,16 +131,16 @@ async function runList(
       allowPositionals: true,
     });
     if (positionals.length > 0) {
-      throw new Error('rig maintainers list takes no positional arguments');
+      throw new Error('rig payout show takes no positional arguments');
     }
     flags = pickRepoCommandFlags(values);
   } catch (err) {
     io.err(err instanceof Error ? err.message : String(err));
-    io.err(MAINTAINERS_USAGE);
+    io.err(PAYOUT_USAGE);
     return 2;
   }
   if (flags.help) {
-    io.out(MAINTAINERS_USAGE);
+    io.out(PAYOUT_USAGE);
     return 0;
   }
 
@@ -152,62 +161,58 @@ async function runList(
         ? { webSocketFactory: deps.webSocketFactory }
         : {}),
     });
-    const maintainers = remote.maintainers;
+    const payout = remote.payout;
     if (flags.json) {
       io.emitJson({
-        command: 'maintainers list',
+        command: 'payout show',
         repoAddr: { ownerPubkey: ctx.owner, repoId: ctx.repoId },
         announced: remote.announced,
-        owner: ctx.owner,
-        maintainers,
+        payout,
       });
       return 0;
     }
-    io.out(`Repo:    30617:${ctx.owner}:${ctx.repoId}`);
-    io.out(`Owner:   ${ctx.owner}  (implicit maintainer)`);
+    io.out(`Repo:   30617:${ctx.owner}:${ctx.repoId}`);
     if (!remote.announced) {
-      io.out('No kind:30617 announcement found — owner-only authority.');
+      io.out('No kind:30617 announcement found — no payout pointer.');
       return 0;
     }
-    if (maintainers.length === 0) {
-      io.out('Maintainers: (none declared — owner-only authority)');
-    } else {
-      io.out(`Maintainers (${maintainers.length}):`);
-      for (const m of maintainers) io.out(`  ${m}`);
-    }
+    io.out(
+      payout === null
+        ? 'Payout: none (the serving node keeps 100% of repo-scoped write fees)'
+        : `Payout: ${payout.chain} ${payout.address}`
+    );
     return 0;
   } catch (err) {
-    return emitCliError(io, flags.json, 'maintainers list', err);
+    return emitCliError(io, flags.json, 'payout show', err);
   }
 }
 
 // ---------------------------------------------------------------------------
-// add / remove (PAID — republish the 30617 under the owner's identity)
+// set / clear (PAID — republish the 30617 under the owner's identity)
 // ---------------------------------------------------------------------------
 
-interface MaintJsonOutput {
-  command: 'maintainers add' | 'maintainers remove';
+interface PayoutJsonOutput {
+  command: 'payout set' | 'payout clear';
   repoAddr: { ownerPubkey: string; repoId: string };
   identity: IdentityReport;
   executed: boolean;
   feeEstimate: string | null;
-  maintainers: string[];
+  payout: PayoutPointer | null;
   result?: GitEventResponse;
   hint?: string;
 }
 
 async function runMutate(
-  op: 'add' | 'remove',
+  op: 'set' | 'clear',
   args: string[],
   deps: EventCommandDeps
 ): Promise<number> {
   const { io } = deps;
-  const command = `maintainers ${op}` as
-    | 'maintainers add'
-    | 'maintainers remove';
+  const command = `payout ${op}` as 'payout set' | 'payout clear';
 
   let flags: RepoCommandFlags;
-  let pubkey: string;
+  /** The pointer this run publishes: validated for `set`, `null` for `clear`. */
+  let nextPayout: PayoutPointer | null = null;
   try {
     const { values, positionals } = parseArgs({
       args,
@@ -216,19 +221,29 @@ async function runMutate(
     });
     flags = pickRepoCommandFlags(values);
     if (flags.help) {
-      io.out(MAINTAINERS_USAGE);
+      io.out(PAYOUT_USAGE);
       return 0;
     }
-    if (positionals.length !== 1) {
-      throw new Error(`expected exactly one <pubkey> to ${op}`);
-    }
-    pubkey = ownerToHex(positionals[0] as string).toLowerCase();
-    if (!HEX64_RE.test(pubkey)) {
-      throw new Error(`<pubkey> must resolve to 64-char hex (got ${JSON.stringify(positionals[0])})`);
+    if (op === 'set') {
+      if (positionals.length !== 1) {
+        throw new Error('expected exactly one <address> to set');
+      }
+      const raw = positionals[0] as string;
+      if (!isValidEvmPayoutAddress(raw)) {
+        throw new Error(
+          `<address> must be a valid EVM address (0x + 40 hex chars, ` +
+            `correctly EIP-55 checksummed if mixed-case) — got ` +
+            `${JSON.stringify(raw)}. See toon-meta#391 (payout epic): v1 ` +
+            'accepts evm addresses only.'
+        );
+      }
+      nextPayout = { chain: 'evm', address: getAddress(raw) };
+    } else if (positionals.length !== 0) {
+      throw new Error('rig payout clear takes no positional arguments');
     }
   } catch (err) {
     io.err(err instanceof Error ? err.message : String(err));
-    io.err(MAINTAINERS_USAGE);
+    io.err(PAYOUT_USAGE);
     return 2;
   }
 
@@ -262,14 +277,14 @@ async function runMutate(
     if (identity.pubkey.toLowerCase() !== ctx.owner.toLowerCase()) {
       io.err(
         `rig: only the repo owner (${ctx.owner.slice(0, 8)}…) can change the ` +
-          `maintainer set — the active identity is ${identity.pubkey.slice(0, 8)}…. ` +
+          `payout pointer — the active identity is ${identity.pubkey.slice(0, 8)}…. ` +
           'A non-owner republish would write your own (ignored) announcement. ' +
           'Nothing was published or paid.'
       );
       return 1;
     }
 
-    // Read the current announcement to preserve name/description + base set.
+    // Read the current announcement to preserve name/description/maintainers.
     const remote = await fetchRemoteState({
       relayUrls: [relayUrl],
       ownerPubkey: ctx.owner,
@@ -280,59 +295,55 @@ async function runMutate(
     });
     // Refuse on an unannounced repo: republishing here would MINT a phantom
     // kind:30617 with a placeholder name (= repoId) and empty description, for
-    // real money. Worse, `rig push` only announces when the repo is NOT already
-    // announced (see push.ts), so that placeholder would permanently shadow the
-    // real name/description the first push intended, with no way to fix it.
-    // Managing maintainers presupposes the repo exists — announce it first.
+    // real money (mirrors rig maintainers, maintainers.ts:363-377).
     if (!remote.announced) {
       io.err(
         `rig: 30617:${ctx.owner.slice(0, 8)}…:${ctx.repoId} has no announcement ` +
           'yet — run `rig push` to publish the repo (with its real ' +
-          'name/description) before managing maintainers. Nothing was published ' +
-          'or paid.'
+          'name/description) before managing the payout pointer. Nothing was ' +
+          'published or paid.'
       );
       return 1;
     }
-    const current = remote.announceEvent
-      ? parseMaintainers(remote.announceEvent.tags)
-      : [];
-    const currentSet = new Set(current);
-    if (op === 'add' && currentSet.has(pubkey)) {
+
+    const current = remote.payout;
+    if (
+      nextPayout !== null &&
+      current !== null &&
+      current.chain === nextPayout.chain &&
+      current.address === nextPayout.address
+    ) {
       io.err(
-        `rig: ${pubkey.slice(0, 8)}… is already a maintainer — nothing to do (not published).`
+        `rig: payout is already set to ${current.chain} ${current.address} — nothing to do (not published).`
       );
       return 0;
     }
-    if (op === 'remove' && !currentSet.has(pubkey)) {
-      io.err(
-        `rig: ${pubkey.slice(0, 8)}… is not a declared maintainer — nothing to do (not published).`
-      );
+    if (op === 'clear' && current === null) {
+      io.err('rig: no payout pointer is set — nothing to do (not published).');
       return 0;
     }
-    const next =
-      op === 'add'
-        ? [...current, pubkey]
-        : current.filter((m) => m !== pubkey);
 
     const name = remote.name ?? ctx.repoId;
     const description = remote.description ?? '';
-    // Preserve the payout pointer (rig#92) — this republish must not
-    // silently wipe it out from under `rig payout`.
     const event = buildRepoAnnouncement(
       ctx.repoId,
       name,
       description,
-      next,
-      remote.payout
+      remote.maintainers,
+      nextPayout
     );
     const fee = (await standaloneCtx.publisher.getFeeRates()).eventFee.toString();
-    const action = `kind:30617 maintainers ${op} ${pubkey.slice(0, 8)}…`;
+    const action = nextPayout
+      ? `kind:30617 payout set ${nextPayout.chain} ${nextPayout.address}`
+      : 'kind:30617 payout clear';
 
     // ── Confirm gate ────────────────────────────────────────────────────────
     if (!flags.json) {
       io.out(`Republish ${action}`);
       io.out(`Repo: 30617:${ctx.owner}:${ctx.repoId}`);
-      io.out(`Maintainers after: ${next.length === 0 ? '(none)' : next.join(', ')}`);
+      io.out(
+        `Payout after: ${nextPayout ? `${nextPayout.chain} ${nextPayout.address}` : '(none)'}`
+      );
       io.out(`Fee: ${feeLabel(fee)}. Writes are permanent and non-refundable.`);
     }
     if (!flags.yes) {
@@ -343,9 +354,9 @@ async function runMutate(
           identity,
           executed: false,
           feeEstimate: fee,
-          maintainers: next,
+          payout: nextPayout,
           hint: 'estimate only — re-run with --yes to publish (permanent, non-refundable)',
-        } satisfies MaintJsonOutput);
+        } satisfies PayoutJsonOutput);
         return 0;
       }
       if (!io.isInteractive) {
@@ -377,9 +388,9 @@ async function runMutate(
         identity,
         executed: true,
         feeEstimate: fee,
-        maintainers: next,
+        payout: nextPayout,
         result,
-      } satisfies MaintJsonOutput);
+      } satisfies PayoutJsonOutput);
     } else {
       io.out(
         `Published ${action}: ${result.eventId}  paid ${result.feePaid} base units`

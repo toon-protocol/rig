@@ -7,6 +7,7 @@
  * structures follow the NIP-34 spec and `@toon-protocol/core/nip34`.
  */
 
+import { getAddress, isAddress } from 'viem';
 import {
   ISSUE_KIND,
   PATCH_KIND,
@@ -89,6 +90,87 @@ export function authorizedStatusAuthors(
   ]);
 }
 
+// ---------------------------------------------------------------------------
+// Payout pointer (rig#92, part of the payout epic toon-protocol/toon-meta#391)
+// ---------------------------------------------------------------------------
+
+/**
+ * NIP-34 tag naming the repo's declared payout pointer: a single
+ * `["payout", "<chain>", "<address>"]` tag on the kind:30617 announcement.
+ * No pointer → no split, the serving node keeps 100% of repo-scoped write
+ * fees (toon-meta#391 decision 2). The tag carries the chain label so the
+ * shape survives future chains, but v1 accepts exactly one: `evm` — the
+ * payout accrual ledger is EVM-only today
+ * (`crates/connector-client-edge/src/btp.rs:270-272`).
+ */
+export const PAYOUT_TAG = 'payout';
+
+/** Chains the payout pointer can target. v1: `evm` only (toon-meta#391). */
+export type PayoutChain = 'evm';
+
+const SUPPORTED_PAYOUT_CHAINS: ReadonlySet<string> = new Set<PayoutChain>([
+  'evm',
+]);
+
+/** True when `chain` is a chain the payout pointer supports today. */
+function isSupportedPayoutChain(chain: string): chain is PayoutChain {
+  return SUPPORTED_PAYOUT_CHAINS.has(chain);
+}
+
+/** A repo's declared payout pointer (parsed from / built into the `payout` tag). */
+export interface PayoutPointer {
+  chain: PayoutChain;
+  /** EIP-55 checksummed address (never a raw lowercase/mixed-case echo). */
+  address: string;
+}
+
+/**
+ * True when `address` is a structurally valid, correctly-checksummed EVM
+ * address: `0x` + 40 hex chars, and — when mixed-case — a valid EIP-55
+ * checksum (an all-lowercase address is accepted as "unchecksummed").
+ */
+export function isValidEvmPayoutAddress(address: string): boolean {
+  return isAddress(address);
+}
+
+/**
+ * Collect the repo's declared payout pointer from a kind:30617 event's tags.
+ * Only `["payout", "evm", <address>]` with a shape- and checksum-valid
+ * address is accepted; the address is normalized to its EIP-55 checksummed
+ * form. Tolerant of relay noise: an unsupported chain or malformed address
+ * is skipped (not thrown). The relay is permissionless and 30617 is
+ * replaceable, so a legacy/hand-crafted event could carry more than one
+ * `payout` tag — the first valid one wins and the rest are ignored (a
+ * `console.warn` notes the drop so a stray extra tag isn't silently
+ * mysterious).
+ */
+export function parsePayout(tags: string[][]): PayoutPointer | null {
+  let result: PayoutPointer | null = null;
+  let ignored = 0;
+  for (const tag of tags) {
+    if (tag[0] !== PAYOUT_TAG) continue;
+    const [, chain, address] = tag;
+    if (
+      result === null &&
+      chain !== undefined &&
+      isSupportedPayoutChain(chain) &&
+      address !== undefined &&
+      isValidEvmPayoutAddress(address)
+    ) {
+      result = { chain, address: getAddress(address) };
+    } else {
+      ignored++;
+    }
+  }
+  if (ignored > 0) {
+    console.warn(
+      `rig: ignoring ${ignored} extra/invalid "${PAYOUT_TAG}" tag(s) on kind:30617` +
+        (result ? ` — using ${result.chain} ${result.address}` : '')
+    );
+  }
+  return result;
+}
+
 /**
  * Build a kind:30617 repository announcement event.
  *
@@ -100,12 +182,16 @@ export function authorizedStatusAuthors(
  *   values are dropped. The owner (the signer) is an implicit maintainer and
  *   need not be listed — if passed it is emitted, which is harmless since the
  *   owner is authorized regardless. See {@link MAINTAINERS_TAG}.
+ * @param payout - Optional declared payout pointer (rig#92). Emitted as a
+ *   single `["payout", "evm", <address>]` tag when given; omit (or pass
+ *   `null`) to leave the repo with no payout pointer. See {@link PAYOUT_TAG}.
  */
 export function buildRepoAnnouncement(
   repoId: string,
   name: string,
   description: string,
-  maintainers: string[] = []
+  maintainers: string[] = [],
+  payout?: PayoutPointer | null
 ): UnsignedEvent {
   const tags: string[][] = [
     ['d', repoId],
@@ -123,6 +209,9 @@ export function buildRepoAnnouncement(
   }
   if (declared.length > 0) {
     tags.push([MAINTAINERS_TAG, ...declared]);
+  }
+  if (payout) {
+    tags.push([PAYOUT_TAG, payout.chain, payout.address]);
   }
   return {
     kind: REPOSITORY_ANNOUNCEMENT_KIND,

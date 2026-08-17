@@ -162,6 +162,7 @@ function cannedRemote(
     description: null,
     relays: [],
     maintainers: [],
+    payout: null,
     ...partial,
     resolveMissing: async (shas: string[]) => {
       const out = new Map<string, string>();
