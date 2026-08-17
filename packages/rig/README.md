@@ -326,7 +326,11 @@ the human-readable snapshot (verified live 2026-07-17), useful when auditing
   same id on every cluster); the asset pubkey is the SDK's `processId`.
 - Free devnet test loop (#381): ARIO faucet `https://faucet.services.ar-io.dev/` →
   `rig name buy --network devnet` → `rig name set` → resolves at the
-  devnet-connected gateway `https://<name>.ar-io.dev/`.
+  devnet-connected gateway `https://<name>.ar-io.dev/`. ⚠️ That gateway is
+  ar.io's **testnet** and resolves devnet names ONLY; a **mainnet** name never
+  appears there (nor on `arweave.net`, which runs a forked ArNS). Check mainnet
+  names on a mainnet gateway, e.g. `https://<name>.permagate.io/` or
+  `https://<name>.ardrive.net/`.
 - `--process-id <id>` overrides the arns registry program outright (wins over
   `--network`) — for pointing at a fresh/staging registry deployment.
 

@@ -48,10 +48,10 @@ describe('Rig-UI Pointer HTML Generation', () => {
     const html = generatePointerHtml(BASE_OPTS);
 
     expect(html).toContain(
-      `src="https://ar-io.dev/${BASE_OPTS.rigTx}/${BASE_OPTS.jsPath}"`
+      `src="https://arweave.net/${BASE_OPTS.rigTx}/${BASE_OPTS.jsPath}"`
     );
     expect(html).toContain(
-      `href="https://ar-io.dev/${BASE_OPTS.rigTx}/${BASE_OPTS.cssPath}"`
+      `href="https://arweave.net/${BASE_OPTS.rigTx}/${BASE_OPTS.cssPath}"`
     );
   });
 
@@ -73,7 +73,7 @@ describe('Rig-UI Pointer HTML Generation', () => {
 
     expect(html).toContain('Content-Security-Policy');
     expect(html).toContain("'unsafe-inline'");
-    expect(html).toContain('https://ar-io.dev');
+    expect(html).toContain('https://arweave.net');
     expect(html).toContain('ws:');
     expect(html).toContain('wss:');
   });
