@@ -385,7 +385,7 @@ Chain ids below are the **announced spellings** — use them verbatim with
 | Chain (`TOON_CLIENT_CHAIN`) | Payment-channel contract/program/zkApp | USDC token (6dp) | Explorer |
 |---|---|---|---|
 | `evm:84532` (Base Sepolia) | TokenNetwork `0x1E95493fEF46707E034b4a1945f25a8C76A1823D` (registry `0xcC9079adE929b168B54145f6d25262b64FAB9D5b`) | `0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` | [base-sepolia.blockscout.com](https://base-sepolia.blockscout.com) |
-| `solana:devnet` | program `2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip` | mint `xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in` | [explorer.solana.com/?cluster=devnet](https://explorer.solana.com/?cluster=devnet) |
+| `solana:devnet` | program `2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip` | mint `34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU` | [explorer.solana.com/?cluster=devnet](https://explorer.solana.com/?cluster=devnet) |
 | `mina:devnet` | PaymentChannel zkApp `B62qmgPhv2Xo6QVEtwjLja8UZJUtu8yapRFAR6gaoGtbM9zE5hG7Tkf` | token `B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d`<br>tokenId `9497120696276615621907376728658022802954262638363646162765282600447713419198` | [minascan.io/devnet](https://minascan.io/devnet/home) |
 
 ### Config notes (rig ≥ 2.10.2)
