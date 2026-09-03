@@ -451,6 +451,166 @@ describe('StandalonePublisher', () => {
     });
   });
 
+  describe('submitStoreJob (brokered ArNS + gas station over the paid path, #101)', () => {
+    const buyJob = {
+      kind: 5095,
+      params: [
+        ['name', 'boughtviatoonnode'],
+        ['type', 'lease'],
+        ['years', '1'],
+        ['processId', 'ANT-PROCESS-ID'],
+      ] as [string, string][],
+    };
+
+    it('carries the job as a paid kind:5095 packet with /store beneath the handler', async () => {
+      const { client, calls } = mockClient({
+        publishResult: (event) => ({
+          success: true,
+          eventId: event.id,
+          response: storeAnswer(
+            JSON.stringify({
+              accept: true,
+              result: { registryTxId: 'REGISTRY-TX', quotedMario: '1748629680' },
+            })
+          ),
+        }),
+      });
+      const publisher = build(client, { routePrices: { store: 61000n } });
+
+      const answer = await publisher.submitStoreJob(buyJob);
+      const expectedFee = 61000n;
+      expect(answer).toEqual({
+        status: 200,
+        accept: true,
+        result: { registryTxId: 'REGISTRY-TX', quotedMario: '1748629680' },
+        feePaid: expectedFee,
+      });
+
+      // One claim, at the store route's flat price — same as a kind:5094.
+      expect(calls.claims).toEqual([
+        { channelId: 'channel-1', amount: expectedFee },
+      ]);
+      const [pub] = calls.publishes;
+      if (!pub) throw new Error('expected exactly one paid publish');
+      expect(pub.event.kind).toBe(5095);
+      expect(pub.event.content).toBe('');
+      // `param` tags, then the bid the handler reads to see the job funded.
+      expect(pub.event.tags).toEqual([
+        ['param', 'name', 'boughtviatoonnode'],
+        ['param', 'type', 'lease'],
+        ['param', 'years', '1'],
+        ['param', 'processId', 'ANT-PROCESS-ID'],
+        ['bid', expectedFee.toString(), 'usdc'],
+      ]);
+      // The whole point of #101: `/store` as the envelope target beneath the
+      // route's handler path, NOT a public URL path.
+      expect(pub.options?.destination).toBe('g.proxy.store');
+      expect(pub.options?.proxyPath).toBe('/store');
+      expect(pub.options?.ilpAmount).toBe(expectedFee);
+      await publisher.stop();
+    });
+
+    it('returns a DVM refusal as DATA rather than throwing (the zero-ARIO rehearsal)', async () => {
+      // Omitting `processId` makes the handler refuse BY NAME before it quotes
+      // or touches the registry. That is the cheapest proof the whole paid path
+      // works, and it only works if the refusal comes back as a value. Under
+      // ADR 0020 the payer was charged either way, so `feePaid` still reports.
+      const { client, calls } = mockClient({
+        publishResult: (event) => ({
+          success: true,
+          eventId: event.id,
+          response: storeAnswer(
+            JSON.stringify({
+              accept: false,
+              code: 'MISSING_PARAM',
+              message: 'missing required param tag: processId',
+            }),
+            422
+          ),
+        }),
+      });
+      const publisher = build(client, { routePrices: { store: 1000n } });
+
+      const answer = await publisher.submitStoreJob({
+        kind: 5095,
+        params: [['name', 'boughtviatoonnode']],
+      });
+      expect(answer).toEqual({
+        status: 422,
+        accept: false,
+        code: 'MISSING_PARAM',
+        message: 'missing required param tag: processId',
+        feePaid: 1000n,
+      });
+      expect(calls.claims).toHaveLength(1);
+      await publisher.stop();
+    });
+
+    it('throws when the packet never reached the store', async () => {
+      const { client } = mockClient({
+        publishResult: () => ({ success: false, error: 'F01 - claim rejected' }),
+      });
+      const publisher = build(client, { routePrices: { store: 1000n } });
+      await expect(publisher.submitStoreJob(buyJob)).rejects.toThrow(
+        /kind:5095 job rejected: F01/
+      );
+      await publisher.stop();
+    });
+
+    it('throws when a FULFILL carries no sealed answer', async () => {
+      const { client } = mockClient({
+        publishResult: (event) => ({ success: true, eventId: event.id }),
+      });
+      const publisher = build(client, { routePrices: { store: 1000n } });
+      await expect(publisher.submitStoreJob(buyJob)).rejects.toThrow(
+        /carried no sealed response/
+      );
+      await publisher.stop();
+    });
+
+    it('throws with the body when the answer is not JSON', async () => {
+      const { client } = mockClient({
+        publishResult: (event) => ({
+          success: true,
+          eventId: event.id,
+          response: storeAnswer('<html>502 Bad Gateway</html>', 502),
+        }),
+      });
+      const publisher = build(client, { routePrices: { store: 1000n } });
+      await expect(publisher.submitStoreJob(buyJob)).rejects.toThrow(
+        /was not valid JSON \(HTTP 502\)/
+      );
+      await publisher.stop();
+    });
+
+    it('carries a kind:5096 gas-station job the same way', async () => {
+      const { client, calls } = mockClient({
+        publishResult: (event) => ({
+          success: true,
+          eventId: event.id,
+          response: storeAnswer(
+            JSON.stringify({ accept: true, result: { quoteId: 'quote-1' } })
+          ),
+        }),
+      });
+      const publisher = build(client, { routePrices: { store: 1000n } });
+      const answer = await publisher.submitStoreJob({
+        kind: 5096,
+        params: [['phase', 'quote']],
+      });
+      expect(answer.accept).toBe(true);
+      const [pub] = calls.publishes;
+      if (!pub) throw new Error('expected exactly one paid publish');
+      expect(pub.event.kind).toBe(5096);
+      expect(pub.event.tags).toEqual([
+        ['param', 'phase', 'quote'],
+        ['bid', '1000', 'usdc'],
+      ]);
+      expect(pub.options?.proxyPath).toBe('/store');
+      await publisher.stop();
+    });
+  });
+
   describe('flat route pricing (the connector gates packets at the route price — F06)', () => {
     const gitUpload = (bytes: number) => ({
       sha: '1234567890abcdef1234567890abcdef12345678',
@@ -1045,6 +1205,100 @@ describe('StandalonePublisher', () => {
 
       expect(callsB.trackChannel).toEqual([]);
       expect(callsB.onChainOpens).toBe(1);
+    });
+
+    // Regression: the map key is `identity|destination|chain|tokenNetwork` —
+    // it names a ROUTE, and a route can change hands (the devnet apex
+    // `g.toon` was retired 2026-08-14 and another node took over
+    // `g.toon.relay`). Every key field still matched, so rig resumed a
+    // channel opened against the retired node and signed claims against it;
+    // the new connector had no record of it and refused every packet with
+    // `F01 - claim rejected: names a channel this connector has no record
+    // of`. Deleting the cache entry by hand was the only recovery.
+    it('a REPLACED counterparty (same route, new node) is never resumed — it re-resolves', async () => {
+      const { client: clientA } = mockChannelClient();
+      const runA = buildPersistent(clientA);
+      await runA.publishEvent(EVENT, []);
+      await runA.stop();
+      expect(map.list()[0]?.context.recipient).toBe(
+        NEGOTIATION.settlementAddress
+      );
+
+      // Same peer, same chain, same tokenNetwork — only the settlement
+      // address changed, exactly what a node takeover looks like from here.
+      const takeover = new Map([
+        [
+          PEER_ID,
+          { ...NEGOTIATION, settlementAddress: '0x' + '55'.repeat(20) },
+        ],
+      ]);
+      const { client: clientB, calls: callsB } = mockChannelClient({
+        negotiations: takeover,
+      });
+      const runB = buildPersistent(clientB);
+      await runB.publishEvent(EVENT, []);
+      await runB.stop();
+
+      // The dead channel is neither tracked nor claimed against.
+      expect(callsB.trackChannel).toEqual([]);
+      expect(callsB.claims).toEqual([{ channelId: '0xchannel-1', amount: 1n }]);
+      expect(warnings.join('\n')).toMatch(/was opened against counterparty/);
+
+      // The stale record is retired from the resume path but KEPT, so its
+      // on-chain deposit stays reachable from `rig channel close/settle`.
+      const records = map.list();
+      expect(records).toHaveLength(2);
+      const retired = records.find((r) => r.supersededAt !== undefined);
+      expect(retired?.context.recipient).toBe(NEGOTIATION.settlementAddress);
+      const live = map.listFor(PUBKEY, ANCHOR);
+      expect(live).toHaveLength(1);
+      expect(live[0]?.context.recipient).toBe('0x' + '55'.repeat(20));
+
+      // Run 3 (still the takeover node) resumes the re-resolved channel —
+      // the supersession is not a per-run re-open.
+      const { client: clientC, calls: callsC } = mockChannelClient({
+        negotiations: takeover,
+      });
+      const runC = buildPersistent(clientC);
+      await runC.publishEvent(EVENT, []);
+      await runC.stop();
+      expect(callsC.onChainOpens).toBe(0);
+    });
+
+    // Migration: entries written before the counterparty was validated carry
+    // no `context.recipient`. Nothing contradicts the announce, so they still
+    // resume (no fresh on-chain open, no hand-editing) — and get enriched so
+    // the NEXT run is verifiable.
+    it('a record with NO recorded counterparty resumes and is back-filled from the announce', async () => {
+      const { client: clientA } = mockChannelClient();
+      const runA = buildPersistent(clientA);
+      await runA.publishEvent(EVENT, []);
+      await runA.stop();
+
+      const mapPath = join(stateDir, 'rig-channels.json');
+      const raw = JSON.parse(readFileSync(mapPath, 'utf8')) as {
+        channels: Record<string, { context: { recipient?: string } }>;
+      };
+      for (const record of Object.values(raw.channels)) {
+        delete record.context.recipient; // the pre-validation shape
+      }
+      writeFileSync(mapPath, JSON.stringify(raw, null, 2));
+
+      const { client: clientB, calls: callsB } = mockChannelClient();
+      const runB = buildPersistent(clientB);
+      await runB.publishEvent(EVENT, []);
+      await runB.stop();
+
+      expect(callsB.onChainOpens).toBe(0); // resumed, not re-opened
+      // trackChannel got the announced recipient (Solana/Mina proofs need it).
+      expect(callsB.trackChannel[0]?.context.recipient).toBe(
+        NEGOTIATION.settlementAddress
+      );
+      // …and the record now carries it, so the next run can verify it.
+      expect(map.list()[0]?.context.recipient).toBe(
+        NEGOTIATION.settlementAddress
+      );
+      expect(warnings).toEqual([]);
     });
 
     it('without a channelMap nothing is recorded (historical behaviour)', async () => {

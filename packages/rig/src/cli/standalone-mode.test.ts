@@ -1365,4 +1365,50 @@ describe('resolveNetworkTopology — store leg', () => {
     );
     expect(topology.storeBtpUrl).toBe('wss://pinned.example.test/ilp/btp');
   });
+
+  // ── `rig name --via` store override (#101) ───────────────────────────────
+
+  it('a --via store override outranks the env var and the config file', async () => {
+    // Per-invocation, so it beats both settings — `--via` is a choice made for
+    // one command, not a configured default.
+    const topology = await resolveNetworkTopology(
+      inputs({
+        peers: [apexAnnounce(), storeAnnounce()],
+        env: { TOON_CLIENT_STORE_DESTINATION: 'g.env.store' },
+        file: { storeDestination: 'g.file.store' },
+        storeDestinationOverride: 'g.proxy.store',
+      })
+    );
+    expect(topology.storeDestination).toBe('g.proxy.store');
+  });
+
+  it('resolves the OVERRIDDEN node’s own uplink and price, not the payment peer’s', async () => {
+    // The whole point of pointing `--via` somewhere: that node holds its own
+    // channel, so a claim signed on the publish channel is refused (F01).
+    const topology = await resolveNetworkTopology(
+      inputs({
+        peers: [apexAnnounce(), storeAnnounce()],
+        storeDestinationOverride: 'g.proxy.store',
+      })
+    );
+    expect(topology.storeBtpUrl).toBe('wss://store.example.test/ilp/btp');
+    expect(topology.storeBtpUrl).not.toBe(topology.btpUrl);
+    expect(topology.routePrices?.store).toBe('1000');
+  });
+
+  it('warns rather than guessing when no announce claims the overridden route', async () => {
+    // Guessing an endpoint for an unadvertised destination would send real
+    // claims to a node nobody announced.
+    const warnings: string[] = [];
+    const topology = await resolveNetworkTopology(
+      inputs({
+        peers: [apexAnnounce(), storeAnnounce()],
+        storeDestinationOverride: 'g.nobody.store',
+        warn: (l) => warnings.push(l),
+      })
+    );
+    expect(topology.storeDestination).toBe('g.nobody.store');
+    expect(topology.storeBtpUrl).toBeUndefined();
+    expect(warnings.join('\n')).toContain('g.nobody.store');
+  });
 });

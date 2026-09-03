@@ -28,7 +28,7 @@ import {
   ARNS_NULL_PROCESS_ID,
   defaultLoadArns,
   DVM_PAYMENT_NOTE,
-  DEVNET_DVM_URL,
+  DEVNET_DVM_DESTINATION,
   MARIO_PAYMENT_NOTE,
   MIN_ARIO_SDK_VERSION,
   runName,
@@ -41,6 +41,8 @@ import {
   type NameDeps,
   type SubmitDvmBuyJob,
 } from './name.js';
+import type { IdentitySourceKind } from './identity.js';
+import type { LoadStandalone } from './standalone-context.js';
 
 /** Standard BIP-39 test vector phrase — deterministic, never funded. */
 const MNEMONIC =
@@ -186,8 +188,21 @@ interface Harness {
   /** Every kind:5095 job the stubbed DVM submitter received (--via). */
   dvmJobs: DvmBuyJobRequest[];
   /** Every kind:5096 gas-station call the stubbed client received. */
-  gasQuotes: { viaUrl: string; transaction?: string }[];
-  gasExecutes: { viaUrl: string; transaction: string; quoteId: string; idempotencyKey: string }[];
+  gasQuotes: { destination: string; transaction?: string }[];
+  gasExecutes: {
+    destination: string;
+    transaction: string;
+    quoteId: string;
+    idempotencyKey: string;
+  }[];
+  /**
+   * Every `storeDestination` a paid session was opened for (#101). One entry
+   * per `--via` invocation; empty means no session was opened, which is what
+   * a pure estimate must show.
+   */
+  sessions: string[];
+  /** How many times a session was torn down — must match `sessions`. */
+  sessionStops: number;
 }
 
 function makeHarness(
@@ -244,12 +259,13 @@ function makeHarness(
   const gasStation: GasStationClient = {
     quote: async (args) => {
       gasQuotes.push({
-        viaUrl: args.viaUrl,
+        destination: args.destination,
         ...(args.transaction !== undefined
           ? { transaction: args.transaction }
           : {}),
       });
-      expect(args.nostrSecretKey).toHaveLength(32);
+      // #101: the seam carries a paid transport, never key material.
+      expect(typeof args.submit).toBe('function');
       return {
         quoteId: 'quote-1',
         feePayer: 'GASWALLETADDR',
@@ -260,7 +276,7 @@ function makeHarness(
     },
     execute: async (args) => {
       gasExecutes.push({
-        viaUrl: args.viaUrl,
+        destination: args.destination,
         transaction: args.transaction,
         quoteId: args.quoteId,
         idempotencyKey: args.idempotencyKey,
@@ -272,6 +288,42 @@ function makeHarness(
       };
     },
   };
+  // #101: `--via` opens a paid session against the store node. The fake
+  // records which destination it was pointed at and never touches the network,
+  // so no test can pay for a packet.
+  const sessions: string[] = [];
+  let sessionStops = 0;
+  const loadStandalone: LoadStandalone = async (options) => {
+    sessions.push(options.storeDestination ?? '<none>');
+    return {
+      ownerPubkey: 'f'.repeat(64),
+      identitySource: 'env' as IdentitySourceKind,
+      identitySourceLabel: 'RIG_MNEMONIC env',
+      publisher: {
+        getFeeRates: async () => ({ uploadFee: 1000n, eventFee: 1000n }),
+        uploadGitObject: async () => {
+          throw new Error('not used by rig name');
+        },
+        publishEvent: async () => {
+          throw new Error('not used by rig name');
+        },
+        submitStoreJob: async () => {
+          throw new Error(
+            'the job seams are stubbed in these tests; submitStoreJob should ' +
+              'never be reached'
+          );
+        },
+      },
+      defaultRelayUrls: [],
+      fetchRemote: async () => {
+        throw new Error('not used by rig name');
+      },
+      stop: async () => {
+        sessionStops += 1;
+      },
+    };
+  };
+
   const deps: NameDeps = {
     io,
     env,
@@ -279,6 +331,7 @@ function makeHarness(
     loadArns,
     submitDvmBuyJob,
     gasStation,
+    loadStandalone,
     resolveToonNetwork: async () => ({
       network: undefined,
       effectiveNetwork: opts.toonDevnet ? 'devnet' : undefined,
@@ -296,6 +349,10 @@ function makeHarness(
     dvmJobs,
     gasQuotes,
     gasExecutes,
+    sessions,
+    get sessionStops() {
+      return sessionStops;
+    },
     get loadArnsCalls() {
       return loadArnsCalls;
     },
@@ -802,7 +859,7 @@ describe('rig name', () => {
   it('--via --json without --yes is a pure estimate: no spawn, no job, read-only SDK', async () => {
     const h = makeHarness(env, cwd);
     const code = await runName(
-      ['buy', 'toon-buyfor-e2e', '--via', 'http://dvm.local:3300', '--json'],
+      ['buy', 'toon-buyfor-e2e', '--via', 'g.drew.ario', '--json'],
       h.deps
     );
     expect(code).toBe(0);
@@ -811,7 +868,7 @@ describe('rig name', () => {
       command: 'name',
       action: 'buy',
       executed: false,
-      via: 'http://dvm.local:3300',
+      via: 'g.drew.ario',
       payment: DVM_PAYMENT_NOTE,
     });
     expect(h.calls.spawnAnt).toHaveLength(0);
@@ -827,7 +884,7 @@ describe('rig name', () => {
         'buy',
         'toon-buyfor-e2e',
         '--via',
-        'http://dvm.local:3300',
+        'g.drew.ario',
         '--network',
         'devnet',
         '--yes',
@@ -840,7 +897,7 @@ describe('rig name', () => {
     expect(doc).toMatchObject({
       executed: true,
       network: 'devnet',
-      via: 'http://dvm.local:3300',
+      via: 'g.drew.ario',
       spawn: { processId: 'SPAWNED-ANT-ID', signature: 'spawn-tx-1' },
       result: {
         registryTxId: 'dvm-registry-tx-1',
@@ -855,20 +912,20 @@ describe('rig name', () => {
     expect(h.calls.buyRecord).toHaveLength(0);
     expect(h.dvmJobs).toHaveLength(1);
     expect(h.dvmJobs[0]).toMatchObject({
-      viaUrl: 'http://dvm.local:3300',
+      destination: 'g.drew.ario',
       name: 'toon-buyfor-e2e',
       type: 'lease',
       years: 1,
       processId: 'SPAWNED-ANT-ID',
     });
-    expect(h.dvmJobs[0]!.nostrSecretKey).toHaveLength(32);
+    expect(typeof h.dvmJobs[0]!.submit).toBe('function');
     expect(h.loadArnsModes).toEqual(['read', 'write']);
   });
 
   it('--via refuses without --yes when non-interactive (nothing spawned or submitted)', async () => {
     const h = makeHarness(env, cwd);
     const code = await runName(
-      ['buy', 'toon-buyfor-e2e', '--via', 'http://dvm.local:3300'],
+      ['buy', 'toon-buyfor-e2e', '--via', 'g.drew.ario'],
       h.deps
     );
     expect(code).toBe(1);
@@ -882,7 +939,7 @@ describe('rig name', () => {
       dvm: { error: new Error('the DVM rejected the kind:5095 buy job (T00): insufficient ARIO balance') },
     });
     const code = await runName(
-      ['buy', 'toon-buyfor-e2e', '--via', 'http://dvm.local:3300', '--yes', '--json'],
+      ['buy', 'toon-buyfor-e2e', '--via', 'g.drew.ario', '--yes', '--json'],
       h.deps
     );
     expect(code).toBe(1);
@@ -890,22 +947,85 @@ describe('rig name', () => {
     expect(String(doc['detail'])).toContain('insufficient ARIO balance');
     expect(h.calls.spawnAnt).toHaveLength(1);
     expect(h.calls.buyRecord).toHaveLength(0);
+    // #101: the session is torn down on the failure path too. It holds the
+    // identity lock, so leaking it wedges the next command.
+    expect(h.sessions).toEqual(['g.drew.ario']);
+    expect(h.sessionStops).toBe(1);
   });
 
-  it('--via must be an http(s) URL (usage error, no SDK load)', async () => {
+  it('buy --via opens the paid session against that destination, once, and closes it (#101)', async () => {
     const h = makeHarness(env, cwd);
     const code = await runName(
-      ['buy', 'toon-buyfor-e2e', '--via', 'wss://not-http'],
+      ['buy', 'toon-buyfor-e2e', '--via', 'g.drew.ario', '--yes', '--json'],
+      h.deps
+    );
+    expect(code).toBe(0);
+    // The destination `--via` named is what the store leg is pointed at, which
+    // is the whole of the #101 fix: everything else (BTP ingress, route price,
+    // payment channel) is discovered from that node's own announce.
+    expect(h.sessions).toEqual(['g.drew.ario']);
+    expect(h.sessionStops).toBe(1);
+  });
+
+  it('set --via opens ONE session covering both gas-station phases (#101)', async () => {
+    // Re-opening between quote and execute would risk expiring the quote's own
+    // blockhash deadline, so the pair must share a session.
+    const h = makeHarness(env, cwd);
+    const code = await runName(
+      ['set', 'mysite', TX_ID, '--via', 'g.drew.ario', '--yes', '--json'],
+      h.deps
+    );
+    expect(code).toBe(0);
+    expect(h.gasQuotes).toHaveLength(1);
+    expect(h.gasExecutes).toHaveLength(1);
+    expect(h.sessions).toEqual(['g.drew.ario']);
+    expect(h.sessionStops).toBe(1);
+  });
+
+  it('a pure estimate opens no paid session at all (#101)', async () => {
+    // Without --yes there is nothing to pay for, so nothing may be opened:
+    // a session costs an on-chain channel against the store node.
+    const h = makeHarness(env, cwd);
+    const code = await runName(
+      ['buy', 'toon-buyfor-e2e', '--via', 'g.drew.ario', '--json'],
+      h.deps
+    );
+    expect(code).toBe(0);
+    expect(h.sessions).toHaveLength(0);
+    expect(h.sessionStops).toBe(0);
+  });
+
+  it('--via rejects a URL and names the destination form instead (#101)', async () => {
+    // The pre-#101 spelling. It has to fail LOUDLY rather than be routed as an
+    // address, because a URL here means the caller still expects the direct
+    // `POST ${url}/store` path, which no connector serves and none should.
+    const h = makeHarness(env, cwd);
+    const code = await runName(
+      ['buy', 'toon-buyfor-e2e', '--via', 'https://dvm.devnet.toonprotocol.dev'],
       h.deps
     );
     expect(code).toBe(2);
-    expect(h.err.join('\n')).toContain('--via must be an http(s)');
+    expect(h.err.join('\n')).toContain('--via names an ILP destination, not a URL');
+    expect(h.err.join('\n')).toContain(DEVNET_DVM_DESTINATION);
     expect(h.loadArnsCalls).toBe(0);
+    expect(h.sessions).toHaveLength(0);
   });
 
-  it('RIG_ARNS_DVM_URL is the --via env fallback', async () => {
+  it('--via rejects a non-destination string (usage error, no SDK load)', async () => {
+    const h = makeHarness(env, cwd);
+    const code = await runName(
+      ['buy', 'toon-buyfor-e2e', '--via', 'not a destination'],
+      h.deps
+    );
+    expect(code).toBe(2);
+    expect(h.err.join('\n')).toContain('--via must be an ILP destination');
+    expect(h.loadArnsCalls).toBe(0);
+    expect(h.sessions).toHaveLength(0);
+  });
+
+  it('RIG_ARNS_DVM_DESTINATION is the --via env fallback', async () => {
     const h = makeHarness(
-      { ...env, RIG_ARNS_DVM_URL: 'http://dvm.env:3300' },
+      { ...env, RIG_ARNS_DVM_DESTINATION: 'g.env.ario' },
       cwd
     );
     const code = await runName(
@@ -914,7 +1034,7 @@ describe('rig name', () => {
     );
     expect(code).toBe(0);
     expect(h.dvmJobs).toHaveLength(1);
-    expect(h.dvmJobs[0]!.viaUrl).toBe('http://dvm.env:3300');
+    expect(h.dvmJobs[0]!.destination).toBe('g.env.ario');
     expect(h.calls.buyRecord).toHaveLength(0);
   });
 
@@ -928,7 +1048,7 @@ describe('rig name', () => {
         'mysite',
         TX_ID,
         '--via',
-        'http://dvm.local:3300',
+        'g.drew.ario',
         '--network',
         'devnet',
         '--yes',
@@ -942,7 +1062,7 @@ describe('rig name', () => {
       command: 'name',
       action: 'set',
       executed: true,
-      via: 'http://dvm.local:3300',
+      via: 'g.drew.ario',
       gasStation: {
         quoteId: 'quote-1',
         feePayer: 'GASWALLETADDR',
@@ -963,7 +1083,7 @@ describe('rig name', () => {
         recentBlockhash: 'QUOTEDBLOCKHASH',
       },
     ]);
-    expect(h.gasQuotes).toEqual([{ viaUrl: 'http://dvm.local:3300' }]);
+    expect(h.gasQuotes).toEqual([{ destination: 'g.drew.ario' }]);
     expect(h.gasExecutes).toHaveLength(1);
     expect(h.gasExecutes[0]).toMatchObject({
       transaction: 'BASE64-PARTIAL-TX',
@@ -977,12 +1097,12 @@ describe('rig name', () => {
   it('set --via --json without --yes is a pure preview (no quote, no build, no execute)', async () => {
     const h = makeHarness(env, cwd);
     const code = await runName(
-      ['set', 'mysite', TX_ID, '--via', 'http://dvm.local:3300', '--json'],
+      ['set', 'mysite', TX_ID, '--via', 'g.drew.ario', '--json'],
       h.deps
     );
     expect(code).toBe(0);
     const doc = JSON.parse(h.out.join('\n')) as Record<string, unknown>;
-    expect(doc).toMatchObject({ executed: false, via: 'http://dvm.local:3300' });
+    expect(doc).toMatchObject({ executed: false, via: 'g.drew.ario' });
     expect(h.gasQuotes).toHaveLength(0);
     expect(h.gasExecutes).toHaveLength(0);
     expect(h.calls.buildSetRecordTransaction).toHaveLength(0);
@@ -998,7 +1118,7 @@ describe('rig name', () => {
         '--undername',
         'docs',
         '--via',
-        'http://dvm.local:3300',
+        'g.drew.ario',
         '--yes',
         '--json',
       ],
@@ -1052,10 +1172,10 @@ describe('rig name', () => {
     // Brokered: our ANT spawned, the kind:5095 job hit the DEFAULT DVM, and
     // the local wallet never bought.
     expect(h.dvmJobs).toHaveLength(1);
-    expect(h.dvmJobs[0]?.viaUrl).toBe(DEVNET_DVM_URL);
+    expect(h.dvmJobs[0]?.destination).toBe(DEVNET_DVM_DESTINATION);
     expect(h.calls.buyRecord).toHaveLength(0);
     const doc = JSON.parse(h.out.join('\n')) as Record<string, unknown>;
-    expect(doc['via']).toBe(DEVNET_DVM_URL);
+    expect(doc['via']).toBe(DEVNET_DVM_DESTINATION);
     expect(h.err.join('\n')).toContain('Brokering via the devnet store DVM');
     expect(h.err.join('\n')).toContain('--direct');
   });
@@ -1068,7 +1188,7 @@ describe('rig name', () => {
     );
     expect(code).toBe(0);
     expect(h.gasQuotes).toHaveLength(1);
-    expect(h.gasQuotes[0]?.viaUrl).toBe(DEVNET_DVM_URL);
+    expect(h.gasQuotes[0]?.destination).toBe(DEVNET_DVM_DESTINATION);
     expect(h.calls.setBaseNameRecord).toHaveLength(0);
   });
 
@@ -1105,9 +1225,9 @@ describe('rig name', () => {
     expect(h.err.join('\n')).not.toContain('Brokering via the devnet store DVM');
   });
 
-  it('--direct also suppresses the ambient RIG_ARNS_DVM_URL', async () => {
+  it('--direct also suppresses the ambient RIG_ARNS_DVM_DESTINATION', async () => {
     const h = makeHarness(
-      { ...env, RIG_ARNS_DVM_URL: 'http://dvm.local:3300' },
+      { ...env, RIG_ARNS_DVM_DESTINATION: 'g.drew.ario' },
       cwd,
       { toonDevnet: true }
     );
@@ -1123,7 +1243,7 @@ describe('rig name', () => {
   it('--direct with an explicit --via is a usage error (exit 2)', async () => {
     const h = makeHarness(env, cwd);
     const code = await runName(
-      ['buy', 'mysite', '--via', 'http://dvm.local:3300', '--direct', '--yes'],
+      ['buy', 'mysite', '--via', 'g.drew.ario', '--direct', '--yes'],
       h.deps
     );
     expect(code).toBe(2);
@@ -1137,7 +1257,7 @@ describe('rig name', () => {
         'buy',
         'toon-demo-name',
         '--via',
-        'http://dvm.local:3300',
+        'g.drew.ario',
         '--network',
         'devnet',
         '--yes',
@@ -1147,7 +1267,7 @@ describe('rig name', () => {
     );
     expect(code).toBe(0);
     expect(h.dvmJobs).toHaveLength(1);
-    expect(h.dvmJobs[0]?.viaUrl).toBe('http://dvm.local:3300');
+    expect(h.dvmJobs[0]?.destination).toBe('g.drew.ario');
     expect(h.err.join('\n')).not.toContain('Brokering via the devnet store DVM');
   });
 });

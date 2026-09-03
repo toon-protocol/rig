@@ -37,6 +37,44 @@ jobs:
             fi
           fi
 
+      # The step above asserts only that a `.changeset/*.md` FILE EXISTS. It
+      # never parses one, so a changeset that is well-formed YAML but an invalid
+      # RELEASE PLAN passes it, and `release.yml` — which runs after merge, where
+      # its failure gates nothing — is the first thing to read the file.
+      #
+      # toon-client had the byte-identical job, and that is exactly what happened
+      # there (toon-client#611): a changeset naming both `@toon-protocol/client`
+      # and the `ignore`d `@toon-protocol/client-mcp` merged, `changeset version`
+      # refuses a changeset that mixes ignored and non-ignored packages, and
+      # `release.yml` was red on EVERY push to main for a day — so no fix could
+      # reach npm. Because `changeset version` stops at the first offender, FIVE
+      # such changesets had piled up behind that error before anyone looked.
+      #
+      # This repo has the same shape and the same exposure:
+      # `.changeset/config.json` lists `@toon-protocol/rig-web` in `ignore`, so
+      # one hand-written changeset naming both it and `@toon-protocol/rig` would
+      # wedge releases here the same way. Nothing is wrong today — both pending
+      # changesets name only `@toon-protocol/rig` — so this is the guard ported
+      # BEFORE it is needed rather than after.
+      #
+      # `changeset version` rather than `changeset status`: it is the
+      # byte-identical command `release.yml`'s `changesets/action` runs as its
+      # `version:` input, so green here means the release gets past versioning,
+      # with no second implementation to drift. `status` additionally resolves
+      # `baseBranch` through git and errors when IT decides packages changed with
+      # no changeset — duplicating the step above with a different definition of
+      # "changed". Mutating the tree is free: this job is a throwaway checkout
+      # that commits, pushes and publishes nothing, and has no later steps.
+      - uses: ./.github/actions/setup-workspace
+
+      - name: Assert the changesets form a valid release plan
+        run: |
+          set -euo pipefail
+          pnpm changeset version
+          echo "--- the release plan this PR would produce ---"
+          git --no-pager diff --stat
+          echo "✅ changeset version succeeds — release.yml can get past versioning"
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -76,10 +114,29 @@ jobs:
           export GATE_WALL_CLOCK_SECONDS=$((end - ${{ steps.gate_start.outputs.start }}))
           npx tsx .sandcastle/gate/regression.ts
 
+  # Fleet no-op merge guard (toon-meta#405), wired INTO this repo's aggregate
+  # required check so that it blocks a HUMAN merge and not just the fleet
+  # auto-merge pass (toon-meta#408). connector#1008 merged green, closed its
+  # ticket and changed zero files -- and it was a human who merged it, because
+  # a red NON-required check is only a warning on the merge button. This
+  # replaces the stand-alone empty-pr-guard-shim.yml, deleted in the same
+  # commit; running both would put two identical "No-op merge guard" check
+  # runs on every PR. Canonical caller snippet and full rationale:
+  # toon-meta scripts/factory/empty-pr-guard-gate-job.yml.
+  #
+  # No `secrets: inherit` -- the guard makes no API call and no write of any
+  # kind, so handing it FACTORY_OPS_TOKEN would widen a monitored credential
+  # for nothing. No `if:` either: this workflow also runs on push, where the
+  # guard passes with a plain "no merge result to evaluate"; a job-level `if:`
+  # would make it `skipped` there, and a skipped gating job must never read as
+  # a pass (toon-meta#279).
+  no-op-merge:
+    uses: toon-protocol/toon-meta/.github/workflows/empty-pr-guard.yml@main
+
   ci-ok:
     name: CI OK
     runs-on: ubuntu-latest
-    needs: [changeset, build]
+    needs: [changeset, build, no-op-merge]
     if: always()
     steps:
       # Fleet-wide aggregate required check per toon-meta#279: this single job
@@ -92,11 +149,19 @@ jobs:
           echo "event:     ${{ github.event_name }}"
           echo "changeset: ${{ needs.changeset.result }}"
           echo "build:     ${{ needs.build.result }}"
+          echo "no-op:     ${{ needs.no-op-merge.result }}"
 
           ok=true
 
           if [ "${{ needs.build.result }}" != "success" ]; then
             echo "::error::build did not succeed (result: ${{ needs.build.result }})"
+            ok=false
+          fi
+
+          # The no-op merge guard runs on every event and passes on push
+          # with "no merge result to evaluate", so it is unconditional here.
+          if [ "${{ needs.no-op-merge.result }}" != "success" ]; then
+            echo "::error::no-op merge guard did not succeed (result: ${{ needs.no-op-merge.result }}) — merging this PR would change nothing"
             ok=false
           fi
 

@@ -351,7 +351,16 @@ authoritative doc is
 | Faucet (web UI + API) | `https://faucet.devnet.toonprotocol.dev` |
 | Relay (free reads, `rig clone`/`fetch`) | `wss://relay-ws.devnet.toonprotocol.dev` |
 | Payment proxy (paid writes, BTP) | `wss://proxy.devnet.toonprotocol.dev:443` |
-| Store DVM (ArNS buyfor/gas-station jobs, `--via`) | `https://dvm.devnet.toonprotocol.dev` |
+| Store DVM (ArNS buyfor/gas-station jobs, `--via`) | `g.toon.ario` (an ILP **destination**, not a URL — see below) |
+
+`--via` names an ILP destination rather than an HTTP endpoint. The store sits
+behind the connector's payment termination, so it has no public job endpoint to
+POST to, and a reachable one would be an unpaid path to a paid handler. The
+kind:5095 buy and kind:5096 gas-station jobs therefore travel as paid packets,
+exactly as `rig push`'s git-object writes do. Everything else about that node —
+its BTP ingress, its route price, the payment channel to open against it — is
+discovered from its own kind:10032 announce, so the destination is the only
+thing you supply.
 
 ### Faucet routes
 

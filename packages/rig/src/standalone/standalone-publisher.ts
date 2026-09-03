@@ -46,9 +46,12 @@ import {
   type GitObjectUpload,
   type PublishReceipt,
   type Publisher,
+  type StoreJobRequest,
+  type StoreJobResponse,
   type UploadReceipt,
 } from '../publisher.js';
 import {
+  counterpartyMatch,
   recordKey,
   type ChannelMapRecord,
   type ChannelMapStore,
@@ -722,6 +725,35 @@ export class StandalonePublisher implements Publisher {
         continue;
       }
 
+      // ...and it must still be the SAME counterparty. The map key is
+      // `identity|destination|chain|tokenNetwork` — it names a ROUTE, and a
+      // route can change hands (the devnet apex `g.toon` was retired and
+      // another node took over `g.toon.relay`). All four key fields kept
+      // matching, so rig resumed a channel opened against the retired node
+      // and signed claims against it; the new connector holds no record of
+      // that channel and refused every packet with `F01 - claim rejected:
+      // names a channel this connector has no record of`. Re-checking the
+      // announced settlement address turns that dead end into a
+      // re-resolution: the record is superseded (kept, so its on-chain
+      // deposit stays reachable from `rig channel`, but never resumed again)
+      // and `openChannel` below binds whatever channel this identity holds
+      // with the CURRENT counterparty — an existing one where there is one,
+      // which is the whole point of not hard-erroring.
+      const announced = negotiation.settlementAddress;
+      const counterparty = counterpartyMatch(record, announced);
+      if (counterparty === 'mismatch') {
+        this.warn(
+          `rig: recorded channel ${record.channelId} for ${record.destination} ` +
+            `was opened against counterparty ${record.context.recipient} but ` +
+            `${record.destination} now announces ${announced} — the node ` +
+            'terminating that route was replaced. Re-resolving the channel; ' +
+            `the old record is kept in ${map.mapPath} (superseded) so ` +
+            '`rig channel list/close/settle` can still reclaim its deposit.'
+        );
+        map.supersede(record);
+        continue;
+      }
+
       // Never resume a channel the withdraw flow already closed/settled.
       const watermark = map.readWatermark(record.channelId);
       if (
@@ -743,14 +775,29 @@ export class StandalonePublisher implements Publisher {
         );
       }
 
+      // MIGRATION: records written before the counterparty was validated (and
+      // peers that announced no settlement address at open time) carry no
+      // `context.recipient`. There is nothing to contradict, so the resume
+      // proceeds — but with the announced address filled in, both for this
+      // run's `trackChannel` (Solana/Mina proofs need a recipient) and, below,
+      // written back so the NEXT run is verifiable rather than unverifiable
+      // forever.
+      const context =
+        counterparty === 'unrecorded' && announced
+          ? { ...record.context, recipient: announced }
+          : record.context;
+
       // trackChannel rehydrates nonce/cumulative from the watermark store;
       // seeding peerChannels makes ensureChannel/openChannel reuse the id —
       // but ONLY under the composite binding key it looks up.
-      cm.trackChannel(record.channelId, record.context);
+      cm.trackChannel(record.channelId, context);
       cm.peerChannels.set(
         channelBindingKey(record.peerId, record.chain, record.tokenNetwork),
         record.channelId
       );
+      if (context !== record.context) {
+        map.touch(recordKey(record), { recipient: announced });
+      }
 
       // Persisted channel state omits the on-chain deposit — re-read it so
       // fee/balance accounting is right (EVM only; mirrors the daemon).
@@ -1175,6 +1222,87 @@ export class StandalonePublisher implements Publisher {
       );
     }
     return { txId: extractArweaveTxId(result.response), feePaid: fee };
+  }
+
+  /**
+   * Submit one NIP-90 job (kind:5095 brokered ArNS buy, kind:5096 gas station)
+   * to the store node's DVM over the PAID path, and return its answer (#101).
+   *
+   * Identical carriage to {@link uploadGitObject}: the store leg's own channel,
+   * one balance-proof claim for the store route's flat price, and `/store` as
+   * the envelope target beneath the route's handler path. What differs is only
+   * the event body — `["param", k, v]` tags instead of `["i", ...]` inputs.
+   *
+   * The `bid` tag carries the same figure as the claim. It is what the handler
+   * reads to decide the job was funded, and a mismatch between it and the claim
+   * is the kind of thing that gets a packet refused after it has already been
+   * charged for (connector#869).
+   *
+   * ⚠️ Does NOT throw on a DVM refusal. `accept: false` and a non-2xx status
+   * are envelope content, not packet outcomes (ADR 0020) — the answer arrived
+   * and the payer was charged — so both come back as data for the caller to
+   * interpret. Only the absence of an answer is an error here.
+   */
+  async submitStoreJob(request: StoreJobRequest): Promise<StoreJobResponse> {
+    await this.start();
+    const leg = await this.storeLeg();
+
+    const fee = this.uploadFee();
+    const event = leg.client.signEvent({
+      kind: request.kind,
+      content: '',
+      created_at: nowSeconds(),
+      tags: [
+        ...request.params.map(([key, value]) => ['param', key, value]),
+        ['bid', fee.toString(), 'usdc'],
+      ],
+    });
+
+    const claim = await leg.client.signBalanceProof(leg.channelId, fee);
+    const result = await leg.client.publishEvent(event, {
+      ...(this.storeDestination ? { destination: this.storeDestination } : {}),
+      claim,
+      ilpAmount: fee,
+      // The store backend serves POST /store (not the relay's /write).
+      proxyPath: '/store',
+    });
+    if (!result.success) {
+      throw new StandalonePublishError(
+        `kind:${request.kind} job rejected: ${result.error ?? 'the packet did not reach the store'}`
+      );
+    }
+    if (!result.response) {
+      throw new StandalonePublishError(
+        `kind:${request.kind} job FULFILL carried no sealed response; expected the DVM's answer`
+      );
+    }
+
+    const text = new TextDecoder().decode(result.response.body);
+    let body: {
+      accept?: unknown;
+      code?: unknown;
+      message?: unknown;
+      result?: unknown;
+    };
+    try {
+      body = JSON.parse(text) as typeof body;
+    } catch {
+      throw new StandalonePublishError(
+        `kind:${request.kind} job answer was not valid JSON ` +
+          `(HTTP ${result.response.status}): ${JSON.stringify(text.slice(0, 200))}`
+      );
+    }
+
+    return {
+      status: result.response.status,
+      accept: body.accept === true,
+      ...(typeof body.code === 'string' ? { code: body.code } : {}),
+      ...(typeof body.message === 'string' ? { message: body.message } : {}),
+      ...(body.result !== null && typeof body.result === 'object'
+        ? { result: body.result as Record<string, unknown> }
+        : {}),
+      feePaid: fee,
+    };
   }
 
   /**

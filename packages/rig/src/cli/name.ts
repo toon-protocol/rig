@@ -57,6 +57,9 @@ import { resolveEffectiveNetwork } from './fund.js';
 import { resolveIdentity } from './identity.js';
 import type { CliIo } from './output.js';
 import type { IdentityReport } from './push.js';
+import { defaultLoadStandalone } from './push.js';
+import type { StoreJobRequest, StoreJobResponse } from '../publisher.js';
+import type { LoadStandalone } from './standalone-context.js';
 import { renderIdentityLine } from './render.js';
 
 // ---------------------------------------------------------------------------
@@ -559,7 +562,8 @@ export const defaultLoadArns: LoadArns = async (options) => {
       } catch (err) {
         throw new ArnsSdkUnavailableError(err, '@ar.io/solana-contracts');
       }
-      const getSetRecordInstructionAsync = contracts.getSetRecordInstructionAsync;
+      const getSetRecordInstructionAsync =
+        contracts.getSetRecordInstructionAsync;
       const getAntRecordPDA = mod.getAntRecordPDA;
       const {
         createKeyPairFromBytes,
@@ -729,18 +733,36 @@ export const defaultLoadArns: LoadArns = async (options) => {
  */
 export const ARNS_BUY_JOB_KIND = 5095;
 
+/**
+ * Paid transport for one NIP-90 job to a store node's DVM (#101).
+ *
+ * This is {@link Publisher.submitStoreJob} narrowed to a function, so the two
+ * job seams below depend on the capability rather than on a whole publisher.
+ */
+export type SubmitStoreJob = (
+  request: StoreJobRequest
+) => Promise<StoreJobResponse>;
+
 /** One brokered buy job, ready to submit to a DVM. */
 export interface DvmBuyJobRequest {
-  /** The DVM endpoint `--via` resolved (the store backend base URL). */
-  viaUrl: string;
+  /**
+   * The store node's ILP destination that `--via` resolved. Carried for error
+   * messages only — the paid transport is {@link DvmBuyJobRequest.submit},
+   * which is already bound to this destination.
+   */
+  destination: string;
   name: string;
   type: NameType;
   /** Lease years; null for a permabuy. */
   years: number | null;
   /** The CLIENT's freshly-spawned ANT (asset pubkey) — the owner-to-be. */
   processId: string;
-  /** Nostr secret key that signs the job event (the rig identity). */
-  nostrSecretKey: Uint8Array;
+  /**
+   * Paid transport to that node's DVM. The job event is signed by the
+   * publisher's own identity, exactly as a kind:5094 store write is, so no
+   * key material travels through this seam.
+   */
+  submit: SubmitStoreJob;
 }
 
 /** What the DVM reports back for an executed buy job. */
@@ -767,88 +789,61 @@ export class DvmBuyJobError extends Error {
 }
 
 /**
- * Default {@link SubmitDvmBuyJob}: sign a kind:5095 event carrying the job as
- * NIP-90 `param` tags and POST it to the DVM's payment-oblivious `/store`
- * backend. This is the DIRECT interface — on the paid path the identical
- * event travels inside a paid ILP packet and the connector in front of the
- * DVM replays this same HTTP request after terminating payment
- * (RouteTermination), so the job shape is one and the same.
+ * Default {@link SubmitDvmBuyJob}: carry the kind:5095 job to the store node's
+ * DVM over the PAID path (#101).
+ *
+ * This used to `fetch(${viaUrl}/store)` directly. No connector serves `/store`
+ * and none should: the store sits behind the connector's payment termination,
+ * so a publicly reachable one would be an anonymous free gateway to a paid
+ * handler — exactly the failure ADR 0020 exists to close. The job now travels
+ * as a kind:5094 store write does, inside a paid ILP packet with `/store` as
+ * the envelope target beneath the route's handler path.
+ *
+ * The job's `param` tags are unchanged, so the handler sees the identical
+ * event either way.
  */
 export const defaultSubmitDvmBuyJob: SubmitDvmBuyJob = async (request) => {
-  const { finalizeEvent } = await import('nostr-tools/pure');
-  const event = finalizeEvent(
-    {
-      kind: ARNS_BUY_JOB_KIND,
-      created_at: Math.floor(Date.now() / 1000),
-      content: '',
-      tags: [
-        ['param', 'name', request.name],
-        ['param', 'type', request.type],
-        ...(request.years !== null
-          ? [['param', 'years', String(request.years)]]
-          : []),
-        ['param', 'processId', request.processId],
-      ],
-    },
-    request.nostrSecretKey
-  );
-
-  const url = `${request.viaUrl.replace(/\/+$/, '')}/store`;
-  let response: Response;
+  let answer;
   try {
-    response = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ event }),
+    answer = await request.submit({
+      kind: ARNS_BUY_JOB_KIND,
+      params: [
+        ['name', request.name],
+        ['type', request.type],
+        ...(request.years !== null
+          ? ([['years', String(request.years)]] as [string, string][])
+          : []),
+        ['processId', request.processId],
+      ],
     });
   } catch (err) {
     throw new DvmBuyJobError(
-      `could not reach the DVM at ${url}: ` +
+      `could not reach the DVM at ${request.destination}: ` +
         `${err instanceof Error ? err.message : String(err)}`
     );
   }
 
-  let body: {
-    accept?: boolean;
-    code?: string;
-    message?: string;
-    result?: {
-      registryTxId?: unknown;
-      quotedMario?: unknown;
-      syncAttributesTxId?: unknown;
-    };
-  };
-  try {
-    body = (await response.json()) as typeof body;
-  } catch {
+  if (!answer.accept) {
     throw new DvmBuyJobError(
-      `the DVM at ${url} returned a non-JSON response (HTTP ${response.status})`
+      `the DVM at ${request.destination} rejected the kind:${ARNS_BUY_JOB_KIND} ` +
+        `buy job (HTTP ${answer.status}${answer.code ? `, ${answer.code}` : ''})` +
+        `${answer.message ? `: ${answer.message}` : ''}`
     );
   }
-  if (!response.ok || body.accept !== true) {
-    throw new DvmBuyJobError(
-      `the DVM rejected the kind:${ARNS_BUY_JOB_KIND} buy job ` +
-        `(HTTP ${response.status}${body.code ? `, ${body.code}` : ''})` +
-        `${body.message ? `: ${body.message}` : ''}`
-    );
-  }
-  const registryTxId = body.result?.registryTxId;
+  const registryTxId = answer.result?.['registryTxId'];
   if (typeof registryTxId !== 'string' || registryTxId.length === 0) {
     throw new DvmBuyJobError(
       `the DVM accepted the job but returned no registryTxId — response: ` +
-        JSON.stringify(body.result ?? null)
+        JSON.stringify(answer.result ?? null)
     );
   }
+  const quotedMario = answer.result?.['quotedMario'];
+  const syncAttributesTxId = answer.result?.['syncAttributesTxId'];
   return {
     registryTxId,
-    quotedMario:
-      typeof body.result?.quotedMario === 'string'
-        ? body.result.quotedMario
-        : null,
+    quotedMario: typeof quotedMario === 'string' ? quotedMario : null,
     syncAttributesTxId:
-      typeof body.result?.syncAttributesTxId === 'string'
-        ? body.result.syncAttributesTxId
-        : null,
+      typeof syncAttributesTxId === 'string' ? syncAttributesTxId : null,
   };
 };
 
@@ -894,66 +889,49 @@ export class GasStationJobError extends Error {
 /** kind:5096 client seam (tests inject a stub — NEVER the live net). */
 export interface GasStationClient {
   quote(args: {
-    viaUrl: string;
+    /** Store node's ILP destination, for error messages. */
+    destination: string;
     /** Optional draft wire tx for an accurate (rent-aware) maxLamports. */
     transaction?: string;
-    nostrSecretKey: Uint8Array;
+    /** Paid transport to that node's DVM. */
+    submit: SubmitStoreJob;
   }): Promise<GasStationQuote>;
   execute(args: {
-    viaUrl: string;
+    destination: string;
     transaction: string;
     quoteId: string;
     idempotencyKey: string;
-    nostrSecretKey: Uint8Array;
+    submit: SubmitStoreJob;
   }): Promise<GasStationExecuteResult>;
 }
 
-/** POST one signed kind:5096 job to the DVM's `/store` backend. */
-async function postGasStationJob(
-  viaUrl: string,
+/**
+ * Carry one kind:5096 job to the DVM over the PAID path (#101).
+ *
+ * Same change as the buy job above, and for the same reason: `/store` is an
+ * envelope target beneath the route's handler, not a public URL path.
+ */
+async function submitGasStationJob(
+  destination: string,
   params: [string, string][],
-  nostrSecretKey: Uint8Array
+  submit: SubmitStoreJob
 ): Promise<Record<string, unknown>> {
-  const { finalizeEvent } = await import('nostr-tools/pure');
-  const event = finalizeEvent(
-    {
-      kind: GAS_STATION_JOB_KIND,
-      created_at: Math.floor(Date.now() / 1000),
-      content: '',
-      tags: params.map(([k, v]) => ['param', k, v]),
-    },
-    nostrSecretKey
-  );
-  const url = `${viaUrl.replace(/\/+$/, '')}/store`;
-  let response: Response;
+  let answer;
   try {
-    response = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ event }),
-    });
+    answer = await submit({ kind: GAS_STATION_JOB_KIND, params });
   } catch (err) {
     throw new GasStationJobError(
       'unreachable',
-      `could not reach the DVM at ${url}: ${err instanceof Error ? err.message : String(err)}`
+      `could not reach the DVM at ${destination}: ${err instanceof Error ? err.message : String(err)}`
     );
   }
-  let body: { accept?: boolean; code?: string; message?: string; result?: Record<string, unknown> };
-  try {
-    body = (await response.json()) as typeof body;
-  } catch {
+  if (!answer.accept || !answer.result) {
     throw new GasStationJobError(
-      'bad_response',
-      `the DVM at ${url} returned a non-JSON response (HTTP ${response.status})`
+      String(answer.code ?? 'rejected'),
+      `the DVM at ${destination} rejected the kind:${GAS_STATION_JOB_KIND} job (HTTP ${answer.status}${answer.code ? `, ${answer.code}` : ''})${answer.message ? `: ${answer.message}` : ''}`
     );
   }
-  if (!response.ok || body.accept !== true || !body.result) {
-    throw new GasStationJobError(
-      String(body.code ?? 'rejected'),
-      `the DVM rejected the kind:${GAS_STATION_JOB_KIND} job (HTTP ${response.status}${body.code ? `, ${body.code}` : ''})${body.message ? `: ${body.message}` : ''}`
-    );
-  }
-  const result = body.result;
+  const result = answer.result;
   if (result['status'] === 'failed') {
     throw new GasStationJobError(
       String(result['reason'] ?? 'failed'),
@@ -970,15 +948,15 @@ async function postGasStationJob(
  */
 export const defaultGasStationClient: GasStationClient = {
   quote: async (args) => {
-    const result = await postGasStationJob(
-      args.viaUrl,
+    const result = await submitGasStationJob(
+      args.destination,
       [
         ['phase', 'quote'],
         ...(args.transaction !== undefined
           ? ([['transaction', args.transaction]] as [string, string][])
           : []),
       ],
-      args.nostrSecretKey
+      args.submit
     );
     const { quoteId, feePayer, maxLamports, recentBlockhash, expiresAt } =
       result as Partial<GasStationQuote>;
@@ -997,15 +975,15 @@ export const defaultGasStationClient: GasStationClient = {
     return { quoteId, feePayer, maxLamports, recentBlockhash, expiresAt };
   },
   execute: async (args) => {
-    const result = await postGasStationJob(
-      args.viaUrl,
+    const result = await submitGasStationJob(
+      args.destination,
       [
         ['phase', 'execute'],
         ['transaction', args.transaction],
         ['quoteId', args.quoteId],
         ['idempotencyKey', args.idempotencyKey],
       ],
-      args.nostrSecretKey
+      args.submit
     );
     const signature = result['signature'];
     if (typeof signature !== 'string' || signature.length === 0) {
@@ -1038,10 +1016,16 @@ export interface NameDeps {
   cwd: string;
   /** ar.io SDK loader seam; defaults to the lazy `@ar.io/sdk` import. */
   loadArns?: LoadArns;
-  /** kind:5095 job submitter seam; defaults to the signed HTTP POST. */
+  /** kind:5095 job submitter seam; defaults to the paid ILP submission. */
   submitDvmBuyJob?: SubmitDvmBuyJob;
-  /** kind:5096 gas-station client seam; defaults to the signed HTTP POST. */
+  /** kind:5096 gas-station client seam; defaults to the paid ILP submission. */
   gasStation?: GasStationClient;
+  /**
+   * Standalone-session factory for the `--via` paid path (#101); defaults to
+   * `rig push`'s. Tests inject a fake so no session is ever opened and no
+   * packet is ever paid for.
+   */
+  loadStandalone?: LoadStandalone;
   /**
    * TOON-network resolution seam for the default `--via` DVM (defaults to
    * `rig fund`'s {@link resolveEffectiveNetwork}; tests inject). The devnet
@@ -1053,9 +1037,17 @@ export interface NameDeps {
 /**
  * The deployed devnet store DVM — defaulted as `--via` for buy/set when BOTH
  * the ArNS `--network` and the TOON network resolve to devnet and the user
- * neither named a DVM (`--via`/`RIG_ARNS_DVM_URL`) nor opted out (`--direct`).
+ * neither named a DVM (`--via`/`RIG_ARNS_DVM_DESTINATION`) nor opted out
+ * (`--direct`).
  */
-export const DEVNET_DVM_URL = 'https://dvm.devnet.toonprotocol.dev';
+export const DEVNET_DVM_DESTINATION = 'g.toon.ario';
+
+/**
+ * @deprecated `--via` names an ILP destination, not an HTTP endpoint (#101).
+ * Kept as an alias so an importer of the old name still compiles; it now holds
+ * the same destination as {@link DEVNET_DVM_DESTINATION}.
+ */
+export const DEVNET_DVM_URL = DEVNET_DVM_DESTINATION;
 
 export const NAME_USAGE = `Usage: rig name <buy|set|status> <name> [options]
 
@@ -1069,7 +1061,7 @@ mnemonic that pays for pushes (derived at m/44'/501'/0'/0'). Fund it with
 registry program — NOT through TOON ILP payment channels.
 
 Commands:
-  name buy <name> [--years n | --permabuy] [--via <dvm-url>]
+  name buy <name> [--years n | --permabuy] [--via <destination>]
                        quote (mARIO) → confirm → register. The spawned ANT is
                        owned by this identity's Solana key. Default: 1-year
                        lease. PAID — spends mARIO from the Solana wallet.
@@ -1077,7 +1069,7 @@ Commands:
                        the ANT (dust SOL only), then a store DVM executes the
                        kind:5095 buy job and pays the mARIO from ITS wallet;
                        the name is owned by your ANT from inception.
-  name set <name> <txId> [--undername <sub>] [--ttl <seconds>] [--via <dvm-url>]
+  name set <name> <txId> [--undername <sub>] [--ttl <seconds>] [--via <destination>]
                        point the name (or an undername) at an Arweave txId
                        (typically a deployed path manifest). Signs an ANT
                        record update with the Solana key. With --via: the
@@ -1109,17 +1101,24 @@ Options:
                        unverified.
   --process-id <id>    explicit ArNS registry program id — a Solana program
                        address (overrides --network; or RIG_ARIO_PROCESS_ID)
-  --via <dvm-url>      broker buy/set through a store DVM's job endpoint (or
-                       RIG_ARNS_DVM_URL). The DVM pays the mARIO; you own the
-                       name via your spawned ANT. Direct backend targeting
-                       stubs the job payment (dev/e2e) — the paid path runs
-                       the same job through the connector payment proxy.
+  --via <destination>  broker buy/set through a store node's DVM, naming its
+                       ILP DESTINATION (or RIG_ARNS_DVM_DESTINATION), e.g.
+                       --via ${DEVNET_DVM_DESTINATION}. The DVM pays the mARIO;
+                       you own the name via your spawned ANT.
+                       The job travels as a PAID packet, exactly as a git-object
+                       store write does — the store sits behind the connector's
+                       payment termination, so there is no unpaid endpoint to
+                       aim at. That node's ingress, route price and payment
+                       channel are all discovered from its own announce, so the
+                       destination is the only thing you supply.
+                       Costs one store-route packet per job (two for set:
+                       quote + execute).
                        DEVNET DEFAULT: with --network devnet and the TOON
                        network on devnet too, buy/set default to the deployed
-                       devnet store DVM (${DEVNET_DVM_URL})
+                       devnet store DVM (${DEVNET_DVM_DESTINATION})
                        unless --direct opts out.
   --direct             force the direct wallet-paid path: never default (or
-                       read RIG_ARNS_DVM_URL as) a --via DVM. Mutually
+                       read RIG_ARNS_DVM_DESTINATION as) a --via DVM. Mutually
                        exclusive with an explicit --via.
   --yes                skip the confirmation (required when not a TTY) for
                        buy/set
@@ -1154,6 +1153,43 @@ interface NameContext {
  * `buy`/`set` escalate to `write` only at execute time, after the confirm
  * gate.
  */
+/**
+ * Open a paid session against the store node `--via` names, and hand back its
+ * job seam plus the teardown the caller must run (#101).
+ *
+ * `storeDestination` is the whole configuration this needs. From it, the
+ * machinery `rig push` already uses discovers that node's BTP ingress from its
+ * own kind:10032 announce, opens (or resumes) a payment channel against its
+ * settlement address, and reads its route price to floor the claim — the same
+ * store leg #98 built, pointed somewhere chosen per invocation.
+ *
+ * ⚠️ The caller owns the returned `stop`. A session left open holds the
+ * identity lock and an started embedded client.
+ */
+async function openStoreJobSession(
+  deps: NameDeps,
+  destination: string
+): Promise<{ submit: SubmitStoreJob; stop: () => Promise<void> }> {
+  const ctx = await (deps.loadStandalone ?? defaultLoadStandalone)({
+    env: deps.env,
+    cwd: deps.cwd,
+    warn: (line) => deps.io.err(line),
+    storeDestination: destination,
+  });
+  const submitStoreJob = ctx.publisher.submitStoreJob;
+  if (!submitStoreJob) {
+    await ctx.stop();
+    throw new Error(
+      'the active publisher cannot submit a store job (submitStoreJob ' +
+        'unavailable) — `rig name --via` requires the standalone publisher'
+    );
+  }
+  return {
+    submit: (request) => submitStoreJob.call(ctx.publisher, request),
+    stop: () => ctx.stop(),
+  };
+}
+
 async function resolveNameContext(
   deps: NameDeps,
   network: ArioNetwork,
@@ -1305,15 +1341,33 @@ function parseNameFlags(
         'wallet-paid path, --via brokers through a DVM'
     );
   }
-  // --direct beats the ambient RIG_ARNS_DVM_URL too (explicit opt-out).
+  // --direct beats the ambient env var too (explicit opt-out).
+  // `RIG_ARNS_DVM_URL` is the pre-#101 spelling, still read so an existing
+  // environment keeps working, but it now carries a destination.
   const viaRaw = values.direct
     ? undefined
-    : (values.via ?? env['RIG_ARNS_DVM_URL']);
+    : (values.via ??
+      env['RIG_ARNS_DVM_DESTINATION'] ??
+      env['RIG_ARNS_DVM_URL']);
   let via: string | undefined;
   if (viaRaw !== undefined) {
-    if (!/^https?:\/\/.+/.test(viaRaw)) {
+    // #101: `--via` names an ILP DESTINATION, not an HTTP endpoint. The store
+    // sits behind the connector's payment termination and no connector serves
+    // a public `/store`, so a URL here is a leftover from the broken direct
+    // path rather than a usable value — reject it with the fix rather than
+    // letting it fail later as an unroutable address.
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(viaRaw)) {
       throw new Error(
-        `--via must be an http(s) DVM endpoint URL, got ${JSON.stringify(viaRaw)}`
+        `--via names an ILP destination, not a URL (got ${JSON.stringify(viaRaw)}). ` +
+          `Brokered ArNS jobs travel as paid packets to a store node, e.g. ` +
+          `--via ${DEVNET_DVM_DESTINATION}. The node's endpoint, price and ` +
+          `payment channel are discovered from its own announce.`
+      );
+    }
+    if (!/^g\.[a-z0-9]+(\.[a-z0-9-]+)*$/i.test(viaRaw)) {
+      throw new Error(
+        `--via must be an ILP destination like ${DEVNET_DVM_DESTINATION}, ` +
+          `got ${JSON.stringify(viaRaw)}`
       );
     }
     via = viaRaw;
@@ -1500,16 +1554,24 @@ async function runBuy(
       io.out(`Spawned ANT ${spawn.processId} (tx ${spawn.signature})`);
     }
     // 2. Submit the kind:5095 job carrying OUR processId; the DVM executes
-    //    buyRecord with ITS funded signer.
+    //    buyRecord with ITS funded signer. The job rides a PAID ILP packet to
+    //    the store node `--via` names (#101), so a session is opened for it and
+    //    closed whatever happens — it holds the identity lock.
     const submit = deps.submitDvmBuyJob ?? defaultSubmitDvmBuyJob;
-    const receipt = await submit({
-      viaUrl: via,
-      name,
-      type,
-      years,
-      processId: spawn.processId,
-      nostrSecretKey: signed.nostrSecretKey,
-    });
+    const session = await openStoreJobSession(deps, via);
+    let receipt;
+    try {
+      receipt = await submit({
+        destination: via,
+        name,
+        type,
+        years,
+        processId: spawn.processId,
+        submit: session.submit,
+      });
+    } finally {
+      await session.stop();
+    }
     const result = {
       registryTxId: receipt.registryTxId,
       antProcessId: spawn.processId,
@@ -1756,27 +1818,37 @@ async function runSet(
     // ── Gas-station path (toon-meta#163): author + partial-sign locally,
     //    the DVM co-signs as fee payer and broadcasts. ────────────────────
     const gas = deps.gasStation ?? defaultGasStationClient;
-    // Quote: learn the fee payer + the quoted blockhash (merged deadline).
-    const quote = await gas.quote({
-      viaUrl: via,
-      nostrSecretKey: signed.nostrSecretKey,
-    });
-    // Build + partial-sign against exactly the quoted blockhash.
-    const wireTx = await signed.sdk.buildSetRecordTransaction({
-      antProcessId,
-      undername: undername ?? '@',
-      transactionId: txId,
-      ttlSeconds: flags.ttl,
-      feePayer: quote.feePayer,
-      recentBlockhash: quote.recentBlockhash,
-    });
-    const executed = await gas.execute({
-      viaUrl: via,
-      transaction: wireTx,
-      quoteId: quote.quoteId,
-      idempotencyKey: randomUUID(),
-      nostrSecretKey: signed.nostrSecretKey,
-    });
+    // Both phases ride PAID ILP packets to the store node `--via` names
+    // (#101). One session covers the pair: the quote's blockhash deadline
+    // makes re-opening between them a way to expire your own quote.
+    const session = await openStoreJobSession(deps, via);
+    let quote: GasStationQuote;
+    let executed: GasStationExecuteResult;
+    try {
+      // Quote: learn the fee payer + the quoted blockhash (merged deadline).
+      quote = await gas.quote({
+        destination: via,
+        submit: session.submit,
+      });
+      // Build + partial-sign against exactly the quoted blockhash.
+      const wireTx = await signed.sdk.buildSetRecordTransaction({
+        antProcessId,
+        undername: undername ?? '@',
+        transactionId: txId,
+        ttlSeconds: flags.ttl,
+        feePayer: quote.feePayer,
+        recentBlockhash: quote.recentBlockhash,
+      });
+      executed = await gas.execute({
+        destination: via,
+        transaction: wireTx,
+        quoteId: quote.quoteId,
+        idempotencyKey: randomUUID(),
+        submit: session.submit,
+      });
+    } finally {
+      await session.stop();
+    }
     const gasStation = {
       quoteId: quote.quoteId,
       feePayer: quote.feePayer,
@@ -2013,16 +2085,17 @@ export async function runName(args: string[], deps: NameDeps): Promise<number> {
   ) {
     let toonDevnet = false;
     try {
-      const resolved = await (deps.resolveToonNetwork ??
-        resolveEffectiveNetwork)({ env: deps.env, cwd: deps.cwd });
+      const resolved = await (
+        deps.resolveToonNetwork ?? resolveEffectiveNetwork
+      )({ env: deps.env, cwd: deps.cwd });
       toonDevnet = resolved.effectiveNetwork === 'devnet';
     } catch {
       // Unreadable client config — leave the wallet-paid path untouched.
     }
     if (toonDevnet) {
-      flags = { ...flags, via: DEVNET_DVM_URL };
+      flags = { ...flags, via: DEVNET_DVM_DESTINATION };
       io.err(
-        `Brokering via the devnet store DVM ${DEVNET_DVM_URL} ` +
+        `Brokering via the devnet store DVM ${DEVNET_DVM_DESTINATION} ` +
           `(no --via given; pass --direct for a wallet-paid ${sub}).`
       );
     }
