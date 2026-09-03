@@ -263,7 +263,7 @@ describe('pointNameAtManifest (mock-only)', () => {
 describe('buildArnsUrl', () => {
   it('[P0] builds https://<name>.<gateway-host>/#relay=<relay>', () => {
     expect(buildArnsUrl(makeConfig())).toBe(
-      'https://toon-rig.ar-io.dev/#relay=wss://relay-ws.devnet.toonprotocol.dev',
+      'https://toon-rig.permagate.io/#relay=wss://relay-ws.devnet.toonprotocol.dev',
     );
   });
 
@@ -304,7 +304,7 @@ describe('runArnsRedeployStep — guarded/opt-in wiring', () => {
     });
     expect(result).toEqual({
       skipped: false,
-      url: 'https://toon-rig.ar-io.dev/#relay=wss://relay.example',
+      url: 'https://toon-rig.permagate.io/#relay=wss://relay.example',
       writeId: 'set-msg-id',
       name: 'toon-rig',
     });

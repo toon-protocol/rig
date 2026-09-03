@@ -56,7 +56,7 @@ The target model: upload every `dist/` file as an Arweave data item, then upload
 mapping paths → txids with `index: index.html`, so one URL serves the whole app:
 
 ```
-https://ar-io.dev/<manifest-txid>/#relay=wss://relay-ws.devnet.toonprotocol.dev
+https://permagate.io/<manifest-txid>/#relay=wss://relay-ws.devnet.toonprotocol.dev
 ```
 
 Two things block this today (as of 2026-07):
