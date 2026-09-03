@@ -1,5 +1,97 @@
 # @toon-protocol/rig
 
+## 3.6.1
+
+### Patch Changes
+
+- 192f086: `rig name buy/set --via` travel the paid ILP path instead of a bare fetch
+
+  `--via` used to do a raw `fetch(${viaUrl}/store)`. No connector serves
+  `/store`, so the brokered ArNS path could not work against any node:
+
+  | endpoint                                            | `/store` | `/ilp` |
+  | --------------------------------------------------- | -------- | ------ |
+  | `dvm.devnet.toonprotocol.dev` (the shipped default) | 404      | —      |
+  | a third-party node's client edge                    | 404      | 400    |
+  | `proxy.ario.devnet.toonprotocol.dev`                | 404      | 400    |
+
+  The endpoint is absent by design, not by oversight. The store sits behind the
+  connector's payment termination, so a publicly reachable `POST /store` is an
+  unpaid path to a paid handler — the free-gateway failure ADR 0020 names, and
+  the exact door the devnet store box closed on 2026-08-05 (it let anyone spend
+  that box's funded Arweave wallet for free). The default `dvm.` hostname is a
+  second dead end on top of that: it maps to the store's BLS **health** server,
+  whose app registers exactly one route, `GET /health`.
+
+  So `--via` changes meaning: it now names an **ILP destination**, and the job
+  rides a paid packet with `/store` as the envelope target beneath the route's
+  handler path — the same transport `rig push` already uses for kind:5094
+  git-object writes. The kind:5095/5096 `param` tags are unchanged, so the
+  handler sees the identical event either way.
+
+  - `Publisher` gains an optional `submitStoreJob`, following `uploadBlob`'s
+    optional-method pattern. A DVM refusal comes back as **data rather than an
+    exception**: under ADR 0020 `accept: false` arrives on a FULFILL and the
+    payer was charged either way, and the zero-ARIO rehearsal (submit a buy with
+    no `processId`, watch the handler refuse by name before it quotes or touches
+    the registry) is the cheapest proof the whole paid path works.
+  - `StandalonePublisher.submitStoreJob` mirrors `uploadGitObject`: the store
+    leg's own channel, one claim at the store route's flat price, a `bid` tag
+    carrying that same figure, `proxyPath: '/store'`.
+  - `StandaloneLoadOptions` gains `storeDestination`, at highest precedence over
+    `TOON_CLIENT_STORE_DESTINATION` and the config file, since it is a
+    per-invocation choice rather than a setting.
+  - The devnet default is repointed from the unreachable
+    `https://dvm.devnet.toonprotocol.dev` to the ILP destination `g.toon.ario`,
+    which is the path that is actually paid and actually works.
+  - The override is weighed in `createStandaloneContext`'s announce-discovery
+    gate too. Without that, a config pinning store == publish reads as fully
+    explicit, discovery is skipped, and the announce of the node `--via` actually
+    names — the only thing carrying its uplink, price and channel — is never
+    fetched. A pinned `storeBtpUrl` likewise vouches for nothing once `--via`
+    names a different node.
+  - A URL in `--via` is **rejected** with the destination form in the error,
+    rather than failing later as an unroutable address. A URL means the caller
+    still expects the old direct-POST path.
+  - `RIG_ARNS_DVM_DESTINATION` is the env spelling; `RIG_ARNS_DVM_URL` is still
+    read so an existing environment keeps working, and `DEVNET_DVM_URL` stays
+    exported as a deprecated alias of `DEVNET_DVM_DESTINATION`.
+
+- 3b8cffa: Re-check the counterparty before resuming a cached payment channel
+
+  `rig-channels.json` keys a resumed channel by
+  `identity|destination|chain|tokenNetwork` — a ROUTE, with no counterparty in
+  it. When the node terminating an ILP name is replaced (the devnet apex
+  `g.toon` was retired and another node took over `g.toon.relay`), all four key
+  fields still matched, so rig resumed a channel opened against the retired node
+  and signed balance proofs against it. The new connector holds no record of
+  that channel and refuses every packet:
+
+  ```
+  F01 - claim rejected: names a channel this connector has no record of,
+  so there is no counterparty to verify its signature against
+  ```
+
+  Every paid write failed until the cache entry was deleted by hand.
+
+  A record already stores the counterparty it was opened against
+  (`context.recipient`); it is now re-checked against the settlement address the
+  destination announces TODAY before the channel is resumed. On a mismatch the
+  record is superseded and the channel re-resolved — which binds the channel
+  this identity already holds with the new counterparty where one exists, rather
+  than opening (and funding) a fresh one. EVM addresses compare
+  case-insensitively; Solana/Mina addresses compare verbatim.
+
+  A superseded record is MOVED to an archive key rather than deleted: it may
+  still hold an on-chain deposit, and `rig channel list/close/settle` find
+  channels by scanning the map, so deleting it would strand those funds behind
+  hand-editing the JSON. It is never a resume candidate again.
+
+  Records written by older versions carry no `context.recipient`. They are
+  treated as unverified rather than stale: the resume proceeds (no fresh
+  on-chain open, nothing for the user to fix) and the record is back-filled from
+  the announce, so the next run can verify it.
+
 ## 3.6.0
 
 ### Minor Changes
