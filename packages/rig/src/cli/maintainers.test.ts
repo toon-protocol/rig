@@ -80,7 +80,7 @@ function makeStandalone(identity = OWNER): Fake {
 function announcement(
   owner: string,
   maintainers: string[],
-  overrides: { name?: string; description?: string } = {}
+  overrides: { name?: string; description?: string; payout?: string } = {}
 ): NostrEvent {
   return {
     id: '30'.repeat(32),
@@ -92,6 +92,7 @@ function announcement(
       ['name', overrides.name ?? 'Demo Repo'],
       ['description', overrides.description ?? 'A demo'],
       ...(maintainers.length > 0 ? [['maintainers', ...maintainers]] : []),
+      ...(overrides.payout ? [['payout', 'evm', overrides.payout]] : []),
     ],
     content: '',
     sig: '0'.repeat(128),
@@ -166,6 +167,21 @@ describe('rig maintainers add/remove (paid, owner-only)', () => {
     expect(event.tags).toContainEqual(['name', 'Keep Me']);
     expect(event.tags).toContainEqual(['description', 'Keep this']);
     expect(relayUrls).toEqual([RELAY]);
+  });
+
+  it('add preserves an existing payout pointer (rig#92)', async () => {
+    const payoutAddr = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045';
+    const io = makeIo();
+    const fake = makeStandalone();
+    const code = await runMaintainers(
+      ['add', M1, ...ADDR, '--yes'],
+      makeDeps(io, fake, [announcement(OWNER, [], { payout: payoutAddr })])
+    );
+    expect(code).toBe(0);
+    expect(fake.published).toHaveLength(1);
+    const first = fake.published[0];
+    if (!first) throw new Error('expected a published event');
+    expect(first.event.tags).toContainEqual(['payout', 'evm', payoutAddr]);
   });
 
   it('remove republishes the 30617 without the removed maintainer', async () => {

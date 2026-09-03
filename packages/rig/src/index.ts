@@ -26,6 +26,7 @@ export {
 export {
   COMMENT_KIND,
   MAINTAINERS_TAG,
+  PAYOUT_TAG,
   REPOSITORY_STATE_KIND,
   authorizedStatusAuthors,
   buildComment,
@@ -34,7 +35,11 @@ export {
   buildRepoAnnouncement,
   buildRepoRefs,
   buildStatus,
+  isValidEvmPayoutAddress,
   parseMaintainers,
+  parsePayout,
+  type PayoutChain,
+  type PayoutPointer,
   type StatusKind,
   type UnsignedEvent,
 } from './nip34-events.js';

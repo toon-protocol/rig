@@ -5,10 +5,11 @@
  * (#223), plus coverage for the new optional buildPatch `content` parameter.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   COMMENT_KIND,
   MAINTAINERS_TAG,
+  PAYOUT_TAG,
   REPOSITORY_STATE_KIND,
   authorizedStatusAuthors,
   buildComment,
@@ -18,6 +19,7 @@ import {
   buildRepoRefs,
   buildStatus,
   parseMaintainers,
+  parsePayout,
 } from './nip34-events.js';
 
 const OWNER_PUBKEY =
@@ -26,6 +28,9 @@ const AUTHOR_PUBKEY =
   '7937ffc0c5a0238768da798d26394a33b554926d739c445fd508e36642ebc286';
 const EVENT_ID =
   'deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678';
+
+// A real EIP-55 checksummed address (Vitalik's, widely used as a test fixture).
+const EVM_ADDRESS = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045';
 
 describe('buildRepoAnnouncement (kind:30617)', () => {
   it('builds a repo announcement with d/name/description tags', () => {
@@ -106,6 +111,78 @@ describe('maintainer authority helpers (#287)', () => {
         [MAINTAINERS_TAG, AUTHOR_PUBKEY],
       ])
     ).toEqual([OWNER_PUBKEY, AUTHOR_PUBKEY]);
+  });
+});
+
+describe('payout pointer (rig#92)', () => {
+  it('buildRepoAnnouncement omits the payout tag when none is given', () => {
+    const event = buildRepoAnnouncement('test', 'Test', 'Desc');
+    expect(event.tags.some((t) => t[0] === PAYOUT_TAG)).toBe(false);
+  });
+
+  it('buildRepoAnnouncement emits the payout tag and round-trips via parsePayout', () => {
+    const event = buildRepoAnnouncement('test', 'Test', 'Desc', [], {
+      chain: 'evm',
+      address: EVM_ADDRESS,
+    });
+    const tags = event.tags.filter((t) => t[0] === PAYOUT_TAG);
+    expect(tags).toEqual([[PAYOUT_TAG, 'evm', EVM_ADDRESS]]);
+    expect(parsePayout(event.tags)).toEqual({
+      chain: 'evm',
+      address: EVM_ADDRESS,
+    });
+  });
+
+  it('buildRepoAnnouncement omits the payout tag when explicitly null (clear)', () => {
+    const event = buildRepoAnnouncement('test', 'Test', 'Desc', [], null);
+    expect(event.tags.some((t) => t[0] === PAYOUT_TAG)).toBe(false);
+  });
+
+  it('parsePayout: absent — no payout tag returns null', () => {
+    expect(parsePayout([['d', 'test']])).toBeNull();
+  });
+
+  it('parsePayout: present — normalizes a lowercase (unchecksummed) address', () => {
+    expect(
+      parsePayout([[PAYOUT_TAG, 'evm', EVM_ADDRESS.toLowerCase()]])
+    ).toEqual({ chain: 'evm', address: EVM_ADDRESS });
+  });
+
+  it('parsePayout: malformed shape — non-hex address is ignored (null, warns)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(parsePayout([[PAYOUT_TAG, 'evm', 'not-an-address']])).toBeNull();
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
+  it('parsePayout: malformed checksum — mixed-case address failing EIP-55 is ignored', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const badChecksum =
+      EVM_ADDRESS.slice(0, -1) +
+      (EVM_ADDRESS.slice(-1) === 'a' ? 'A' : 'a');
+    expect(parsePayout([[PAYOUT_TAG, 'evm', badChecksum]])).toBeNull();
+    warn.mockRestore();
+  });
+
+  it('parsePayout: non-evm chain is ignored (v1 accepts evm only)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(
+      parsePayout([[PAYOUT_TAG, 'sol', EVM_ADDRESS]])
+    ).toBeNull();
+    warn.mockRestore();
+  });
+
+  it('parsePayout: multiple tags — first valid wins, rest ignored with a warning', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const second = '0x' + '11'.repeat(20);
+    const result = parsePayout([
+      [PAYOUT_TAG, 'evm', EVM_ADDRESS],
+      [PAYOUT_TAG, 'evm', second],
+    ]);
+    expect(result).toEqual({ chain: 'evm', address: EVM_ADDRESS });
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0]?.[0]).toContain('ignoring 1');
+    warn.mockRestore();
   });
 });
 
