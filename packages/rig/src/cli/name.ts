@@ -49,6 +49,7 @@
  * Defaults to mainnet.
  */
 
+import { deriveNostrKeyFromMnemonic } from '../standalone/nostr-identity.js';
 import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { formatUnits } from './balance.js';
@@ -1210,10 +1211,10 @@ async function resolveNameContext(
   // Dynamic import: `@toon-protocol/client` is heavy — the same lazy load
   // `rig fund`/`rig balance` use to derive the multi-chain identity.
   const client = await import('@toon-protocol/client');
-  const derived = await client.deriveFullIdentity(
-    resolved.mnemonic,
-    resolved.accountIndex
-  );
+  const derived = client.deriveFullIdentity(resolved.mnemonic, {
+    accountIndex: resolved.accountIndex,
+    scheme: 'legacy',
+  });
   const solanaAddress = derived.solana.publicKey;
   if (!solanaAddress) {
     throw new Error(
@@ -1229,7 +1230,7 @@ async function resolveNameContext(
     network,
     ...(processId !== undefined ? { processId } : {}),
   });
-  const nostrSecretKey = client.deriveNostrKeyFromMnemonic(
+  const nostrSecretKey = deriveNostrKeyFromMnemonic(
     resolved.mnemonic,
     resolved.accountIndex
   ).secretKey;

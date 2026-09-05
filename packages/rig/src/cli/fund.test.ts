@@ -2,7 +2,7 @@
  * `rig fund` tests (#263, multi-chain by default): the devnet faucet call shape
  * (the exact POST the e2e drips with — the USDC-only per-chain paths +
  * `{ address }` body), the ALL-chains default (one run funds evm + solana +
- * mina), positional + `--chain` chain selection (with the `sol` alias), the
+ * solana), positional + `--chain` chain selection (with the `sol` alias), the
  * parallel + independent-failure contract (one chain failing never aborts the
  * others; partial success renders and exits non-zero), faucet-URL resolution
  * (env → config → devnet default), the non-devnet guidance path (addresses
@@ -23,10 +23,9 @@ import type { CliIo } from './push.js';
 const MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 
-/** The three USDC-only faucet paths, in the fixed evm → solana → mina order. */
+/** The two USDC-only faucet paths, in the fixed evm → solana order. */
 const EVM_PATH = '/api/base-sepolia/request';
 const SOLANA_PATH = '/api/solana/usdc-request';
-const MINA_PATH = '/api/mina/usdc-request';
 
 interface Harness {
   deps: FundDeps;
@@ -116,7 +115,7 @@ interface FundEnvelope {
     error?: string;
   }[];
   inferredDevnetFrom?: string;
-  addresses?: { evm: string | null; solana: string | null; mina: string | null };
+  addresses?: { evm: string | null; solana: string | null };
   guidance?: string;
   identity?: { source?: string };
 }
@@ -162,16 +161,15 @@ describe('rig fund', () => {
 
   // ── The all-chains default (#299 parity) ──────────────────────────────────
 
-  it('default (no chain arg) funds ALL three chains, USDC each', async () => {
+  it('default (no chain arg) funds BOTH chains, USDC each', async () => {
     writeConfig({ network: 'devnet' });
     const h = makeHarness(baseEnv(), cwd);
     expect(await runFund(['--json'], h.deps)).toBe(0);
 
-    // One POST per chain, in evm → solana → mina order.
+    // One POST per chain, in evm → solana order.
     expect(h.fetchCalls.map((c) => c.url)).toEqual([
       `${DEVNET_FAUCET_URL}${EVM_PATH}`,
       `${DEVNET_FAUCET_URL}${SOLANA_PATH}`,
-      `${DEVNET_FAUCET_URL}${MINA_PATH}`,
     ]);
     for (const call of h.fetchCalls) {
       expect(call.init?.method).toBe('POST');
@@ -184,7 +182,7 @@ describe('rig fund', () => {
     expect(parsed.funded).toBe(true);
     expect(parsed.network).toBe('devnet');
     expect(parsed.faucetUrl).toBe(DEVNET_FAUCET_URL);
-    expect(parsed.results?.map((r) => r.chain)).toEqual(['evm', 'solana', 'mina']);
+    expect(parsed.results?.map((r) => r.chain)).toEqual(['evm', 'solana']);
     expect(parsed.results?.every((r) => r.funded)).toBe(true);
     expect(parsed.results?.[0]?.response).toMatchObject({ success: true });
     expect(parsed.identity?.source).toBe('env');
@@ -194,22 +192,18 @@ describe('rig fund', () => {
     writeConfig({ network: 'devnet' });
     const h = makeHarness(baseEnv(), cwd);
     expect(await runFund(['--chain', 'all', '--json'], h.deps)).toBe(0);
-    expect(h.fetchCalls).toHaveLength(3);
-    expect(parseJson(h).results?.map((r) => r.chain)).toEqual([
-      'evm',
-      'solana',
-      'mina',
-    ]);
+    expect(h.fetchCalls).toHaveLength(2);
+    expect(parseJson(h).results?.map((r) => r.chain)).toEqual(['evm', 'solana']);
   });
 
-  it('the drips run in PARALLEL, not serially (all three dispatched before any resolves)', async () => {
+  it('the drips run in PARALLEL, not serially (both dispatched before any resolves)', async () => {
     writeConfig({ network: 'devnet' });
-    // barrier: 3 ⇒ no faucet call resolves until all three have been
+    // barrier: 2 ⇒ no faucet call resolves until both have been
     // dispatched. Serial code would await the first and never reach the
     // barrier → the test times out; only concurrent drips complete.
-    const h = makeHarness(baseEnv(), cwd, { barrier: 3 });
+    const h = makeHarness(baseEnv(), cwd, { barrier: 2 });
     expect(await runFund(['--json'], h.deps)).toBe(0);
-    expect(h.fetchCalls).toHaveLength(3);
+    expect(h.fetchCalls).toHaveLength(2);
     expect(parseJson(h).funded).toBe(true);
   });
 
@@ -217,12 +211,8 @@ describe('rig fund', () => {
     writeConfig({ network: 'devnet', chain: 'solana' });
     const h = makeHarness(baseEnv(), cwd);
     expect(await runFund(['--json'], h.deps)).toBe(0);
-    expect(h.fetchCalls).toHaveLength(3);
-    expect(parseJson(h).results?.map((r) => r.chain)).toEqual([
-      'evm',
-      'solana',
-      'mina',
-    ]);
+    expect(h.fetchCalls).toHaveLength(2);
+    expect(parseJson(h).results?.map((r) => r.chain)).toEqual(['evm', 'solana']);
   });
 
   // ── Independent per-chain failure (the parallel-results contract) ──────────
@@ -230,7 +220,7 @@ describe('rig fund', () => {
   it('one chain failing does NOT abort the others — partial success, exit 1', async () => {
     writeConfig({ network: 'devnet' });
     const h = makeHarness(baseEnv(), cwd, {
-      // Solana faucet is dry; evm + mina succeed.
+      // Solana faucet is dry; evm succeeds.
       respond: (url) =>
         url.includes(SOLANA_PATH) ? { status: 503, body: 'faucet dry' } : undefined,
     });
@@ -242,11 +232,10 @@ describe('rig fund', () => {
       (parsed.results ?? []).map((r) => [r.chain, r])
     );
     expect(byChain['evm']?.funded).toBe(true);
-    expect(byChain['mina']?.funded).toBe(true);
     expect(byChain['solana']?.funded).toBe(false);
     expect(byChain['solana']?.error).toMatch(/503|faucet dry/);
-    // All three were still attempted (independence, not fail-fast).
-    expect(h.fetchCalls).toHaveLength(3);
+    // Both were still attempted (independence, not fail-fast).
+    expect(h.fetchCalls).toHaveLength(2);
   });
 
   it('partial-failure human output renders every chain and marks the failure', async () => {
@@ -260,7 +249,6 @@ describe('rig fund', () => {
     // Every chain's funded/attempted ADDRESS is echoed (the #312 review fix —
     // human output must confirm WHERE funds went, not just the coin type).
     expect(text).toMatch(/evm\s+✓ funded \(USDC\) → 0x[0-9a-fA-F]{40}/);
-    expect(text).toMatch(/mina\s+✓ funded \(USDC\) → B62q\w+/);
     expect(text).toMatch(/solana\s+✗ → [1-9A-HJ-NP-Za-km-z]+ — .*(503|faucet dry)/);
   });
 
@@ -329,7 +317,7 @@ describe('rig fund', () => {
       cwd
     );
     expect(await runFund([], h.deps)).toBe(0);
-    expect(h.fetchCalls).toHaveLength(3);
+    expect(h.fetchCalls).toHaveLength(2);
     expect(h.fetchCalls.every((c) => c.url.startsWith('https://faucet.example/'))).toBe(
       true
     );
@@ -341,7 +329,7 @@ describe('rig fund', () => {
     writeConfig({ network: 'custom', faucetUrl: 'https://my-faucet.example' });
     const h = makeHarness(baseEnv(), cwd);
     expect(await runFund([], h.deps)).toBe(0);
-    expect(h.fetchCalls).toHaveLength(3);
+    expect(h.fetchCalls).toHaveLength(2);
     expect(h.fetchCalls[0]?.url).toBe(`https://my-faucet.example${EVM_PATH}`);
   });
 
@@ -395,7 +383,7 @@ describe('rig fund', () => {
     const h = makeHarness(baseEnv(), cwd);
     expect(await runFund(['--json'], h.deps)).toBe(0);
     // Inferred devnet ⇒ the deployed faucet is hit for every chain.
-    expect(h.fetchCalls).toHaveLength(3);
+    expect(h.fetchCalls).toHaveLength(2);
     expect(h.fetchCalls[0]?.url).toBe(`${DEVNET_FAUCET_URL}${EVM_PATH}`);
     const parsed = parseJson(h);
     expect(parsed.funded).toBe(true);
@@ -414,7 +402,7 @@ describe('rig fund', () => {
       cwd
     );
     expect(await runFund([], h.deps)).toBe(0);
-    expect(h.fetchCalls).toHaveLength(3);
+    expect(h.fetchCalls).toHaveLength(2);
     expect(h.fetchCalls[0]?.url).toBe(`${DEVNET_FAUCET_URL}${EVM_PATH}`);
     const text = h.out.join('\n');
     expect(text).toContain("Inferred network 'devnet' from the configured origin");
@@ -456,7 +444,7 @@ describe('rig fund', () => {
     const h = makeHarness(baseEnv(), cwd);
     expect(await runFund(['--json'], h.deps)).toBe(0);
     // The devnet origin alone drove drips from the deployed devnet faucet.
-    expect(h.fetchCalls).toHaveLength(3);
+    expect(h.fetchCalls).toHaveLength(2);
     expect(h.fetchCalls[0]?.url).toBe(`${DEVNET_FAUCET_URL}${EVM_PATH}`);
     const parsed = parseJson(h);
     expect(parsed.funded).toBe(true);
@@ -513,83 +501,39 @@ describe('rig fund', () => {
     expect(h.out.join('\n')).toContain('no faucet is configured for network');
   });
 
-  // ── Fresh install: genesis-seed inference (zero config) ───────────────────
-  // Nothing configured anywhere → core's committed genesis seed names the
-  // shared-devnet apex, so a bare `rig fund` drips with zero config. The seed
-  // is a LAST resort: any configured origin — devnet or not — suppresses it.
+  // ── Fresh install: nothing configured, nothing inferred ───────────────────
+  // There is no built-in network seed since 4.0 (a node is named, never
+  // discovered), so an empty config has no faucet and prints the guidance.
 
-  const DEVNET_SEED = async () => ({
-    relayUrl: 'wss://relay-ws.devnet.toonprotocol.dev',
-    btpEndpoint: 'wss://proxy.devnet.toonprotocol.dev:443',
+  it('truly empty config: no seed to infer from — guidance, no drip', async () => {
+    const h = makeHarness(baseEnv(), cwd);
+    expect(await runFund(['--json'], h.deps)).toBe(0);
+    expect(h.fetchCalls).toEqual([]);
+    const parsed = parseJson(h);
+    expect(parsed.funded).toBe(false);
+    expect(parsed.guidance).toContain('TOON_CLIENT_NETWORK=devnet');
   });
 
-  it('truly empty config: the genesis seed infers devnet and drips', async () => {
-    const h = makeHarness(baseEnv(), cwd, { genesisSeed: DEVNET_SEED });
+  it('an injected seed is still honoured by the seam (devnet URL infers devnet)', async () => {
+    const h = makeHarness(baseEnv(), cwd, {
+      genesisSeed: async () => ({ relayUrl: 'wss://relay-ws.devnet.toonprotocol.dev' }),
+    });
     expect(await runFund(['--json'], h.deps)).toBe(0);
-    expect(h.fetchCalls).toHaveLength(3);
-    expect(h.fetchCalls[0]?.url).toBe(`${DEVNET_FAUCET_URL}${EVM_PATH}`);
-    const parsed = parseJson(h);
-    expect(parsed.funded).toBe(true);
-    expect(parsed.network).toBe('devnet');
-    expect(parsed.faucetUrl).toBe(DEVNET_FAUCET_URL);
-    expect(parsed.inferredDevnetFrom).toBe(
+    expect(h.fetchCalls).toHaveLength(2);
+    expect(parseJson(h).inferredDevnetFrom).toBe(
       'wss://relay-ws.devnet.toonprotocol.dev (genesis seed)'
     );
   });
 
-  it('fresh install: human output names the genesis seed as the source', async () => {
-    const h = makeHarness(baseEnv(), cwd, { genesisSeed: DEVNET_SEED });
-    expect(await runFund([], h.deps)).toBe(0);
-    const text = h.out.join('\n');
-    expect(text).toContain("Inferred network 'devnet' from the built-in genesis seed");
-    expect(text).toContain('wss://relay-ws.devnet.toonprotocol.dev');
-    expect(text).toMatch(/✓ funded/);
-  });
-
-  it('a seed with only a devnet btpEndpoint still infers (relay missing)', async () => {
-    const h = makeHarness(baseEnv(), cwd, {
-      genesisSeed: async () => ({
-        btpEndpoint: 'wss://proxy.devnet.toonprotocol.dev:443',
-      }),
-    });
-    expect(await runFund(['--json'], h.deps)).toBe(0);
-    const parsed = parseJson(h);
-    expect(parsed.funded).toBe(true);
-    expect(parsed.inferredDevnetFrom).toBe(
-      'wss://proxy.devnet.toonprotocol.dev:443 (genesis seed)'
-    );
-  });
-
-  it('a non-devnet genesis seed never infers — seed is not "devnet" by fiat', async () => {
-    const h = makeHarness(baseEnv(), cwd, {
-      genesisSeed: async () => ({ relayUrl: 'wss://relay.example.com' }),
-    });
-    expect(await runFund([], h.deps)).toBe(0);
-    expect(h.fetchCalls).toEqual([]);
-    expect(h.out.join('\n')).toContain('no faucet is configured for network');
-  });
-
-  it('explicit TOON_CLIENT_NETWORK=testnet beats the genesis seed', async () => {
-    const seed = vi.fn(DEVNET_SEED);
+  it('explicit TOON_CLIENT_NETWORK=testnet beats any seed', async () => {
+    const seed = vi.fn(async () => ({ relayUrl: 'wss://relay-ws.devnet.toonprotocol.dev' }));
     const h = makeHarness({ ...baseEnv(), TOON_CLIENT_NETWORK: 'testnet' }, cwd, {
       genesisSeed: seed,
     });
     expect(await runFund(['--json'], h.deps)).toBe(0);
     expect(h.fetchCalls).toEqual([]);
     expect(seed).not.toHaveBeenCalled();
-    const parsed = parseJson(h);
-    expect(parsed.funded).toBe(false);
-    expect(parsed.network).toBe('testnet');
-  });
-
-  it('any configured origin suppresses the seed — even a non-devnet one', async () => {
-    const seed = vi.fn(DEVNET_SEED);
-    writeConfig({ relayUrl: 'wss://relay.example.com' });
-    const h = makeHarness(baseEnv(), cwd, { genesisSeed: seed });
-    expect(await runFund([], h.deps)).toBe(0);
-    expect(h.fetchCalls).toEqual([]);
-    expect(seed).not.toHaveBeenCalled();
-    expect(h.out.join('\n')).toContain('TOON_CLIENT_NETWORK=devnet');
+    expect(parseJson(h).network).toBe('testnet');
   });
 
   // ── Errors ────────────────────────────────────────────────────────────────
@@ -637,7 +581,7 @@ describe('rig fund', () => {
     writeConfig({ network: 'devnet' });
     const h = makeHarness(baseEnv(), cwd);
     expect(await runFund(['all', '--json'], h.deps)).toBe(0);
-    expect(h.fetchCalls).toHaveLength(3);
+    expect(h.fetchCalls).toHaveLength(2);
   });
 
   it('an unknown positional chain is a usage error (exit 2, nothing fetched)', async () => {

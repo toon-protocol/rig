@@ -146,6 +146,12 @@ export interface FeeRates {
    */
   uploadFee: bigint;
   /**
+   * The store route's per-kibibyte rate, when it meters by size (ADR 0065: a
+   * price is a schedule `{base, per_kib}`; a flat route has no slope). Absent
+   * or zero means every upload costs exactly `uploadFee`.
+   */
+  uploadPerKib?: bigint;
+  /**
    * Flat cost per published event (smallest asset unit). Implementations
    * already fold any per-packet route-price floor into this flat value, so
    * estimates using it match the claims actually signed.
@@ -192,4 +198,38 @@ export interface Publisher {
     event: UnsignedEvent,
     relayUrls: string[]
   ): Promise<PublishReceipt>;
+}
+
+// ---------------------------------------------------------------------------
+// Per-upload charge on a metered route
+// ---------------------------------------------------------------------------
+
+/**
+ * Bytes the connector meters that are not the caller's object: the kind:5094
+ * event around it (id, pubkey, sig, kind, created_at, tag names), the `{event}`
+ * body wrapper, the request envelope and the gift wrap. Measured against the
+ * live edge and rounded up; a KiB boundary crossed by this margin costs one
+ * `uploadPerKib` more than the store will actually charge, never less.
+ */
+export const UPLOAD_ENVELOPE_OVERHEAD_BYTES = 704;
+
+/**
+ * The bytes a connector meters for an upload of `bodyBytes`: the object is
+ * base64 in an `i` tag (4/3 expansion), plus {@link UPLOAD_ENVELOPE_OVERHEAD_BYTES}.
+ */
+export function estimateSealedUploadBytes(bodyBytes: number): number {
+  return Math.ceil(bodyBytes / 3) * 4 + UPLOAD_ENVELOPE_OVERHEAD_BYTES;
+}
+
+/**
+ * What one upload of `bodyBytes` costs under `rates`: the flat `uploadFee`,
+ * plus — on a metered route — `uploadPerKib` per started kibibyte of the
+ * sealed payload, counted from one (the connector's own rule:
+ * `price + pricePerKib × (⌊bytes / 1024⌋ + 1)`).
+ */
+export function uploadChargeFor(rates: FeeRates, bodyBytes: number): bigint {
+  const perKib = rates.uploadPerKib ?? 0n;
+  if (perKib === 0n) return rates.uploadFee;
+  const sealed = estimateSealedUploadBytes(bodyBytes);
+  return rates.uploadFee + perKib * BigInt(Math.floor(sealed / 1024) + 1);
 }

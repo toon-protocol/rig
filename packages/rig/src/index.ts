@@ -187,15 +187,3 @@ export {
   type FactoryJobHooks,
   type FactoryJobWork,
 } from './factory-job-execute.js';
-// #56: concrete JobDeliveryPort wired to the released @toon-protocol/client.
-export {
-  ClientJobDeliveryPort,
-  type ClientJobDeliveryPortOptions,
-} from './factory-job-delivery-client.js';
-export {
-  decryptIncrementArtifact,
-  payIncrementOffer,
-  type PaidIncrementOffer,
-  type PayableIncrementOffer,
-  type SwapPacketSender,
-} from './factory-job-pay.js';

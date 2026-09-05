@@ -10,10 +10,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import {
-  deriveNostrKeyFromMnemonic,
-  importKeystore,
-} from '@toon-protocol/client';
+import { importKeystore } from '@toon-protocol/client';
+import { deriveNostrKeyFromMnemonic } from '../standalone/nostr-identity.js';
 import {
   MissingIdentityError,
   findDotenvMnemonic,

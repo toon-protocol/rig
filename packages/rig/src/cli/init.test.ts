@@ -11,7 +11,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { deriveNostrKeyFromMnemonic } from '@toon-protocol/client';
+import { deriveNostrKeyFromMnemonic } from '../standalone/nostr-identity.js';
 import { hexToNpub } from '../npub.js';
 import { resolveGitAuthor } from './git-author.js';
 import { readGitAuthor, readToonConfig, writeToonConfig } from './git-config.js';
@@ -479,8 +479,8 @@ describe('rig init identity generation (#294)', () => {
       expect(h.out.join('\n')).toContain('(from nostr profile)');
     });
 
-    it('falls back to the genesis-seed relay when none is configured', async () => {
-      let seenRelay: string | undefined;
+    it('with no relay configured anywhere the author falls back to the npub (no seed)', async () => {
+      let seenRelay: string | undefined = 'unset';
       const h = makeDeps({ RIG_MNEMONIC: PHRASE }, repoDir, {
         resolveGitAuthorImpl: (opts) => {
           seenRelay = opts.relayUrl;
@@ -488,9 +488,10 @@ describe('rig init identity generation (#294)', () => {
         },
       });
       expect(await runInit([], h.deps)).toBe(0);
-      // No origin/toon.relay/flag → the committed genesis apex relay is used
-      // for the kind:0 read (resolved offline from core's seed).
-      expect(seenRelay).toBe('wss://relay-ws.devnet.toonprotocol.dev');
+      // No origin/toon.relay/flag → no relay to read a profile from. There is
+      // no built-in network seed since 4.0: a node is named, never discovered.
+      expect(seenRelay).toBeUndefined();
+      expect((await readGitAuthor(repoDir)).name).toBe(NPUB);
     });
 
     it('a re-run refreshes user.name from a now-readable profile', async () => {

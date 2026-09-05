@@ -1,235 +1,132 @@
 /**
- * The embedded-client (standalone) publisher backing every paid `rig`
- * command: build a nonce-guarded {@link StandalonePublisher} from the
- * caller's own identity and config.
+ * The standalone (embedded-client) session behind every paid command.
  *
- * Identity comes from the #248 precedence chain (`./identity.ts`:
- * RIG_MNEMONIC env → TOON_CLIENT_MNEMONIC env alias → project `.env` →
- * `~/.toon-client` keystore/config). The remaining config resolution
- * DUPLICATES the toon-clientd conventions
- * (`packages/client-mcp/src/daemon/config.ts`) the same way
- * `../standalone/nonce-guard.ts` does — this package must not import
- * `@toon-protocol/client-mcp` (circular; see that module's doc). Keep in sync:
+ * One URL is the whole configuration. A TOON connector describes itself on
+ * `GET /ilp` (connector ADR 0050): its ILP addresses, the routes it prices,
+ * the chains it settles on and the key a payload is sealed to. The client
+ * (`@toon-protocol/client` 2.x) reads that once, opens or adopts a payment
+ * channel against the node, and pays each request with a signed claim. There
+ * is nothing to discover and nothing to negotiate — kind:10032 announces were
+ * removed by ADR 0046, and a node's word about itself replaced them.
  *
- *   - state dir: `TOON_CLIENT_HOME`, else `~/.toon-client`; config `config.json`
- *   - env overrides: `TOON_CLIENT_PROXY_URL`, `TOON_CLIENT_BTP_URL`,
- *     `TOON_CLIENT_RELAY_URL`, `TOON_CLIENT_DESTINATION`,
- *     `TOON_CLIENT_PUBLISH_DESTINATION`, `TOON_CLIENT_STORE_DESTINATION`,
- *     `TOON_CLIENT_CHAIN`
+ * What this module resolves, in precedence order (env > config file):
  *
- * NETWORK BOOTSTRAP (#264): what explicit config does not pin is resolved
- * from the network itself — the payment peer's live kind:10032 announce on
- * the relay-origin, falling back to `@toon-protocol/core`'s committed
- * genesis peer seed. Uplink, channel anchor, publish/store routes, the
- * settlement chain and its TokenNetwork/token/RPC parameters all follow the
- * `explicit config > live announce > genesis seed` order documented in
- * `../standalone/network-bootstrap.ts`. The pure resolution lives in
- * {@link resolveNetworkTopology} (unit-testable without any network).
+ *  - `TOON_CONNECTOR` / `connectorUrl` — the node's client-edge URL. The
+ *    legacy `TOON_CLIENT_PROXY_URL` / `proxyUrl` (…`/ilp`) is still read; the
+ *    client normalizes a trailing `/ilp` away. `btpUrl` is ignored (the client
+ *    reads the BTP endpoint from `GET /ilp`).
+ *  - `TOON_CLIENT_PUBLISH_DESTINATION` / `publishDestination` — the route
+ *    events go to. Default: the first address the node publishes for itself
+ *    that it also prices (`defaultDestinationFor`).
+ *  - `TOON_CLIENT_STORE_DESTINATION` / `storeDestination` — the route git
+ *    objects go to. Default: the node's first priced route named `*.store`,
+ *    else `*.ario`. A `--via` override (`rig name`) outranks both.
+ *  - `TOON_CLIENT_STORE_CONNECTOR_URL` / `storeConnectorUrl` — when the store
+ *    route terminates on ANOTHER node that holds its own channel: that node's
+ *    URL. Uploads then ride a second client with its own watermark file.
+ *    `storeSealTo` alone (same channel, different terminating identity) makes
+ *    the edge's client seal to that node instead.
+ *  - `TOON_CLIENT_CHAIN` / `chain` — `evm` or `solana` (a full id such as
+ *    `evm:8453` is read by its family). Default: the first chain in the node's
+ *    `settlements[]` this identity holds a key for.
+ *  - `TOON_CLIENT_RPC_URL` / `rpcUrl` / `chainRpcUrls[<chain>]`.
+ *  - `RIG_SOLANA_KEY_FILE` / `solanaKeyFile`, `RIG_EVM_PRIVATE_KEY` /
+ *    `evmPrivateKey` — pay with THIS key instead of the phrase's derived one.
+ *    The author stays the phrase's Nostr key; who pays and who signs the
+ *    event are independent facts (the connector attributes payment from the
+ *    claim, never from the event).
  *
- * PAID-WRITE TRANSPORT: with no explicit uplink, the resolution places BOTH
- * the official proxy (ILP-over-HTTP, which the x402 greeting bootstrap needs)
- * and the payment peer's announced BTP endpoint, and the embedded client is
- * built with `preferBtpForPaidWrites` so claims ride the authenticated BTP
- * session instead of an unauthenticated `POST /ilp` the edge answers 401.
- *
- * TOPOLOGY CACHE (#279): the resolved topology is persisted under
- * `TOON_CLIENT_HOME` (`../standalone/topology-cache.ts`) keyed by
- * relay-origin + identity + an explicit-config fingerprint, with a 15-min
- * TTL (`RIG_TOPOLOGY_TTL_MS` overrides; `0` disables). A cache hit skips
- * announce discovery and the funded-chain probes entirely; a cached
- * topology that then fails to BOOTSTRAP is invalidated and re-resolved
- * live in-process ({@link TopologyRecoveringPublisher}), so staleness costs
- * one failed attempt, never a broken run. Only paid-path resolutions
- * (`requireUplink !== false`) are written — a free-read topology may lack
- * an uplink and must not shadow the paid path's MissingUplinkError.
- *
- * CORE COEXISTENCE NOTE: rig performs discovery with ITS OWN
- * `@toon-protocol/core` (^2.0.x — live genesis seed), while the embedded
- * `@toon-protocol/client` keeps its internal core (^1.6.x) for its own
- * bootstrap/negotiation. The two never exchange class instances — rig feeds
- * the client plain config (`knownPeers`, settlement maps), so the version
- * split is safe by construction.
- *
- * This module statically imports `@toon-protocol/client` (heavy: viem,
- * noble, nostr-tools), so it must only ever be reached through the dynamic
- * import in `push.ts` (see `./standalone-context.ts`).
+ * Key derivation: a rig phrase yields its Nostr key at `m/44'/1237'/0'/0/i`,
+ * and its EVM account has always been that same secp256k1 key — which the
+ * client calls `keyDerivation: 'legacy'`. That is the default here, so every
+ * channel an existing identity funded is still its own. `keyDerivation:
+ * 'standard'` / `TOON_CLIENT_KEY_DERIVATION=standard` opts into the
+ * MetaMask-importable path for a fresh identity.
  */
 
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { ToonClientConfig } from '@toon-protocol/client';
 import {
-  EvmSigner,
-  deriveFullIdentity,
-  deriveNostrKeyFromMnemonic,
+  ToonClient,
+  defaultDestinationFor,
+  type ChannelState,
+  type NodeSelfDescription,
+  type ToonClientConfig,
 } from '@toon-protocol/client';
-import {
-  decodeEventFromToon,
-  encodeEventToToon,
-  resolveClientNetwork,
-} from '@toon-protocol/core';
-import type {
-  BlobUpload,
-  FeeRates,
-  GitObjectUpload,
-  Publisher,
-  PublishReceipt,
-  UploadReceipt,
-} from '../publisher.js';
-import type { UnsignedEvent } from '../nip34-events.js';
+import { fetchRemoteState } from '../remote-state.js';
 import {
   ChannelMapStore,
   RIG_CHANNEL_MAP_FILENAME,
   type ChannelMapRecord,
 } from '../standalone/channel-map.js';
+import { ConnectorPublisher } from '../standalone/connector-publisher.js';
+import type {
+  ChannelCloseOutcome,
+  ChannelOpenOutcome,
+  ChannelSettleOutcome,
+  StandaloneMoneyOps,
+  WalletChainBalanceInfo,
+} from '../standalone/money.js';
 import {
-  TOPOLOGY_CACHE_FILENAME,
-  TOPOLOGY_TTL_ENV,
-  TopologyCache,
-  explicitConfigFingerprint,
-  topologyCacheKey,
-  topologyCacheTtlMs,
-} from '../standalone/topology-cache.js';
-import {
-  NOTICE_STORE_FILENAME,
-  NoticeStore,
-  showOperatorNoticeOnce,
-} from '../standalone/notice.js';
-import {
-  DISCOVERY_TIMEOUT_MS,
-  MinaChannelUnderivableError,
-  SolanaChannelUnderivableError,
-  TokenNetworkUnderivableError,
-  discoverAnnouncedPeers,
-  evmChainIdOf,
-  evmTokenBalance,
-  genesisSeedPubkeys,
-  loadGenesisSeed,
-  pickPaymentPeer,
-  resolveChainSettlement,
-  selectSettlementChain,
-  solanaTokenBalance,
-  type AnnouncedPeer,
-  type ChainSelection,
-  type ChainSettlement,
-  type ChannelRecordLike,
-  type EvmBalanceProbe,
-  type ExplicitChainConfig,
-  type SolanaBalanceProbe,
-} from '../standalone/network-bootstrap.js';
-import {
-  StandalonePublisher,
-  deriveRouteDestinations,
-  type WalletViewFallback,
-} from '../standalone/standalone-publisher.js';
-import { standaloneForced } from '../standalone/nonce-guard.js';
-import { fetchRemoteState } from '../remote-state.js';
-import { MinaZkAppStore } from '../standalone/mina-zkapp-store.js';
+  NonceLock,
+  checkDaemonIdentity,
+  standaloneForced,
+} from '../standalone/nonce-guard.js';
+import { deriveNostrKeyFromMnemonic } from '../standalone/nostr-identity.js';
 import { resolveIdentity } from './identity.js';
 import type {
   StandaloneContext,
   StandaloneLoadOptions,
 } from './standalone-context.js';
 
-/** The subset of the shared client config file standalone mode consumes. */
+// ---------------------------------------------------------------------------
+// Config file
+// ---------------------------------------------------------------------------
+
+/** The shared `~/.toon-client/config.json` fields rig reads. */
 export interface ClientConfigFile {
-  network?: 'mainnet' | 'testnet' | 'devnet' | 'custom';
-  mnemonicAccountIndex?: number;
-  btpUrl?: string;
+  /** The connector's client-edge URL (`GET /ilp` lives here). */
+  connectorUrl?: string;
+  /** @deprecated the pre-2.0 spelling: the connector's `…/ilp` ingress URL. */
   proxyUrl?: string;
+  /** @deprecated ignored — the client reads the BTP endpoint from `GET /ilp`. */
+  btpUrl?: string;
+  /** Free-read relay (WebSocket) for the identity's kind:0 and NIP-34 reads. */
   relayUrl?: string;
+  /** @deprecated alias of `publishDestination`. */
   destination?: string;
   publishDestination?: string;
   storeDestination?: string;
-  /**
-   * BTP ingress of the node terminating `storeDestination`, when that is a
-   * different node than publishes go to. Normally discovered from that
-   * node's own kind:10032 announce; pin it here (or via
-   * `TOON_CLIENT_STORE_BTP_URL`) to skip discovery entirely.
-   */
-  storeBtpUrl?: string;
+  storeConnectorUrl?: string;
+  storeSealTo?: string;
   feePerEvent?: string;
   channelStorePath?: string;
-  /** Settlement chain: family (`evm`) or full id (`evm:31337`). */
+  /** `evm` | `solana`, or a full id (`evm:8453`) read by its family. */
   chain?: string;
+  /** @deprecated pre-2.0 chain list; the first entry is read as `chain`. */
   supportedChains?: string[];
-  settlementAddresses?: Record<string, string>;
-  preferredTokens?: Record<string, string>;
-  tokenNetworks?: Record<string, string>;
+  rpcUrl?: string;
   chainRpcUrls?: Record<string, string>;
-  solanaChannel?: ToonClientConfig['solanaChannel'];
-  minaChannel?: ToonClientConfig['minaChannel'];
-}
-
-/** An identity was resolved, but there is no way to send paid writes. */
-/**
- * The official TOON relay implementation's client edge — the Rust connector
- * (connector #616: the parallel-fleet comparison concluded and the Rust
- * fleet serves the protocol's own `g.toon` namespace). This is rig's DEFAULT
- * HTTP uplink: paid writes go here unless an entry is explicitly configured
- * (`rig entry <url>` / `rig entry sandbox` / the TOON_CLIENT_* env
- * overrides). It is also the endpoint the channel bootstrap needs, since the
- * x402 greeting carries the channel-opening facts (connector #617) the
- * embedded client synthesizes a negotiation from — so a dead value here
- * fails a FRESH channel open even when paid writes ride BTP.
- *
- * BOTH the host and the path moved in the two-box cutover, and the old value
- * (`https://proxy.devnet.toonprotocol.dev/rust/ilp`) was dead on both counts:
- *
- *   - Host: the apex was RETIRED and destroyed. `proxy.devnet.toonprotocol.dev`
- *     still resolves but refuses connections; the relay box
- *     (`g.toon.relay`) is where the publish route now lives.
- *   - Path: `/rust/ilp` was a legacy apex path from the period when the Rust
- *     and TS fleets ran side by side. The live edge serves the ILP-over-HTTP
- *     ingress at plain `/ilp` (a GET answers `405 allow: POST`), and answers
- *     `410 Gone` on `/rust/ilp` — the retirement is explicit, not incidental.
- *
- * This value is exactly what the relay's own live kind:10032 announce
- * advertises as its `httpEndpoint`, so discovery and this fallback agree.
- */
-export const OFFICIAL_PROXY_URL =
-  'https://proxy.relay.devnet.toonprotocol.dev/ilp';
-/** The official relay-write route on that edge. */
-export const OFFICIAL_PUBLISH_DESTINATION = 'g.toon.relay';
-
-/**
- * The BTP ingress paid writes ride when discovery does not name one — the
- * RELAY box of the two-box devnet (ILP address `g.toon.relay`), which is the
- * publish route every `rig push` terminates at.
- *
- * Deliberately NOT the genesis seed's `btpEndpoint`. `@toon-protocol/core`'s
- * committed seed still names the retired apex
- * (`wss://proxy.devnet.toonprotocol.dev/ilp/btp`), a host that resolves but
- * refuses connections since the two-box cutover — and because the embedded
- * client dials BTP during `start()`, handing it a dead endpoint would turn a
- * late 401 into rig refusing to start at all. That is what
- * {@link isBtpTransportError}'s degrade recovery guards against in general;
- * this constant keeps the common path off the dead box in the first place.
- */
-export const OFFICIAL_BTP_URL =
-  'wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp';
-
-export class MissingUplinkError extends Error {
-  constructor(configPath: string, relayUrl: string | undefined) {
-    const discovered = relayUrl
-      ? `no announce with a btp/http endpoint was found on ${relayUrl} and ` +
-        'the genesis seed has none; '
-      : '';
-    super(
-      `no write uplink configured: ${discovered}set TOON_CLIENT_PROXY_URL ` +
-        '(connector payment proxy) or TOON_CLIENT_BTP_URL, or add ' +
-        `proxyUrl/btpUrl to ${configPath}`
-    );
-    this.name = 'MissingUplinkError';
-  }
+  transport?: 'auto' | 'http' | 'btp';
+  keyDerivation?: 'standard' | 'legacy';
+  mnemonicAccountIndex?: number;
+  /** Collateral for a first channel open, base units. */
+  deposit?: string;
+  /** Path to a Solana keypair JSON (64-byte array) that pays instead of the phrase's key. */
+  solanaKeyFile?: string;
+  /** Hex EVM private key that pays instead of the phrase's key. */
+  evmPrivateKey?: string;
+  /** Per-packet timeout for uploads, ms. */
+  uploadTimeoutMs?: number;
+  [key: string]: unknown;
 }
 
 function configDir(env: NodeJS.ProcessEnv): string {
   return env['TOON_CLIENT_HOME'] ?? join(homedir(), '.toon-client');
 }
 
-function readClientConfig(path: string): ClientConfigFile {
+export function readClientConfig(path: string): ClientConfigFile {
   try {
     return JSON.parse(readFileSync(path, 'utf8')) as ClientConfigFile;
   } catch (err) {
@@ -240,1089 +137,358 @@ function readClientConfig(path: string): ClientConfigFile {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Pure topology resolution (#264) — exported for tests
-// ---------------------------------------------------------------------------
-
-/** A genesis-seed peer as this module consumes it (rig's core 3.x shape). */
-export interface GenesisSeedLike {
-  pubkey: string;
-  relayUrl: string;
-  ilpAddress: string;
-  btpEndpoint: string;
+/** An identity was resolved, but there is no connector to pay. */
+export class MissingUplinkError extends Error {
+  constructor(configPath: string) {
+    super(
+      "no connector configured: set TOON_CONNECTOR to the node's URL " +
+        '(the one whose GET /ilp describes it), run `rig entry <url>`, or add ' +
+        `connectorUrl to ${configPath}`
+    );
+    this.name = 'MissingUplinkError';
+  }
 }
 
-/** Inputs to {@link resolveNetworkTopology} (side-effect free). */
-export interface NetworkTopologyInputs {
-  env: NodeJS.ProcessEnv;
-  file: ClientConfigFile;
-  /** For error messages ("add X to <configPath>"). */
-  configPath: string;
-  /** Resolved relay-origin (already precedence-resolved). */
-  relayUrl: string;
-  /** The discovered payment-peer announce, if any. */
-  announce: AnnouncedPeer | undefined;
-  /**
-   * Every announce discovery returned, not just the picked payment peer.
-   * The store node announces itself SEPARATELY from the publish node (on
-   * this fleet, `g.toon.ario` alongside `g.toon.relay`), and its own
-   * `btpEndpoint` is the only place its BTP ingress is published — the
-   * payment peer's announce names the store ROUTE but not how to reach it.
-   * Optional so existing callers (and every test that builds inputs by
-   * hand) keep working: absent means "no store uplink discovered", which
-   * degrades to the single-uplink behaviour that predates this field.
-   */
-  peers?: AnnouncedPeer[];
-  /**
-   * Per-invocation store-route override (`rig name --via`, #101). Wins over
-   * `TOON_CLIENT_STORE_DESTINATION` and the config file, since it is a choice
-   * made for one command rather than a configured default.
-   */
-  storeDestinationOverride?: string;
-  /** The committed genesis seed entry, if any. */
-  genesisSeed: GenesisSeedLike | undefined;
-  identity: { mnemonic: string; accountIndex: number; pubkey: string };
-  /**
-   * #262 channel-map records for this identity (chain selection input).
-   * A thunk so the (possibly corrupt-throwing) map read only happens when
-   * chain selection actually needs it.
-   */
-  channelRecords: () => ChannelRecordLike[];
-  /** EVM balance probe override (tests); default: raw `eth_call`. */
-  probeBalance?: EvmBalanceProbe;
-  /**
-   * Solana balance probe override (tests); default: raw
-   * `getTokenAccountsByOwner`.
-   */
-  probeSolanaBalance?: SolanaBalanceProbe;
-  /**
-   * When false (#263 free reads, e.g. `rig balance`), a missing uplink is
-   * tolerated instead of throwing {@link MissingUplinkError}.
-   */
-  requireUplink?: boolean;
-  warn: (line: string) => void;
-}
+// ---------------------------------------------------------------------------
+// Settings (pure: env + file → what the client is built from)
+// ---------------------------------------------------------------------------
 
-/** The resolved payment topology feeding the embedded client config. */
-export interface NetworkTopology {
-  proxyUrl?: string;
-  btpUrl?: string;
-  /**
-   * True when `btpUrl` came from DISCOVERY (the announce, or the
-   * {@link OFFICIAL_BTP_URL} fallback) rather than explicit config. Only a
-   * derived endpoint may be dropped by the unreachable-BTP degrade recovery
-   * — an operator's explicit pin is never silently abandoned. Persisted with
-   * the rest of the topology in the #279 cache.
-   */
-  btpUrlDerived?: boolean;
-  /** Channel anchor / default ILP destination. */
-  destination: string;
+export type ChainFamily = 'evm' | 'solana';
+
+export interface ConnectorSettings {
+  connectorUrl?: string;
+  connectorSource: 'env' | 'config' | 'legacy-env' | 'legacy-config' | null;
   publishDestination?: string;
   storeDestination?: string;
-  /**
-   * BTP ingress of the node that TERMINATES {@link storeDestination}, when
-   * that is a different node from the publish peer.
-   *
-   * A payment-channel claim is only verifiable by the connector that holds
-   * the channel: the claim names a channel id, and a connector with no
-   * record of it refuses the packet outright (`F01 - claim rejected: names
-   * a channel this connector has no record of`). On the two-box fleet the
-   * store lives on its own node with its own settlement address, and the
-   * publish node has NO route to it — its only route is its own publish
-   * prefix — so a store write cannot be carried by the publish session and
-   * has to reach the store node directly, on its own channel.
-   *
-   * Absent when the store terminates on the same node as publishes (the
-   * single-box case), which needs no second uplink.
-   */
-  storeBtpUrl?: string;
-  /** The peer the embedded client bootstraps + negotiates with. */
-  knownPeers: { pubkey: string; relayUrl: string; btpEndpoint: string }[];
-  /**
-   * FLAT per-packet route prices the peer announces for the effective
-   * publish/store destinations (kind:10032 `capabilities`; base-unit integer
-   * strings — this document is JSON-cached). The connector rejects any
-   * balance-proof claim advancing the channel by less than the destination
-   * route's price (F06), so the publisher floors its per-packet fees here.
-   */
-  routePrices?: { publish?: string; store?: string };
-  /** The selected settlement chain + rationale (absent: nothing known). */
-  selection?: ChainSelection;
-  supportedChains?: string[];
-  preferredTokens?: Record<string, string>;
-  tokenNetworks?: Record<string, string>;
-  chainRpcUrls?: Record<string, string>;
-  /**
-   * Solana channel parameters derived for the (first) `solana:*` chain in
-   * play — the config-ready `ToonClientConfig.solanaChannel` shape. Absent
-   * when no Solana chain is supported or an explicit `solanaChannel` config
-   * object already covers it (explicit rides through verbatim).
-   */
-  solanaChannel?: { rpcUrl: string; programId: string; tokenMint?: string };
-  /**
-   * Mina channel parameters derived for the (first) `mina:*` chain in play —
-   * the config-ready `ToonClientConfig.minaChannel` shape. Absent when no Mina
-   * chain is supported or an explicit `minaChannel` config object already
-   * covers it (explicit rides through verbatim).
-   */
-  minaChannel?: {
-    graphqlUrl: string;
-    zkAppAddress: string;
-    tokenId?: string;
-    networkId?: 'devnet' | 'mainnet';
-  };
+  storeConnectorUrl?: string;
+  storeSealTo?: string;
+  relayUrl?: string;
+  chain?: ChainFamily;
+  /** The full chain id the user named, when they named one (`evm:8453`). */
+  chainKey?: string;
+  rpcUrl?: string;
+  transport: 'auto' | 'http' | 'btp';
+  keyDerivation: 'standard' | 'legacy';
+  channelStorePath: string;
+  deposit?: bigint;
+  eventFee: bigint;
+  solanaKeyFile?: string;
+  evmPrivateKey?: string;
+  uploadTimeoutMs?: number;
+  /** Notes for the caller's stderr: deprecated spellings met on the way. */
+  warnings: string[];
 }
 
-/**
- * Build the embedded client's `minaChannel` from one resolved settlement — or
- * throw the actionable {@link MinaChannelUnderivableError} naming the missing
- * pieces. A Mina chain in play with no way to open its channel must fail HERE,
- * not later as the embedded client's generic "Mina channel config not
- * provided". The required pieces are `graphqlUrl` (from a core preset) and
- * `zkAppAddress` (from the live announce); `tokenId`/`networkId` ride through
- * when present (a Mina channel with no token id opens on native MINA).
- */
-/**
- * The `autoDeploy` block attached to a DERIVED `minaChannel` (an explicit
- * config object keeps the pin-a-zkApp semantics and never auto-deploys):
- * reuse the recorded per-pair zkApp when one exists, persist a fresh
- * deployment's key BEFORE the open proceeds (losing it strands the ~1.1 MINA
- * the deployment cost), and route the slow compile/deploy/inclusion progress
- * to the warn stream.
- */
-export function buildMinaAutoDeploy(
-  dir: string,
-  identityPubkey: string,
-  chain: string,
-  warn: (line: string) => void
-): NonNullable<NonNullable<ToonClientConfig['minaChannel']>['autoDeploy']> {
-  const store = MinaZkAppStore.forHome(dir);
-  let existing: ReturnType<MinaZkAppStore['lookup']>;
-  try {
-    existing = store.lookup(identityPubkey, chain);
-  } catch (err) {
-    warn(
-      `rig: unreadable Mina zkApp store at ${store.filePath} ` +
-        `(${err instanceof Error ? err.message : String(err)}) — a fresh ` +
-        'zkApp may be deployed'
+/** `evm:8453` → `evm`; `solana` → `solana`; anything else → undefined. */
+export function chainFamilyOf(
+  chain: string | undefined
+): ChainFamily | undefined {
+  if (!chain) return undefined;
+  const family = chain.split(':')[0];
+  return family === 'evm' || family === 'solana' ? family : undefined;
+}
+
+export function resolveConnectorSettings(args: {
+  env: NodeJS.ProcessEnv;
+  file: ClientConfigFile;
+  configDir: string;
+  storeDestinationOverride?: string;
+}): ConnectorSettings {
+  const { env, file } = args;
+  const warnings: string[] = [];
+
+  let connectorUrl: string | undefined;
+  let connectorSource: ConnectorSettings['connectorSource'] = null;
+  if (env['TOON_CONNECTOR']) {
+    connectorUrl = env['TOON_CONNECTOR'];
+    connectorSource = 'env';
+  } else if (env['TOON_CLIENT_PROXY_URL']) {
+    connectorUrl = env['TOON_CLIENT_PROXY_URL'];
+    connectorSource = 'legacy-env';
+    warnings.push(
+      'rig: TOON_CLIENT_PROXY_URL is the pre-2.0 spelling — set TOON_CONNECTOR to the node URL instead'
+    );
+  } else if (file.connectorUrl) {
+    connectorUrl = file.connectorUrl;
+    connectorSource = 'config';
+  } else if (file.proxyUrl) {
+    connectorUrl = file.proxyUrl;
+    connectorSource = 'legacy-config';
+    warnings.push(
+      'rig: config `proxyUrl` is the pre-2.0 spelling — `rig entry <url>` records `connectorUrl`'
     );
   }
-  return {
-    ...(existing
-      ? {
-          deployed: {
-            zkAppAddress: existing.zkAppAddress,
-            zkAppPrivateKey: existing.zkAppPrivateKey,
-          },
-        }
-      : {}),
-    // Persist the zkApp key BEFORE the deploy tx is sent (bug #3): a crash or
-    // failed cache-invalidation retry between send and confirmation then finds
-    // this record next run and REDEPLOYS the same address, instead of paying
-    // the ~1.1-MINA account-creation fee for a brand-new zkApp every attempt.
-    onDeploying: (record) => {
-      store.save({
-        identity: identityPubkey,
-        chain,
-        zkAppAddress: record.zkAppAddress,
-        zkAppPrivateKey: record.zkAppPrivateKey,
-        feePayer: record.feePayer,
-        deployedAt: new Date().toISOString(),
-        source:
-          'rig auto-deploy (npm @toon-protocol/mina-zkapp build, pending)',
-      });
-      warn(
-        `rig: recorded pending Mina zkApp ${record.zkAppAddress} before ` +
-          `deploy — key saved to ${store.filePath} (reused on retry)`
-      );
-    },
-    onDeployed: (record) => {
-      store.save({
-        identity: identityPubkey,
-        chain,
-        zkAppAddress: record.zkAppAddress,
-        zkAppPrivateKey: record.zkAppPrivateKey,
-        feePayer: record.feePayer,
-        ...(record.deployTxHash !== undefined
-          ? { deployTxHash: record.deployTxHash }
-          : {}),
-        ...(record.vkHash !== undefined ? { vkHash: record.vkHash } : {}),
-        deployedAt: new Date().toISOString(),
-        source: 'rig auto-deploy (npm @toon-protocol/mina-zkapp build)',
-      });
-      warn(
-        `rig: deployed a dedicated Mina PaymentChannel zkApp ` +
-          `${record.zkAppAddress} — key saved to ${store.filePath}`
-      );
-    },
-    onProgress: (line) => warn(`rig: mina: ${line}`),
-  };
-}
-
-function deriveMinaChannel(
-  settlement: ChainSettlement,
-  announce: AnnouncedPeer | undefined,
-  relayUrl: string
-): NonNullable<NetworkTopology['minaChannel']> {
-  const { rpcUrl, zkAppAddress, minaTokenId, networkId } = settlement;
-  if (!rpcUrl || !zkAppAddress) {
-    const missing = [
-      ...(rpcUrl ? [] : ['graphqlUrl']),
-      ...(zkAppAddress ? [] : ['zkAppAddress']),
-    ];
-    throw new MinaChannelUnderivableError(
-      settlement.chain,
-      missing,
-      announce,
-      relayUrl
+  if (env['TOON_CLIENT_BTP_URL'] || file.btpUrl) {
+    warnings.push(
+      "rig: btpUrl is ignored since 4.0 — the client reads the BTP endpoint from the node's GET /ilp"
     );
   }
-  return {
-    graphqlUrl: rpcUrl,
-    zkAppAddress,
-    ...(minaTokenId ? { tokenId: minaTokenId } : {}),
-    ...(networkId ? { networkId } : {}),
-  };
-}
 
-/**
- * Build the embedded client's `solanaChannel` from one resolved settlement —
- * or throw the actionable {@link SolanaChannelUnderivableError} naming the
- * missing pieces. A Solana chain in play with no way to open its channel must
- * fail HERE, not later as the embedded client's generic "Solana channel
- * config not provided".
- */
-function deriveSolanaChannel(
-  settlement: ChainSettlement,
-  announce: AnnouncedPeer | undefined,
-  relayUrl: string
-): NonNullable<NetworkTopology['solanaChannel']> {
-  const { rpcUrl, programId, tokenAddress } = settlement;
-  if (!rpcUrl || !programId || !tokenAddress) {
-    const missing = [
-      ...(rpcUrl ? [] : ['rpcUrl']),
-      ...(programId ? [] : ['programId']),
-      ...(tokenAddress ? [] : ['tokenMint']),
-    ];
-    throw new SolanaChannelUnderivableError(
-      settlement.chain,
-      missing,
-      announce,
-      relayUrl
+  const chainKey =
+    env['TOON_CLIENT_CHAIN'] ?? file.chain ?? file.supportedChains?.[0];
+  const chain = chainFamilyOf(chainKey);
+  if (chainKey && !chain) {
+    warnings.push(
+      `rig: chain ${JSON.stringify(chainKey)} is not a settlement chain the connector supports (evm | solana) — ignoring it`
     );
   }
-  return { rpcUrl, programId, tokenMint: tokenAddress };
-}
+  const rpcUrl =
+    env['TOON_CLIENT_RPC_URL'] ??
+    file.rpcUrl ??
+    (chainKey ? file.chainRpcUrls?.[chainKey] : undefined) ??
+    (chain ? file.chainRpcUrls?.[chain] : undefined);
 
-/**
- * Resolve the payment topology per the #264 precedence order —
- * `explicit config > live announce > genesis seed` for every field, plus the
- * documented settlement-chain selection rule (see
- * `../standalone/network-bootstrap.ts`).
- *
- * @throws {MissingUplinkError} when no source yields an uplink.
- * @throws {TokenNetworkUnderivableError} when the selected EVM chain's
- *   TokenNetwork cannot be derived from config, announce, or chain preset.
- */
-export async function resolveNetworkTopology(
-  inputs: NetworkTopologyInputs
-): Promise<NetworkTopology> {
-  const {
-    env,
-    file,
-    configPath,
-    relayUrl,
-    announce,
-    genesisSeed,
-    warn,
-    storeDestinationOverride,
-  } = inputs;
+  const transportRaw = env['TOON_CLIENT_TRANSPORT'] ?? file.transport;
+  const transport: ConnectorSettings['transport'] =
+    transportRaw === 'http' || transportRaw === 'btp' ? transportRaw : 'auto';
 
-  // ── Explicit config (always wins, per field) ─────────────────────────────
-  const explicitProxyUrl = env['TOON_CLIENT_PROXY_URL'] ?? file.proxyUrl;
-  const explicitBtpUrl = env['TOON_CLIENT_BTP_URL'] ?? file.btpUrl;
-  const explicitDestination =
-    env['TOON_CLIENT_DESTINATION'] ?? file.destination;
-  const explicitPublish =
-    env['TOON_CLIENT_PUBLISH_DESTINATION'] ?? file.publishDestination;
-  const explicitStore =
-    storeDestinationOverride ??
+  const derivationRaw = env['TOON_CLIENT_KEY_DERIVATION'] ?? file.keyDerivation;
+  const keyDerivation: ConnectorSettings['keyDerivation'] =
+    derivationRaw === 'standard' ? 'standard' : 'legacy';
+
+  const depositRaw = env['TOON_CLIENT_DEPOSIT'] ?? file.deposit;
+  const publishDestination =
+    env['TOON_CLIENT_PUBLISH_DESTINATION'] ??
+    env['TOON_CLIENT_DESTINATION'] ??
+    file.publishDestination ??
+    file.destination;
+  const storeDestination =
+    args.storeDestinationOverride ??
     env['TOON_CLIENT_STORE_DESTINATION'] ??
     file.storeDestination;
-  const explicitChain = env['TOON_CLIENT_CHAIN'] ?? file.chain;
-  const explicitMaps: ExplicitChainConfig = {
-    ...(file.chainRpcUrls ? { chainRpcUrls: file.chainRpcUrls } : {}),
-    ...(file.preferredTokens ? { preferredTokens: file.preferredTokens } : {}),
-    ...(file.tokenNetworks ? { tokenNetworks: file.tokenNetworks } : {}),
-  };
-
-  // ── Uplink: explicit > THE OFFICIAL EDGE ─────────────────────────────────
-  // The cutover (connector #616): the Rust connector is the official TOON
-  // relay implementation, so with no explicit entry the uplink IS the
-  // official edge — the live announce and the genesis seed no longer place
-  // the uplink (they still inform the destination anchor, routes, prices
-  // and bootstrap peers below). Opting onto another fleet is what
-  // `rig entry <url>` / `rig entry sandbox` and the TOON_CLIENT_* env
-  // overrides are for, and those are all EXPLICIT. `MissingUplinkError`
-  // can no longer fire from here — an uplink always resolves.
-  let proxyUrl = explicitProxyUrl;
-  let btpUrl = explicitBtpUrl;
-  if (!proxyUrl && !btpUrl) {
-    proxyUrl = OFFICIAL_PROXY_URL;
-  }
-
-  // ── Paid-write BTP companion ─────────────────────────────────────────────
-  // The proxy default above places an ILP-over-HTTP uplink and NOTHING else,
-  // so the embedded client builds no BTP session at all and every paid write
-  // goes out as `POST /ilp` — which the live edge answers `401 Unauthorized:
-  // identity 'g.toon.client' failed to authenticate`, because the HTTP
-  // one-shot carries only an unauthenticated `ILP-Peer-Id` header while the
-  // BTP session authenticates on connect. Adopting the payment peer's
-  // ANNOUNCED BTP endpoint ({@link OFFICIAL_BTP_URL} as the fallback — NOT
-  // the genesis seed, which still names the retired apex) gives the client
-  // both transports; `preferBtpForPaidWrites` (set alongside this in
-  // `createStandaloneContext`) then sends claims over BTP first and keeps
-  // HTTP as the transport's own fallback. The x402 greeting bootstrap
-  // (connector #617) still rides the proxy, so the channel-open path is
-  // unchanged.
-  //
-  // Only when NO uplink was configured explicitly: someone who pinned
-  // `TOON_CLIENT_PROXY_URL` / `proxyUrl` pinned the transport too, and a
-  // silently-added announce endpoint would route their paid writes off it.
-  //
-  // A derived endpoint is marked as such: it is a DISCOVERY guess, and the
-  // client dials it during `start()`, so an unreachable one must be able to
-  // degrade back to HTTP rather than stop rig from running. An explicit
-  // `btpUrl` is an operator's pin and is never dropped behind their back.
-  let btpUrlDerived = false;
-  if (!explicitProxyUrl && !explicitBtpUrl) {
-    btpUrl = announce?.info.btpEndpoint || OFFICIAL_BTP_URL;
-    btpUrlDerived = true;
-  }
-
-  // ── Destination anchor + publish/store routes ────────────────────────────
-  // The channel anchors at the peer's announced ilpAddress; publish/store
-  // routes come from the announce's `routes` map. Explicit values always
-  // win; with neither, the publisher's `<base>.relay.store` anchor-derivation
-  // convention remains as the last-resort fallback (explicit anchors only).
-  const destination =
-    explicitDestination ??
-    announce?.info.ilpAddress ??
-    genesisSeed?.ilpAddress ??
-    'g.proxy';
-  const publishDestination =
-    explicitPublish ??
-    announce?.routes?.publish ??
-    (proxyUrl === OFFICIAL_PROXY_URL
-      ? OFFICIAL_PUBLISH_DESTINATION
-      : undefined);
-  const storeDestination = explicitStore ?? announce?.routes?.store;
-
-  // ── Store uplink ─────────────────────────────────────────────────────────
-  // Resolved from the STORE node's own announce, matched by the ilpAddress it
-  // publishes for itself — not from the payment peer's, which names the store
-  // route but carries no way to reach it. Only when the store terminates
-  // somewhere other than the publish peer: same-node stores ride the session
-  // that is already open, and handing them a second identical uplink would
-  // open a redundant on-chain channel against the same counterparty.
-  //
-  // No baked fallback here on purpose. `OFFICIAL_BTP_URL` can name the
-  // publish edge because that is where an unconfigured rig must end up
-  // anyway, but guessing a STORE endpoint would send claims — real money —
-  // to a node nobody advertised. Undiscovered means undiscovered.
-  const explicitStoreBtpUrl =
-    env['TOON_CLIENT_STORE_BTP_URL'] ?? file.storeBtpUrl;
-  let storeBtpUrl: string | undefined;
-  if (storeDestination && storeDestination !== publishDestination) {
-    const storePeer = inputs.peers?.find(
-      (peer) => peer.info.ilpAddress === storeDestination
-    );
-    storeBtpUrl = explicitStoreBtpUrl || storePeer?.info.btpEndpoint || undefined;
-    if (!storeBtpUrl && inputs.peers?.length) {
-      warn(
-        `rig: no announce found for the store route "${storeDestination}" — ` +
-          'store writes (git objects, the rig page) will be attempted on the ' +
-          'publish uplink and the terminating connector will refuse them if ' +
-          'it does not hold that channel'
-      );
-    }
-  }
-
-  // ── Route-price floors ───────────────────────────────────────────────────
-  // The announce's `capabilities` carry a FLAT price per destination route,
-  // and the connector gates every paid packet at it (a claim advancing the
-  // channel by less is rejected — F06). Match the announced prices against
-  // the EFFECTIVE publish/store destinations — including the publisher's
-  // `<base>.relay.store` anchor-derivation fallback, so the floor applies
-  // exactly when a paid write would actually target the priced route. An
-  // unmatched destination gets no floor (behavior unchanged).
-  let routePrices: NetworkTopology['routePrices'];
-  {
-    const derived = deriveRouteDestinations(destination);
-    // Each node prices its OWN routes, so a price is looked up in the
-    // announce of whichever peer terminates that address — the store route's
-    // price lives in the store node's announce, not the payment peer's.
-    // Falls back to the payment peer for addresses no discovered peer claims,
-    // which is the single-node case and the pre-discovery behaviour.
-    const priceOf = (address: string): string | undefined => {
-      const owner =
-        inputs.peers?.find((p) => p.info.ilpAddress === address) ?? announce;
-      return (
-        owner?.routePrices?.[address] ??
-        owner?.capabilities?.find((c) => c.address === address)?.price
-      );
-    };
-    const publishPrice = priceOf(publishDestination ?? derived.publish);
-    const storePrice = priceOf(storeDestination ?? derived.store);
-    if (publishPrice !== undefined || storePrice !== undefined) {
-      routePrices = {
-        ...(publishPrice !== undefined ? { publish: publishPrice } : {}),
-        ...(storePrice !== undefined ? { store: storePrice } : {}),
-      };
-    }
-  }
-
-  // ── Known peer for the embedded client's own bootstrap ───────────────────
-  // The client re-queries the peer's announce itself (its internal core) and
-  // negotiates the settlement chain; rig just tells it WHO to bootstrap with.
-  const knownPeers = announce
-    ? [
-        {
-          pubkey: announce.pubkey,
-          relayUrl,
-          btpEndpoint: announce.info.btpEndpoint ?? '',
-        },
-      ]
-    : genesisSeed
-      ? [
-          {
-            pubkey: genesisSeed.pubkey,
-            relayUrl: genesisSeed.relayUrl,
-            btpEndpoint: genesisSeed.btpEndpoint,
-          },
-        ]
-      : [];
-
-  // ── Settlement chain + per-chain parameters ──────────────────────────────
-  // NOTE: the `network` preset field is deliberately NOT forwarded to the
-  // embedded client. `applyNetworkPresets` puts preset chains FIRST in
-  // `supportedChains`, which is what steered devnet negotiation to the
-  // unfunded public Solana preset (#260 root cause 4). The announce + the
-  // rule below define the chain; presets only serve as per-chain parameter
-  // fallbacks inside `resolveChainSettlement`.
-  const announcedChains = announce?.info.supportedChains ?? [];
-  const resolveSettlement = (chain: string) =>
-    resolveChainSettlement(chain, explicitMaps, announce);
-
-  let selection: ChainSelection | undefined;
-  let supportedChains: string[] | undefined;
-  let preferredTokens: Record<string, string> | undefined;
-  let tokenNetworks: Record<string, string> | undefined;
-  let chainRpcUrls: Record<string, string> | undefined;
-  let solanaChannel: NetworkTopology['solanaChannel'];
-  let minaChannel: NetworkTopology['minaChannel'];
-
-  if (file.supportedChains?.length) {
-    // Explicit chain list: pass through in order (its order IS the
-    // negotiation preference), filling per-chain parameter gaps from
-    // announce/presets.
-    const listed = file.supportedChains;
-    const kept: string[] = [];
-    let firstDropError: unknown;
-    preferredTokens = { ...file.preferredTokens };
-    tokenNetworks = { ...file.tokenNetworks };
-    chainRpcUrls = { ...file.chainRpcUrls };
-    for (const chain of listed) {
-      const s = resolveSettlement(chain);
-      // Chain negotiation is an EXACT string intersection of the two chain
-      // lists — a spelling difference for the same chain (config
-      // `evm:base:31337` vs announced `evm:31337`) silently strands the
-      // chain and negotiation falls through to whatever else matches. When
-      // a listed EVM chain names the same numeric chain id as an announced
-      // one, advertise the ANNOUNCED spelling (parameters resolved from the
-      // configured spelling carry over).
-      let key = chain;
-      if (s.family === 'evm' && !announcedChains.includes(chain)) {
-        const chainId = evmChainIdOf(chain);
-        const equivalent =
-          chainId !== undefined
-            ? announcedChains.find((c) => evmChainIdOf(c) === chainId)
-            : undefined;
-        if (equivalent) {
-          warn(
-            `rig: aligning configured settlement chain "${chain}" to the ` +
-              `announced spelling "${equivalent}" (same EVM chain id ` +
-              `${chainId}) — chain negotiation matches identifiers exactly`
-          );
-          key = equivalent;
-        }
-      }
-      if (kept.includes(key)) continue;
-      if (s.tokenAddress && !preferredTokens[key]) {
-        preferredTokens[key] = s.tokenAddress;
-      }
-      if (s.tokenNetwork && !tokenNetworks[key]) {
-        tokenNetworks[key] = s.tokenNetwork;
-      }
-      if (s.rpcUrl && !chainRpcUrls[key]) {
-        chainRpcUrls[key] = s.rpcUrl;
-      }
-      // Same fail-fast guarantee as the announce/selection path below: an
-      // explicitly configured EVM chain whose TokenNetwork/RPC cannot be
-      // derived must fail HERE with an actionable error, not later as the
-      // embedded client's generic "tokenNetwork address is required".
-      if (s.family === 'evm') {
-        if (!tokenNetworks[key]) {
-          throw new TokenNetworkUnderivableError(chain, announce, relayUrl);
-        }
-        if (!chainRpcUrls[key]) {
-          throw new Error(
-            `no RPC URL is derivable for settlement chain "${chain}"` +
-              ` — add chainRpcUrls["${chain}"] to ${configPath}`
-          );
-        }
-      }
-      // A listed Solana chain is advertised to negotiation, which may pick
-      // it — so its channel parameters must be derivable NOW. An explicit
-      // solanaChannel config object covers it (rides through to the embedded
-      // client verbatim); otherwise the first derivable Solana chain
-      // provides the channel params, and an UNDERIVABLE one is dropped from
-      // the advertised list (warned, with the remedy) instead of leaving a
-      // chain in play that the on-chain open is guaranteed to die on.
-      if (s.family === 'solana' && !file.solanaChannel) {
-        if (solanaChannel) {
-          // The embedded client carries ONE solanaChannel — a second Solana
-          // chain cannot be honored with distinct params.
-          kept.push(key);
-          continue;
-        }
-        try {
-          solanaChannel = deriveSolanaChannel(s, announce, relayUrl);
-        } catch (err) {
-          firstDropError ??= err;
-          warn(
-            `rig: dropping settlement chain ${chain} from the configured ` +
-              `supportedChains — ${err instanceof Error ? err.message : String(err)}`
-          );
-          continue;
-        }
-      }
-      // A listed Mina chain: same fail-fast contract as Solana. An explicit
-      // minaChannel config covers it (rides through verbatim); otherwise the
-      // first derivable Mina chain provides the channel params, and an
-      // UNDERIVABLE one is dropped from the advertised list (warned) instead of
-      // leaving a chain in play the on-chain open is guaranteed to die on.
-      if (s.family === 'mina' && !file.minaChannel) {
-        if (minaChannel) {
-          kept.push(key);
-          continue;
-        }
-        try {
-          minaChannel = deriveMinaChannel(s, announce, relayUrl);
-        } catch (err) {
-          firstDropError ??= err;
-          warn(
-            `rig: dropping settlement chain ${chain} from the configured ` +
-              `supportedChains — ${err instanceof Error ? err.message : String(err)}`
-          );
-          continue;
-        }
-      }
-      kept.push(key);
-    }
-    if (kept.length === 0) {
-      // Every listed chain was dropped — surface the first underivable
-      // error instead of negotiating with an empty chain list.
-      throw firstDropError;
-    }
-    supportedChains = kept;
-    // The embedded client validates chainRpcUrls keys ⊆ supportedChains, so
-    // entries for dropped/re-spelled chains must not survive; prune all
-    // three chain-keyed maps to the advertised list for coherence.
-    const advertised = new Set(kept);
-    const prune = (map: Record<string, string>): Record<string, string> =>
-      Object.fromEntries(
-        Object.entries(map).filter(([chain]) => advertised.has(chain))
-      );
-    preferredTokens = prune(preferredTokens);
-    tokenNetworks = prune(tokenNetworks);
-    chainRpcUrls = prune(chainRpcUrls);
-    selection = {
-      chain: supportedChains[0] as string,
-      reason: 'explicit',
-      detail: 'supportedChains set by config',
-    };
-  } else if (explicitChain || announcedChains.length > 0) {
-    // Selection rule: explicit > persisted channel > funded > first EVM.
-    const { secretKey } = deriveNostrKeyFromMnemonic(
-      inputs.identity.mnemonic,
-      inputs.identity.accountIndex
-    );
-    const evmAddress = new EvmSigner(secretKey).address;
-    // The Solana funded-chain probe needs the identity's base58 Solana
-    // address, derived pre-client-start via the client's own SLIP-0010
-    // helper (same paths the embedded client uses, so the probed address IS
-    // the one the client will settle with). Only derived when a `solana:*`
-    // chain is actually announced and no explicit chain pins selection
-    // anyway; `deriveFullIdentity` degrades to an empty publicKey when the
-    // Ed25519 deps are unavailable — then Solana chains are not probed.
-    let solanaAddress: string | undefined;
-    if (
-      !explicitChain &&
-      announcedChains.some((c) => c.startsWith('solana:'))
-    ) {
-      const fullIdentity = await deriveFullIdentity(
-        inputs.identity.mnemonic,
-        inputs.identity.accountIndex
-      );
-      solanaAddress = fullIdentity.solana.publicKey || undefined;
-      // Only the address is needed here — drop the derived key material.
-      fullIdentity.nostr.secretKey.fill(0);
-      fullIdentity.evm.privateKey.fill(0);
-      fullIdentity.solana.secretKey.fill(0);
-    }
-    selection = await selectSettlementChain({
-      ...(explicitChain ? { explicitChain } : {}),
-      announcedChains,
-      records: inputs.channelRecords(),
-      evmAddress,
-      ...(solanaAddress ? { solanaAddress } : {}),
-      resolveSettlement,
-      probeBalance: inputs.probeBalance ?? evmTokenBalance,
-      probeSolanaBalance: inputs.probeSolanaBalance ?? solanaTokenBalance,
-    });
-    const settlement = resolveSettlement(selection.chain);
-    if (settlement.family === 'evm') {
-      if (!settlement.tokenNetwork) {
-        throw new TokenNetworkUnderivableError(
-          selection.chain,
-          announce,
-          relayUrl
-        );
-      }
-      if (!settlement.rpcUrl) {
-        throw new Error(
-          `no RPC URL is derivable for settlement chain "${selection.chain}"` +
-            ` — add chainRpcUrls["${selection.chain}"] to ${configPath}`
-        );
-      }
-    }
-    // Same fail-fast for a selected Solana chain: its channel parameters
-    // must be derivable now (an explicit solanaChannel config covers it).
-    if (settlement.family === 'solana' && !file.solanaChannel) {
-      solanaChannel = deriveSolanaChannel(settlement, announce, relayUrl);
-    }
-    // Same fail-fast for a selected Mina chain (an explicit minaChannel covers it).
-    if (settlement.family === 'mina' && !file.minaChannel) {
-      minaChannel = deriveMinaChannel(settlement, announce, relayUrl);
-    }
-    supportedChains = [selection.chain];
-    preferredTokens = settlement.tokenAddress
-      ? { [selection.chain]: settlement.tokenAddress }
-      : undefined;
-    tokenNetworks = settlement.tokenNetwork
-      ? { [selection.chain]: settlement.tokenNetwork }
-      : undefined;
-    chainRpcUrls = settlement.rpcUrl
-      ? { [selection.chain]: settlement.rpcUrl }
-      : undefined;
-    if (selection.reason !== 'explicit') {
-      warn(
-        `rig: settlement chain ${selection.chain} selected — ` +
-          `${selection.detail}; set TOON_CLIENT_CHAIN (or supportedChains ` +
-          'in the client config) to override'
-      );
-    } else if (explicitChain && selection.chain !== explicitChain) {
-      // The explicit pin was re-spelled to the announced chain id (chain
-      // negotiation matches identifiers exactly) — say so, like the
-      // configured-supportedChains path does.
-      warn(
-        `rig: aligning configured settlement chain "${explicitChain}" to ` +
-          `the announced spelling "${selection.chain}" — ${selection.detail}`
-      );
-    }
-  } else {
-    warn(
-      'rig: no settlement chains are configured or announced — paid writes ' +
-        'will fail until a chain is configured (supportedChains) or the ' +
-        `payment peer announces its chains on ${relayUrl}`
-    );
-  }
-
-  const network = env['TOON_CLIENT_NETWORK'] ?? file.network;
-  if (network && network !== 'custom' && !file.supportedChains?.length) {
-    warn(
-      `rig: ignoring the "${network}" network preset for settlement — the ` +
-        "settlement chain comes from the payment peer's announce and your " +
-        'config, because preset chains can point at networks your wallet ' +
-        'has no funds on; set supportedChains explicitly to use preset chains'
-    );
-  }
+  const relayUrl = env['TOON_CLIENT_RELAY_URL'] ?? file.relayUrl;
 
   return {
-    ...(proxyUrl ? { proxyUrl } : {}),
-    ...(btpUrl ? { btpUrl, ...(btpUrlDerived ? { btpUrlDerived } : {}) } : {}),
-    destination,
+    ...(connectorUrl ? { connectorUrl } : {}),
+    connectorSource,
     ...(publishDestination ? { publishDestination } : {}),
     ...(storeDestination ? { storeDestination } : {}),
-    ...(storeBtpUrl ? { storeBtpUrl } : {}),
-
-    ...(routePrices ? { routePrices } : {}),
-    knownPeers,
-    ...(selection ? { selection } : {}),
-    ...(supportedChains ? { supportedChains } : {}),
-    ...(preferredTokens && Object.keys(preferredTokens).length > 0
-      ? { preferredTokens }
-      : {}),
-    ...(tokenNetworks && Object.keys(tokenNetworks).length > 0
-      ? { tokenNetworks }
-      : {}),
-    ...(chainRpcUrls && Object.keys(chainRpcUrls).length > 0
-      ? { chainRpcUrls }
-      : {}),
-    ...(solanaChannel ? { solanaChannel } : {}),
-    ...(minaChannel ? { minaChannel } : {}),
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Embedded-client transport config
-// ---------------------------------------------------------------------------
-
-/** The transport slice of the embedded client's config. */
-export type UplinkConfig = Pick<
-  ToonClientConfig,
-  | 'proxyUrl'
-  | 'connectorUrl'
-  | 'btpUrl'
-  | 'btpAuthToken'
-  | 'preferBtpForPaidWrites'
->;
-
-/**
- * Turn a resolved topology's uplinks into the client's transport config.
- *
- * `preferBtpForPaidWrites` is the load-bearing part. The client's default
- * precedence is HTTP-first, so a proxy-configured client sends every paid
- * write as a `POST /ilp` one-shot carrying only an unauthenticated
- * `ILP-Peer-Id` header — which the live edge answers `401 Unauthorized:
- * identity 'g.toon.client' failed to authenticate`, making `rig push`
- * impossible. The flag (toon-client#482) swaps the order so claims ride the
- * BTP session, which authenticates on connect; the BTP transport keeps the
- * HTTP one as its OWN fallback, so a proxy+BTP topology loses nothing when
- * BTP is the broken side. Reads, the x402 greeting and the channel open are
- * untouched either way.
- *
- * The client's `requiredTransport` guard (toon-client#558) does not cover
- * this: no live kind:10032 announce carries that field, so the guard never
- * fires against the current fleet.
- */
-export function resolveUplinkConfig(
-  topo: Pick<NetworkTopology, 'proxyUrl' | 'btpUrl'>
-): UplinkConfig {
-  return {
-    // validateConfig requires connectorUrl OR proxyUrl; with BTP-only
-    // config a dummy connectorUrl satisfies it (unused at runtime — same
-    // convention as the daemon).
-    ...(topo.proxyUrl
-      ? { proxyUrl: topo.proxyUrl }
-      : { connectorUrl: 'http://127.0.0.1:1' }),
-    ...(topo.btpUrl
+    ...((env['TOON_CLIENT_STORE_CONNECTOR_URL'] ?? file.storeConnectorUrl)
       ? {
-          btpUrl: topo.btpUrl,
-          btpAuthToken: '',
-          preferBtpForPaidWrites: true,
+          storeConnectorUrl:
+            env['TOON_CLIENT_STORE_CONNECTOR_URL'] ?? file.storeConnectorUrl,
         }
       : {}),
+    ...((env['TOON_CLIENT_STORE_SEAL_TO'] ?? file.storeSealTo)
+      ? { storeSealTo: env['TOON_CLIENT_STORE_SEAL_TO'] ?? file.storeSealTo }
+      : {}),
+    ...(relayUrl ? { relayUrl } : {}),
+    ...(chain ? { chain } : {}),
+    ...(chainKey ? { chainKey } : {}),
+    ...(rpcUrl ? { rpcUrl } : {}),
+    transport,
+    keyDerivation,
+    channelStorePath:
+      env['TOON_CLIENT_CHANNEL_STORE'] ??
+      file.channelStorePath ??
+      join(args.configDir, 'channels.json'),
+    ...(depositRaw !== undefined ? { deposit: BigInt(depositRaw) } : {}),
+    eventFee: BigInt(
+      env['TOON_CLIENT_FEE_PER_EVENT'] ?? file.feePerEvent ?? '0'
+    ),
+    ...((env['RIG_SOLANA_KEY_FILE'] ?? file.solanaKeyFile)
+      ? { solanaKeyFile: env['RIG_SOLANA_KEY_FILE'] ?? file.solanaKeyFile }
+      : {}),
+    ...((env['RIG_EVM_PRIVATE_KEY'] ?? file.evmPrivateKey)
+      ? { evmPrivateKey: env['RIG_EVM_PRIVATE_KEY'] ?? file.evmPrivateKey }
+      : {}),
+    ...(file.uploadTimeoutMs !== undefined
+      ? { uploadTimeoutMs: file.uploadTimeoutMs }
+      : {}),
+    warnings,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Bootstrap recovery (#279 cached topology; unreachable derived BTP uplink)
+// Destinations (pure: settings + the node's self-description)
 // ---------------------------------------------------------------------------
 
 /**
- * Whether a start failure came from the BTP uplink itself — the websocket
- * would not open, or would not authenticate.
- *
- * `@toon-protocol/client` throws its own `BtpConnectionError`/`BtpAuthError`
- * for exactly these, but does not export them, so (like the channel
- * introspection in `../standalone/standalone-publisher.ts`) they are matched
- * structurally by `name`. Matching narrowly is the point: this decides
- * whether rig may drop the BTP leg, and a broad match would silently paper
- * over unrelated bootstrap failures.
+ * The store route a node offers, when the caller named none: its first priced
+ * route spelled `*.store`, else `*.ario` (the AR.IO-backed store this
+ * repository has always uploaded to), else nothing.
  */
-export function isBtpTransportError(err: unknown): boolean {
-  const name = err instanceof Error ? err.name : '';
-  return name === 'BtpConnectionError' || name === 'BtpAuthError';
+export function defaultStoreDestinationFor(
+  desc: NodeSelfDescription
+): string | undefined {
+  const prefixes = desc.routes.map((r) => r.prefix);
+  return (
+    prefixes.find((p) => p === 'store' || p.endsWith('.store')) ??
+    prefixes.find((p) => p === 'ario' || p.endsWith('.ario')) ??
+    prefixes.find((p) => /store/i.test(p))
+  );
 }
 
-/**
- * One registered, single-use bootstrap recovery: whether it could address a
- * given failure, what to tell the operator, and how to rebuild.
- */
-export interface PublisherRecovery {
-  /** True when this recovery could plausibly address `err`. */
-  applies: (err: unknown) => boolean;
-  /** Warned before the retry — says what is being changed, and why. */
-  describe: (err: unknown) => string;
-  rebuild: () => Promise<StandalonePublisher>;
-}
-
-/**
- * The bootstrap recoveries a standalone publisher runs with, in order (see
- * {@link TopologyRecoveringPublisher} for the retry contract).
- *
- * The recoveries share one mutable "topology the inner publisher was built
- * from", so they COMPOSE: the BTP degrade drops the BTP leg of whatever the
- * cache recovery re-resolved, never of the topology this was called with.
- *
- * @param reresolve present only for a CACHE-sourced publisher (it should
- *   invalidate the entry and resolve live); absent means no cache recovery.
- */
-export function bootstrapRecoveries(args: {
-  topology: NetworkTopology;
-  buildPublisher: (topo: NetworkTopology) => StandalonePublisher;
-  reresolve?: () => Promise<NetworkTopology>;
-}): PublisherRecovery[] {
-  let active = args.topology;
-  const detail = (err: unknown): string =>
-    err instanceof Error ? err.message : String(err);
-  const recoveries: PublisherRecovery[] = [];
-
-  // #279: a cache-sourced publisher whose bootstrap fails invalidates the
-  // entry, re-resolves live (which re-writes the cache), and retries — so a
-  // rotated peer endpoint costs one failed attempt, not a broken TTL.
-  const reresolve = args.reresolve;
-  if (reresolve) {
-    recoveries.push({
-      applies: () => true,
-      describe: (err) =>
-        'rig: bootstrap with the cached network topology failed ' +
-        `(${detail(err)}) — invalidating the cache and re-resolving live`,
-      rebuild: async () => {
-        active = await reresolve();
-        return args.buildPublisher(active);
-      },
-    });
+export function resolveDestinations(
+  desc: NodeSelfDescription,
+  settings: Pick<ConnectorSettings, 'publishDestination' | 'storeDestination'>,
+  connectorUrl: string
+): { publish: string; store: string } {
+  const publish = settings.publishDestination ?? defaultDestinationFor(desc);
+  if (!publish) {
+    throw new Error(
+      `the connector at ${connectorUrl} publishes no priced address of its own — ` +
+        'set publishDestination / TOON_CLIENT_PUBLISH_DESTINATION to one of its GET /ilp routes'
+    );
   }
-
-  // A DERIVED BTP endpoint is a discovery guess, and the client dials it
-  // during start() — so an unreachable one must not stop rig from running.
-  // It drops back to the HTTP uplink, which is the behaviour placing the BTP
-  // leg otherwise replaces. Gated on {@link isBtpTransportError} so an
-  // unrelated bootstrap failure is never papered over, and on
-  // `btpUrlDerived` so an operator's explicit `btpUrl` pin is never
-  // abandoned behind their back.
-  recoveries.push({
-    applies: (err) => active.btpUrlDerived === true && isBtpTransportError(err),
-    describe: (err) =>
-      `rig: the discovered BTP uplink ${active.btpUrl} is unreachable ` +
-      `(${detail(err)}) — continuing over the HTTP uplink alone; paid ` +
-      'writes an edge accepts only over BTP will still fail, so pin a ' +
-      'reachable endpoint with `rig entry <url>` if they do',
-    rebuild: async () => {
-      const { btpUrl: _btpUrl, btpUrlDerived: _derived, ...http } = active;
-      active = http;
-      return args.buildPublisher(active);
-    },
-  });
-
-  return recoveries;
+  const store = settings.storeDestination ?? defaultStoreDestinationFor(desc);
+  if (!store) {
+    throw new Error(
+      `the connector at ${connectorUrl} prices no store route (none named *.store or *.ario) — ` +
+        'set storeDestination / TOON_CLIENT_STORE_DESTINATION to the route its store answers on'
+    );
+  }
+  return { publish, store };
 }
 
-/** Structural check for a cached {@link NetworkTopology} document. */
-function isNetworkTopology(value: unknown): value is NetworkTopology {
-  if (typeof value !== 'object' || value === null) return false;
-  const t = value as Record<string, unknown>;
-  return typeof t['destination'] === 'string' && Array.isArray(t['knownPeers']);
-}
+// ---------------------------------------------------------------------------
+// Key files
+// ---------------------------------------------------------------------------
 
-/**
- * Start failures that must NEVER trigger a cache-invalidation retry: they
- * are concurrency/state guards, not topology staleness — retrying would
- * bypass exactly what they protect.
- */
-const NON_RECOVERABLE_START_ERRORS: ReadonlySet<string> = new Set([
-  'DaemonIdentityConflictError',
-  'StandaloneLockError',
-  'ChannelMapCorruptError',
-  // An unfunded Mina fee payer is a wallet-funding problem, not topology
-  // staleness — re-resolving the topology cannot fix it, so retrying would
-  // just re-run the (already fail-fast) preflight for nothing.
-  'MinaFeePayerUnfundedError',
-]);
-
-/**
- * Publisher wrapper that retries a failed bootstrap (`start`/
- * `startClientOnly`) against a repaired publisher. Each registered
- * {@link PublisherRecovery} fires AT MOST ONCE, in order, and only when it
- * `applies` to the failure, so the retry count is bounded by the number of
- * recoveries — never a loop. Bootstrap failures are pre-payment by
- * construction (start() completes before any claim is signed), so a retry
- * can never double-pay. With no applicable recovery left, the failure passes
- * straight through.
- *
- * Two recoveries are registered by {@link createStandaloneContext}:
- *
- *   - #279 cache invalidation: a publisher built from a CACHED topology
- *     re-resolves LIVE, so a rotated peer endpoint costs one failed attempt
- *     rather than a broken TTL.
- *   - Unreachable DERIVED BTP uplink: discovery only guesses the peer's BTP
- *     ingress, and the client dials it during `start()` — so a dead endpoint
- *     would otherwise stop rig from running at all, which is strictly worse
- *     than the HTTP-only behaviour it replaced. The BTP leg is dropped and
- *     the run proceeds over HTTP. Never for an EXPLICIT `btpUrl`: that is an
- *     operator's pin, and quietly abandoning it would hide a real
- *     misconfiguration.
- */
-class TopologyRecoveringPublisher implements Publisher {
-  private inner: StandalonePublisher;
-  private readonly recoveries: PublisherRecovery[];
-  private readonly warn: (line: string) => void;
-
-  constructor(
-    inner: StandalonePublisher,
-    recoveries: PublisherRecovery[],
-    warn: (line: string) => void
+/** A Solana keypair file: the 64-byte JSON array `solana-keygen` writes. */
+export function readSolanaKeyFile(path: string): Uint8Array {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    throw new Error(
+      `failed to read the Solana key file ${path}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  if (
+    !Array.isArray(parsed) ||
+    (parsed.length !== 64 && parsed.length !== 32) ||
+    !parsed.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)
   ) {
-    this.inner = inner;
-    this.recoveries = [...recoveries];
-    this.warn = warn;
+    throw new Error(
+      `${path} is not a Solana keypair file (expected a JSON array of 64 bytes)`
+    );
   }
+  return Uint8Array.from(parsed as number[]);
+}
 
-  getPublicKey(): string {
-    return this.inner.getPublicKey();
-  }
+// ---------------------------------------------------------------------------
+// Money ops on the client's channel and wallet facades
+// ---------------------------------------------------------------------------
 
-  getFeeRates(): Promise<FeeRates> {
-    return this.inner.getFeeRates();
-  }
+function recordFor(
+  state: ChannelState,
+  args: { identity: string; destination: string; peerId: string }
+): Omit<ChannelMapRecord, 'openedAt' | 'lastUsedAt'> {
+  const tokenNetwork =
+    state.domain.tokenNetwork ?? state.domain.programId ?? '';
+  return {
+    channelId: state.channelId,
+    peerId: args.peerId,
+    identity: args.identity,
+    destination: args.destination,
+    chain: state.domain.chain,
+    tokenNetwork,
+    context: {
+      chainType: state.chain,
+      chainId: state.domain.chainId ?? 0,
+      tokenNetworkAddress: tokenNetwork,
+      tokenAddress: state.domain.token,
+      recipient: state.domain.counterparty,
+    },
+    depositTotal: state.depositTotal.toString(),
+  };
+}
 
-  /**
-   * Run the bootstrap step, retrying against a repaired publisher for as long
-   * as an unused recovery applies. The LAST attempt's error is what surfaces
-   * — after a live re-resolution or an HTTP-only rebuild that is the
-   * network's real state, strictly more actionable than the failure that
-   * triggered the retry.
-   */
-  private async ensure(
-    start: (p: StandalonePublisher) => Promise<void>
-  ): Promise<StandalonePublisher> {
-    for (;;) {
-      try {
-        await start(this.inner);
-        return this.inner;
-      } catch (err) {
-        const name = err instanceof Error ? err.name : '';
-        if (NON_RECOVERABLE_START_ERRORS.has(name)) throw err;
-        // First applicable recovery wins, and is consumed either way — the
-        // loop is bounded by the number registered.
-        const index = this.recoveries.findIndex((r) => r.applies(err));
-        if (index < 0) throw err;
-        const [recovery] = this.recoveries.splice(index, 1) as [
-          PublisherRecovery,
-        ];
-        this.warn(recovery.describe(err));
-        const fresh = await recovery.rebuild();
-        try {
-          // Failed starts release their own lock/state; stop() is idempotent.
-          await this.inner.stop();
-        } catch {
-          // best-effort teardown of the abandoned publisher
-        }
-        this.inner = fresh;
-      }
+function buildMoneyOps(args: {
+  client: ToonClient;
+  channelMap: ChannelMapStore;
+  identity: string;
+  destination: string;
+  peerId: string;
+}): StandaloneMoneyOps {
+  const { client, channelMap } = args;
+  const known = (channelId: string) =>
+    channelMap.list().some((r) => r.channelId === channelId);
+  const requireSameChannel = async (record: ChannelMapRecord) => {
+    const state = await client.channel.state();
+    if (state.channelId !== record.channelId) {
+      throw new Error(
+        `this identity's channel with ${args.destination} is ${state.channelId}, ` +
+          `not the recorded ${record.channelId} — the record is stale or belongs to another node`
+      );
     }
-  }
-
-  async publishEvent(
-    event: UnsignedEvent,
-    relayUrls: string[]
-  ): Promise<PublishReceipt> {
-    const p = await this.ensure((x) => x.start());
-    return p.publishEvent(event, relayUrls);
-  }
-
-  async uploadGitObject(upload: GitObjectUpload): Promise<UploadReceipt> {
-    const p = await this.ensure((x) => x.start());
-    return p.uploadGitObject(upload);
-  }
-
-  async uploadBlob(upload: BlobUpload): Promise<UploadReceipt> {
-    const p = await this.ensure((x) => x.start());
-    return p.uploadBlob(upload);
-  }
-
-  // ── money lifecycle passthroughs (#263) — same recovery contract ─────────
-
-  async openChannelExplicit(
-    opts?: Parameters<StandalonePublisher['openChannelExplicit']>[0]
-  ): ReturnType<StandalonePublisher['openChannelExplicit']> {
-    const p = await this.ensure((x) => x.start());
-    return p.openChannelExplicit(opts);
-  }
-
-  async closeRecordedChannel(
-    record: ChannelMapRecord
-  ): ReturnType<StandalonePublisher['closeRecordedChannel']> {
-    const p = await this.ensure((x) => x.startClientOnly());
-    return p.closeRecordedChannel(record);
-  }
-
-  async settleRecordedChannel(
-    record: ChannelMapRecord
-  ): ReturnType<StandalonePublisher['settleRecordedChannel']> {
-    const p = await this.ensure((x) => x.startClientOnly());
-    return p.settleRecordedChannel(record);
-  }
-
-  /** Free read on the unstarted client — no bootstrap, no recovery needed. */
-  readWalletChainBalances(
-    ...args: Parameters<StandalonePublisher['readWalletChainBalances']>
-  ): ReturnType<StandalonePublisher['readWalletChainBalances']> {
-    return this.inner.readWalletChainBalances(...args);
-  }
-
-  async stop(): Promise<void> {
-    await this.inner.stop();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Context factory
-// ---------------------------------------------------------------------------
-
-/**
- * #262 channel-map records for this identity, reduced to the slice chain
- * selection consumes (`closed` folds in the claim-watermark timers).
- */
-function chainRecordsFor(
-  map: ChannelMapStore,
-  identity: string
-): ChannelRecordLike[] {
-  return map
-    .list()
-    .filter((r) => r.identity === identity)
-    .map((r) => {
-      const watermark = map.readWatermark(r.channelId);
+  };
+  return {
+    async openChannel(opts): Promise<ChannelOpenOutcome> {
+      const before = await client.channel.state().catch(() => undefined);
+      const resumed = before !== undefined && known(before.channelId);
+      const state =
+        opts?.deposit !== undefined && before?.status === 'open'
+          ? await client.channel.deposit(opts.deposit)
+          : await client.channel.open(
+              opts?.deposit !== undefined ? { deposit: opts.deposit } : {}
+            );
+      channelMap.record(recordFor(state, args));
       return {
-        chain: r.chain,
-        lastUsedAt: r.lastUsedAt,
-        closed:
-          watermark?.closedAt !== undefined ||
-          watermark?.settledAt !== undefined,
+        channelId: state.channelId,
+        resumed,
+        destination: args.destination,
+        chain: state.domain.chain,
+        peerId: args.peerId,
+        depositTotal: state.depositTotal.toString(),
+        ...(opts?.deposit !== undefined
+          ? { depositAdded: opts.deposit.toString() }
+          : {}),
       };
-    });
+    },
+    async closeChannel(record): Promise<ChannelCloseOutcome> {
+      await requireSameChannel(record);
+      const result = await client.channel.close();
+      const closedAt = result.closedAt ?? BigInt(Math.floor(Date.now() / 1000));
+      return {
+        channelId: record.channelId,
+        ...(result.txHash ? { txHash: result.txHash } : {}),
+        closedAt: closedAt.toString(),
+        settleableAt: (result.settleableAt ?? closedAt).toString(),
+      };
+    },
+    async settleChannel(record): Promise<ChannelSettleOutcome> {
+      await requireSameChannel(record);
+      const result = await client.channel.settle();
+      channelMap.supersede(record);
+      return {
+        channelId: record.channelId,
+        ...(result.txHash ? { txHash: result.txHash } : {}),
+      };
+    },
+    async walletChainBalances(): Promise<WalletChainBalanceInfo[]> {
+      return (await client.wallet.balances()).map((b) => ({
+        chain: b.chain,
+        chainKey: b.chainKey,
+        address: b.address,
+        ...(b.native ? { native: b.native } : {}),
+        tokens: b.tokens,
+        ...(b.unreadable !== undefined ? { unreadable: b.unreadable } : {}),
+        ...(b.error !== undefined ? { error: b.error } : {}),
+      }));
+    },
+  };
 }
 
-/**
- * Assemble an embedded-client standalone context: resolved identity + config
- * → network bootstrap (announce discovery / genesis seed) → ToonClientConfig
- * → nonce-guarded StandalonePublisher (guard + client start + channel open
- * happen lazily on the first paid call, or eagerly via the publisher's own
- * `start`).
- */
+// ---------------------------------------------------------------------------
+// The context factory
+// ---------------------------------------------------------------------------
+
+/** What `rig balance` gets when nothing is configured to pay with. */
+class UnconfiguredPublisher {
+  constructor(private readonly error: MissingUplinkError) {}
+  getFeeRates(): Promise<never> {
+    return Promise.reject(this.error);
+  }
+  uploadGitObject(): Promise<never> {
+    return Promise.reject(this.error);
+  }
+  publishEvent(): Promise<never> {
+    return Promise.reject(this.error);
+  }
+}
+
 export async function createStandaloneContext(
   options: StandaloneLoadOptions
 ): Promise<StandaloneContext> {
@@ -1332,408 +498,156 @@ export async function createStandaloneContext(
   const configPath = join(dir, 'config.json');
   const file = readClientConfig(configPath);
   const identity = await resolveIdentity(options);
-
-  // Force-standalone override (RIG_STANDALONE / `rig --standalone`): when set,
-  // the embedded publisher skips the same-identity daemon refusal so a running
-  // toon-clientd never blocks the standalone path. The per-identity NonceLock
-  // still guards against two standalone processes racing the claim watermark.
-  const skipDaemonCheck = standaloneForced(env);
-  if (skipDaemonCheck) {
-    warn(
-      'rig: force-standalone (RIG_STANDALONE) — bypassing any running ' +
-        'toon-clientd; this rig process signs its own claims (stop the daemon ' +
-        'if it is also writing on this identity)'
-    );
-  }
-
-  const genesisSeed = loadGenesisSeed();
-
-  // ── Relay-origin ──────────────────────────────────────────────────────────
-  // The relay the paid command resolved via `rig remote` (passed by the
-  // command) is the user's clearest network statement; env/file follow, and
-  // the genesis seed's relay is the out-of-the-box fallback.
-  const relayUrl =
-    options.relayUrl ??
-    env['TOON_CLIENT_RELAY_URL'] ??
-    file.relayUrl ??
-    genesisSeed?.relayUrl ??
-    // Last resort: the genesis seed normally supplies the relay, so this is
-    // only reached when no seed/config/env relay is present. Point at the
-    // shared public devnet relay rather than a dead local default.
-    'wss://relay-ws.devnet.toonprotocol.dev';
-
-  // ── Peer→channel persistence (#262) ──────────────────────────────────────
-  const channelStorePath = file.channelStorePath ?? join(dir, 'channels.json');
-  // Sibling watermark file for the store leg's client — see the
-  // `channelStorePath` note where the store client config is built.
-  const storeChannelStorePath = channelStorePath.replace(
-    /(\.json)?$/,
-    '.store.json'
+  const nostr = deriveNostrKeyFromMnemonic(
+    identity.mnemonic,
+    identity.accountIndex
   );
-  const channelMap = new ChannelMapStore({
-    mapPath: join(dir, RIG_CHANNEL_MAP_FILENAME),
-    watermarkPath: channelStorePath,
-  });
 
-  // ── Topology cache (#279): keyed by relay-origin + identity + explicit
-  // config; a hit skips discovery AND the pure-but-probing resolution below.
-  const cache = new TopologyCache<NetworkTopology>({
-    path: join(dir, TOPOLOGY_CACHE_FILENAME),
-    ttlMs: topologyCacheTtlMs(env),
-    validate: isNetworkTopology,
+  const settings = resolveConnectorSettings({
+    env,
+    file,
+    configDir: dir,
+    ...(options.storeDestination
+      ? { storeDestinationOverride: options.storeDestination }
+      : {}),
   });
-  const cacheKey = topologyCacheKey({
-    relayUrl,
-    identity: identity.pubkey,
-    fingerprint: explicitConfigFingerprint(
-      env,
-      file as Record<string, unknown>
-    ),
-  });
+  for (const line of settings.warnings) warn(line);
+  const defaultRelayUrls = settings.relayUrl ? [settings.relayUrl] : [];
 
-  // ── Operator notices (#78): seen-id persistence, sibling to the channel
-  // map and topology cache above.
-  const noticeStore = new NoticeStore({
-    path: join(dir, NOTICE_STORE_FILENAME),
-  });
+  if (!settings.connectorUrl) {
+    const missing = new MissingUplinkError(configPath);
+    if (options.requireUplink === false) {
+      return {
+        ownerPubkey: nostr.pubkey,
+        identitySource: identity.source,
+        identitySourceLabel: identity.sourceLabel,
+        publisher: new UnconfiguredPublisher(missing),
+        defaultRelayUrls,
+        fetchRemote: (args) => fetchRemoteState(args),
+        stop: () => Promise.resolve(),
+      };
+    }
+    throw missing;
+  }
+  const connectorUrl = settings.connectorUrl;
 
-  const resolveLiveTopology = async (): Promise<NetworkTopology> => {
-    // ── Live announce discovery ────────────────────────────────────────────
-    // Skipped when explicit config already pins the whole payment topology
-    // (fully-configured setups keep their zero-roundtrip start and their
-    // exact pre-#264 behavior). A listed `solana:*` chain WITHOUT explicit
-    // channel parameters is not fully pinned: the announce is a needed
-    // parameter source (program id / mint), and skipping discovery would
-    // also skip the announced-spelling alignment that keeps the chain list
-    // negotiable. Discovery failure is non-fatal: warn + genesis seed.
-    const solanaExplicitlyComplete = (file.supportedChains ?? []).every(
-      (chain) =>
-        !chain.startsWith('solana:') ||
-        Boolean(file.solanaChannel) ||
-        Boolean(
-          file.tokenNetworks?.[chain] &&
-          file.preferredTokens?.[chain] &&
-          file.chainRpcUrls?.[chain]
-        )
-    );
-    // A listed `mina:*` chain WITHOUT an explicit `minaChannel` is not fully
-    // pinned either: the announce is the authoritative source for the
-    // deployment's zkApp (and token id), so discovery must run. Only an
-    // explicit `minaChannel` config makes a Mina chain announce-independent.
-    const minaExplicitlyComplete = (file.supportedChains ?? []).every(
-      (chain) => !chain.startsWith('mina:') || Boolean(file.minaChannel)
-    );
-    // A config that pins a store route on a DIFFERENT node than it publishes
-    // to is not fully explicit unless it also pins that node's uplink. The
-    // store node holds its own channel, and a claim signed on the publish
-    // channel is refused by it (F01) — so without a store uplink the store
-    // route is unreachable, and only its own announce publishes one. Pinning
-    // the publish transport says nothing about how to reach the store.
-    // A per-invocation `--via` override (#101) has to be weighed here too, or
-    // the gate answers for a store route the run will not use: a config that
-    // pins store == publish looks fully explicit, discovery is skipped, and
-    // the overridden node's announce — the only thing carrying its uplink,
-    // price and channel — is never fetched.
-    const explicitStoreDest =
-      options.storeDestination ??
-      env['TOON_CLIENT_STORE_DESTINATION'] ??
-      file.storeDestination;
-    const explicitPublishDest =
-      env['TOON_CLIENT_PUBLISH_DESTINATION'] ?? file.publishDestination;
-    const storeUplinkKnown =
-      !explicitStoreDest ||
-      explicitStoreDest === explicitPublishDest ||
-      // A pinned `storeBtpUrl` was pinned for whatever the CONFIG named, so it
-      // vouches for nothing once `--via` names a different node. Only a
-      // configured store route may lean on it.
-      (options.storeDestination === undefined &&
-        Boolean(env['TOON_CLIENT_STORE_BTP_URL'] ?? file.storeBtpUrl));
-    const fullyExplicit =
-      Boolean(
-        (env['TOON_CLIENT_PROXY_URL'] ?? file.proxyUrl) ||
-        (env['TOON_CLIENT_BTP_URL'] ?? file.btpUrl)
-      ) &&
-      Boolean(env['TOON_CLIENT_DESTINATION'] ?? file.destination) &&
-      Boolean(file.supportedChains?.length) &&
-      storeUplinkKnown &&
-      solanaExplicitlyComplete &&
-      minaExplicitlyComplete;
-    let announce: AnnouncedPeer | undefined;
-    // Retained beyond the pick: the store node announces itself
-    // separately, and only its own announce carries its BTP ingress.
-    let discoveredPeers: AnnouncedPeer[] | undefined;
-    if (!fullyExplicit) {
-      try {
-        const peers = await discoverAnnouncedPeers(relayUrl, {
-          timeoutMs: DISCOVERY_TIMEOUT_MS,
-        });
-        discoveredPeers = peers;
-        const seedPubkeys = genesisSeedPubkeys();
-        announce = pickPaymentPeer(peers, seedPubkeys);
-        if (!announce) {
-          warn(
-            `rig: no payment-peer announce (kind:10032) found on ${relayUrl} — ` +
-              'falling back to the genesis peer seed'
-          );
-        }
-        // #78: prints once per notice id, and only when the picked payment
-        // peer is a trusted (genesis-seed) announce — a no-op otherwise. No
-        // extra round trip: this reuses the discovery above.
-        showOperatorNoticeOnce(announce, seedPubkeys, noticeStore, warn);
-      } catch (err) {
-        warn(
-          `rig: announce discovery on ${relayUrl} failed ` +
-            `(${err instanceof Error ? err.message : String(err)}) — falling ` +
-            'back to the genesis peer seed'
-        );
-      }
+  // One writer per identity per machine: two rig processes signing claims on
+  // one channel race the nonce watermark, and the connector refuses the loser.
+  if (!standaloneForced(env)) await checkDaemonIdentity(nostr.pubkey);
+  const lock = await NonceLock.acquire(nostr.pubkey);
+
+  const clients: ToonClient[] = [];
+  const stop = async () => {
+    for (const c of clients) await c.close();
+    lock.release();
+  };
+
+  try {
+    const payerKeys: Pick<
+      ToonClientConfig,
+      | 'mnemonic'
+      | 'accountIndex'
+      | 'keyDerivation'
+      | 'solanaSecretKey'
+      | 'evmPrivateKey'
+    > = {
+      mnemonic: identity.mnemonic,
+      accountIndex: identity.accountIndex,
+      keyDerivation: settings.keyDerivation,
+      ...(settings.solanaKeyFile
+        ? { solanaSecretKey: readSolanaKeyFile(settings.solanaKeyFile) }
+        : {}),
+      ...(settings.evmPrivateKey
+        ? { evmPrivateKey: settings.evmPrivateKey }
+        : {}),
+    };
+    const shared: Omit<ToonClientConfig, 'connector' | 'channelStore'> = {
+      ...payerKeys,
+      ...(settings.chain ? { chain: settings.chain } : {}),
+      ...(settings.rpcUrl ? { rpcUrl: settings.rpcUrl } : {}),
+      transport: settings.transport,
+      autoOpenChannel: true,
+      ...(settings.deposit !== undefined ? { deposit: settings.deposit } : {}),
+    };
+    if (settings.chain && !settings.rpcUrl) {
+      warn(
+        `rig: no rpcUrl configured for ${settings.chain} — the client falls back to its devnet preset; ` +
+          'set TOON_CLIENT_RPC_URL (or config rpcUrl) for a mainnet node'
+      );
     }
 
-    // ── Topology resolution (pure; explicit > announce > genesis) ──────────
-    const resolved = await resolveNetworkTopology({
-      env,
-      file,
-      configPath,
-      relayUrl,
-      announce,
-      ...(discoveredPeers ? { peers: discoveredPeers } : {}),
-      ...(options.storeDestination
-        ? { storeDestinationOverride: options.storeDestination }
-        : {}),
-      genesisSeed,
-      identity: {
-        mnemonic: identity.mnemonic,
-        accountIndex: identity.accountIndex,
-        pubkey: identity.pubkey,
+    const client = await ToonClient.create({
+      ...shared,
+      connector: connectorUrl,
+      channelStore: settings.channelStorePath,
+    });
+    clients.push(client);
+    const desc = await client.describe();
+    const destinations = resolveDestinations(desc, settings, connectorUrl);
+
+    // The store leg: the same client unless the store terminates on another
+    // node that holds its own channel (then its own client + watermark file).
+    let storeClient = client;
+    if (
+      settings.storeConnectorUrl &&
+      normalizeUrl(settings.storeConnectorUrl) !== normalizeUrl(connectorUrl)
+    ) {
+      storeClient = await ToonClient.create({
+        ...shared,
+        connector: settings.storeConnectorUrl,
+        channelStore: settings.channelStorePath.replace(
+          /(\.json)?$/,
+          '.store.json'
+        ),
+      });
+      clients.push(storeClient);
+    }
+
+    const publisher = new ConnectorPublisher({
+      publish: { client, destination: destinations.publish },
+      store: {
+        client: storeClient,
+        destination: destinations.store,
+        ...(storeClient === client && settings.storeSealTo
+          ? { sealTo: settings.storeSealTo }
+          : {}),
       },
-      channelRecords: () => chainRecordsFor(channelMap, identity.pubkey),
-      ...(options.requireUplink !== undefined
-        ? { requireUplink: options.requireUplink }
+      nostrSecretKey: nostr.secretKey,
+      eventFee: settings.eventFee,
+      ...(settings.uploadTimeoutMs !== undefined
+        ? { uploadTimeoutMs: settings.uploadTimeoutMs }
         : {}),
       warn,
     });
-    // Cache only paid-path resolutions: a `requireUplink: false` free read
-    // may resolve WITHOUT an uplink, and caching that would let a later paid
-    // command skip past MissingUplinkError with a broken topology.
-    if (options.requireUplink !== false) cache.write(cacheKey, resolved);
-    return resolved;
-  };
 
-  const cached = cache.read(cacheKey);
-  if (cached) {
-    warn(
-      `rig: network topology from cache (${Math.round(cached.ageMs / 1000)}s ` +
-        `old; ${TOPOLOGY_TTL_ENV}=0 disables) — skipping announce discovery`
-    );
-  }
-  const topology = cached?.topology ?? (await resolveLiveTopology());
-
-  const eventFee = BigInt(file.feePerEvent ?? '1');
-
-  const buildPublisher = (topo: NetworkTopology): StandalonePublisher => {
-    const clientConfig: ToonClientConfig = {
-      ...resolveUplinkConfig(topo),
-      mnemonic: identity.mnemonic,
-      mnemonicAccountIndex: identity.accountIndex,
-      ilpInfo: {
-        pubkey: '00'.repeat(32),
-        ilpAddress: 'g.toon.client',
-        btpEndpoint: topo.btpUrl ?? '',
-        assetCode: 'USD',
-        assetScale: 6,
-      },
-      toonEncoder: encodeEventToToon,
-      toonDecoder: decodeEventFromToon,
-      destinationAddress: topo.destination,
-      // The embedded client bootstraps against the known peer above; its
-      // `relayUrl` config only seeds ArDrive-merged peers, so it stays unset.
-      relayUrl: '',
-      knownPeers: topo.knownPeers,
-      channelStorePath,
-      ...(topo.supportedChains
-        ? { supportedChains: topo.supportedChains }
-        : {}),
-      ...(file.settlementAddresses
-        ? { settlementAddresses: file.settlementAddresses }
-        : {}),
-      ...(topo.preferredTokens
-        ? { preferredTokens: topo.preferredTokens }
-        : {}),
-      ...(topo.tokenNetworks ? { tokenNetworks: topo.tokenNetworks } : {}),
-      ...(topo.chainRpcUrls ? { chainRpcUrls: topo.chainRpcUrls } : {}),
-      // Solana channel params: an explicit config object wins verbatim; else
-      // the topology's derivation (announce/presets — see resolveNetworkTopology).
-      ...(file.solanaChannel
-        ? { solanaChannel: file.solanaChannel }
-        : topo.solanaChannel
-          ? { solanaChannel: topo.solanaChannel }
-          : {}),
-      // Mina channel params: an explicit config object wins verbatim; else the
-      // topology's derivation (announce zkApp/tokenId + preset graphqlUrl —
-      // see resolveNetworkTopology / deriveMinaChannel).
-      // An explicit config object keeps today's pin-a-zkApp semantics
-      // verbatim. The DERIVED path additionally gets `autoDeploy`: the
-      // announce/preset zkApp is shared and single-pair, so a fresh identity
-      // can never open on it — the client checks on-chain ownership and
-      // deploys a dedicated per-pair zkApp when needed, persisting the key
-      // through the rig zkApp store (losing it would strand ~1.1 MINA).
-      ...(file.minaChannel
-        ? { minaChannel: file.minaChannel }
-        : topo.minaChannel
-          ? {
-              minaChannel: {
-                ...topo.minaChannel,
-                autoDeploy: buildMinaAutoDeploy(
-                  dir,
-                  identity.pubkey,
-                  `mina:${topo.minaChannel.networkId ?? 'devnet'}`,
-                  warn
-                ),
-              },
-            }
-          : {}),
-    };
-
-    // Store leg (#96 follow-up): when the store route terminates on its own
-    // node, it needs its own uplink and its own channel — a claim signed on
-    // the publish channel is refused by the store connector, which has no
-    // record of it (F01). Same identity and same channel store; only the
-    // transport and the destination differ, so the two legs stay one wallet.
-    const storeClientConfig: ToonClientConfig | undefined = topo.storeBtpUrl
-      ? {
-          ...clientConfig,
-          proxyUrl: undefined,
-          connectorUrl: 'http://127.0.0.1:1',
-          btpUrl: topo.storeBtpUrl,
-          btpAuthToken: '',
-          preferBtpForPaidWrites: true,
-          // Its OWN watermark file. A client's channel store and its
-          // `.peers.json` binding sidecar are one unit that the client
-          // rewrites wholesale, so pointing two live clients at one path has
-          // them clobber each other's watermarks — observed as the publish
-          // leg losing its channel ("is not being tracked", then F01) the
-          // moment the store leg opened. Separate files; the legs stay
-          // correlated through rig's own channel map, which is keyed by
-          // anchor and records both.
-          channelStorePath: storeChannelStorePath,
-          ilpInfo: {
-            ...clientConfig.ilpInfo,
-            btpEndpoint: topo.storeBtpUrl,
-          },
-          destinationAddress: topo.storeDestination ?? topo.destination,
-        }
-      : undefined;
-
-    return new StandalonePublisher({
-      clientConfig,
-      ...(storeClientConfig ? { storeClientConfig } : {}),
-      eventFee,
+    const channelMap = new ChannelMapStore({
+      mapPath: join(dir, RIG_CHANNEL_MAP_FILENAME),
+      watermarkPath: settings.channelStorePath,
+    });
+    const money = buildMoneyOps({
+      client,
       channelMap,
-      warn,
-      ...(skipDaemonCheck ? { skipDaemonCheck: true } : {}),
-      ...(topo.publishDestination
-        ? { publishDestination: topo.publishDestination }
-        : {}),
-      ...(topo.storeDestination
-        ? { storeDestination: topo.storeDestination }
-        : {}),
-      // Route-price floors (F06): every per-packet claim must advance the
-      // channel by at least the destination route's announced price.
-      ...(topo.routePrices
-        ? {
-            routePrices: {
-              ...(topo.routePrices.publish !== undefined
-                ? { publish: BigInt(topo.routePrices.publish) }
-                : {}),
-              ...(topo.routePrices.store !== undefined
-                ? { store: BigInt(topo.routePrices.store) }
-                : {}),
-            },
-          }
-        : {}),
-      // `rig channel open --peer` (#263): anchor the channel (and its map
-      // key) to an explicit peer destination instead of the configured
-      // default.
-      ...(options.channelDestination
-        ? { channelDestination: options.channelDestination }
-        : {}),
-      // The peer's announce does not carry TokenNetwork/token parameters, so
-      // the client's negotiation leaves them empty (#260 root cause 3) — the
-      // publisher back-fills them from the derived per-chain maps before the
-      // channel opens.
-      ...(topo.tokenNetworks || topo.preferredTokens
-        ? {
-            negotiationFallbacks: {
-              ...(topo.tokenNetworks
-                ? { tokenNetworks: topo.tokenNetworks }
-                : {}),
-              ...(topo.preferredTokens
-                ? { preferredTokens: topo.preferredTokens }
-                : {}),
-            },
-          }
-        : {}),
+      identity: nostr.pubkey,
+      destination: options.channelDestination ?? destinations.publish,
+      peerId: desc.edgeIdentity?.keyId ?? connectorUrl,
     });
-  };
 
-  const publisher = new TopologyRecoveringPublisher(
-    buildPublisher(topology),
-    bootstrapRecoveries({
-      topology,
-      buildPublisher,
-      // Only a CACHE-sourced publisher gets the re-resolve recovery;
-      // live-resolved ones have nothing staler to fall back from.
-      ...(cached
-        ? {
-            reresolve: async () => {
-              cache.invalidate(cacheKey);
-              return resolveLiveTopology();
-            },
-          }
-        : {}),
-    }),
-    warn
-  );
-
-  // Wallet-view preset defaults (#299): when the identity has no configured
-  // Solana/Mina channel (the common single-EVM-chain case), `rig balance` still
-  // shows those chains — 0 for an account not yet on-chain — by reading the
-  // named network's public RPC/GraphQL. Resolved HERE and passed only to the
-  // wallet-view read, NOT merged into the client's settlement config: setting
-  // `network` there would expand `supportedChains` via applyNetworkPresets and
-  // change chain negotiation, which this deliberately avoids.
-  const walletViewNetwork = env['TOON_CLIENT_NETWORK'] ?? file.network;
-  let walletViewFallback: WalletViewFallback | undefined;
-  if (
-    walletViewNetwork === 'devnet' ||
-    walletViewNetwork === 'testnet' ||
-    walletViewNetwork === 'mainnet'
-  ) {
-    const presets = resolveClientNetwork(walletViewNetwork);
-    walletViewFallback = {
-      ...(presets.solanaChannel
-        ? { solanaChannel: presets.solanaChannel }
-        : {}),
-      ...(presets.minaChannel ? { minaChannel: presets.minaChannel } : {}),
+    return {
+      ownerPubkey: nostr.pubkey,
+      identitySource: identity.source,
+      identitySourceLabel: identity.sourceLabel,
+      publisher,
+      defaultRelayUrls,
+      fetchRemote: (args) => fetchRemoteState(args),
+      money,
+      stop,
     };
+  } catch (err) {
+    await stop().catch(() => undefined);
+    throw err;
   }
+}
 
-  return {
-    ownerPubkey: publisher.getPublicKey(),
-    identitySource: identity.source,
-    identitySourceLabel: identity.sourceLabel,
-    publisher,
-    defaultRelayUrls: [relayUrl],
-    fetchRemote: (args) => fetchRemoteState(args),
-    // Money lifecycle (#263): same guard/start/channel-map machinery as the
-    // paid-write path, surfaced for fund/balance/channel open|close|settle.
-    money: {
-      openChannel: (opts) => publisher.openChannelExplicit(opts),
-      closeChannel: (record) => publisher.closeRecordedChannel(record),
-      settleChannel: (record) => publisher.settleRecordedChannel(record),
-      walletChainBalances: () =>
-        publisher.readWalletChainBalances(walletViewFallback),
-    },
-    stop: () => publisher.stop(),
-  };
+function normalizeUrl(url: string): string {
+  return url.replace(/\/+$/, '').replace(/\/ilp$/, '');
 }
