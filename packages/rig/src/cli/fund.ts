@@ -68,7 +68,7 @@ import { resolveRelays } from './remote.js';
 export const DEVNET_FAUCET_URL = 'https://faucet.devnet.toonprotocol.dev';
 
 /** Supported faucet chains (client `FaucetChain`). */
-const CHAINS = ['evm', 'solana', 'mina'] as const;
+const CHAINS = ['evm', 'solana'] as const;
 type FundChain = (typeof CHAINS)[number];
 
 /**
@@ -81,12 +81,11 @@ const CHAIN_ALIASES: Record<string, FundChain | 'all'> = {
   eth: 'evm',
   sol: 'solana',
   solana: 'solana',
-  mina: 'mina',
   all: 'all',
 };
 
 /** Human-readable list of accepted chain arguments (for usage/errors). */
-const CHAIN_ARG_LIST = 'evm | sol | solana | mina | all';
+const CHAIN_ARG_LIST = 'evm | sol | solana | all';
 
 /**
  * Resolve a raw chain argument (positional or `--chain`) to the canonical
@@ -198,7 +197,7 @@ interface FundJson {
    */
   inferredDevnetFrom?: string;
   /** Non-devnet path: the derived wallet addresses to fund externally. */
-  addresses?: { evm: string | null; solana: string | null; mina: string | null };
+  addresses?: { evm: string | null; solana: string | null };
   guidance?: string;
 }
 
@@ -274,14 +273,9 @@ export function sharedDevnetOrigin(
 async function loadGenesisSeedDefault(): Promise<
   { relayUrl?: string; btpEndpoint?: string } | undefined
 > {
-  try {
-    const { loadGenesisSeed } = await import(
-      '../standalone/network-bootstrap.js'
-    );
-    return loadGenesisSeed();
-  } catch {
-    return undefined;
-  }
+  // There is no built-in network seed since 4.0: a node is named (TOON_CONNECTOR
+  // / `rig entry <url>`), never discovered. Nothing configured means no seed.
+  return undefined;
 }
 
 /**
@@ -526,14 +520,13 @@ export async function runFund(args: string[], deps: FundDeps): Promise<number> {
     // Dynamic import: `@toon-protocol/client` is heavy; runs that fail
     // earlier (usage errors) never pay its startup cost.
     const client = await import('@toon-protocol/client');
-    const derived = await client.deriveFullIdentity(
-      resolved.mnemonic,
-      resolved.accountIndex
-    );
+    const derived = client.deriveFullIdentity(resolved.mnemonic, {
+      accountIndex: resolved.accountIndex,
+      scheme: 'legacy',
+    });
     const addresses = {
       evm: derived.evm.address || null,
       solana: derived.solana.publicKey || null,
-      mina: derived.mina.publicKey || null,
     };
 
     // ── No faucet on this network: name the ACTUAL knob first (#280) ────────
@@ -555,18 +548,16 @@ export async function runFund(args: string[], deps: FundDeps): Promise<number> {
       io.out('Wallet addresses:');
       io.out(`  evm     ${addresses.evm ?? '(no key derived)'}`);
       io.out(`  solana  ${addresses.solana ?? '(no key derived)'}`);
-      io.out(`  mina    ${addresses.mina ?? '(no key derived — optional mina-signer dependency missing)'}`);
       return 0;
     }
 
     // ── Devnet faucet drips (parallel, independent per chain) ───────────────
-    // Chain-aware timeout (daemon convention): a Mina drip routinely takes
-    // >75s server-side. Env/config override applies uniformly.
+    // Env/config override applies uniformly to every chain's drip.
     const timeoutEnv = env['TOON_CLIENT_FAUCET_TIMEOUT_MS'];
-    const timeoutFor = (chain: FundChain): number => {
+    const timeoutFor = (): number => {
       if (timeoutEnv && Number.isFinite(Number(timeoutEnv))) return Number(timeoutEnv);
       if (file.faucetTimeoutMs !== undefined) return file.faucetTimeoutMs;
-      return chain === 'mina' ? 130_000 : 90_000;
+      return 90_000;
     };
 
     if (!json && inferredDevnet) {
@@ -584,10 +575,7 @@ export async function runFund(args: string[], deps: FundDeps): Promise<number> {
       const list = targetChains.join(', ');
       io.out(
         `Requesting ${targetChains.length === 1 ? '' : 'parallel '}USDC drip${targetChains.length === 1 ? '' : 's'} ` +
-          `from ${faucetUrl} for ${list} …` +
-          (targetChains.includes('mina')
-            ? ' (mina settles slowly; this can take ~2 minutes)'
-            : '')
+          `from ${faucetUrl} for ${list} …`
       );
     }
 
@@ -603,17 +591,13 @@ export async function runFund(args: string[], deps: FundDeps): Promise<number> {
           chain,
           funded: false,
           address: null,
-          error:
-            `no ${chain} address could be derived for this identity` +
-            (chain === 'mina'
-              ? ' (install the optional mina-signer dependency)'
-              : ''),
+          error: `no ${chain} address could be derived for this identity`,
         };
       }
       const started = Date.now();
       try {
         const { response } = await client.fundWallet(faucetUrl, address, chain, {
-          timeout: timeoutFor(chain),
+          timeout: timeoutFor(),
           ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
         });
         return {

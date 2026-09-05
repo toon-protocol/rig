@@ -44,6 +44,7 @@ import {
 } from './identity.js';
 import type { CliIo } from './output.js';
 import { renderIdentityLine } from './render.js';
+import { deriveNostrKeyFromMnemonic } from '../standalone/nostr-identity.js';
 
 // ---------------------------------------------------------------------------
 // Deps + client-key seam
@@ -64,7 +65,10 @@ export interface IdentityKeyOps {
 
 /** Default key-ops loader: the real client, dynamically imported (see below). */
 async function loadKeyOps(): Promise<IdentityKeyOps> {
-  return (await import('@toon-protocol/client')) as unknown as IdentityKeyOps;
+  const { generateKeystore, importKeystore } = await import(
+    '@toon-protocol/client'
+  );
+  return { generateKeystore, importKeystore, deriveNostrKeyFromMnemonic };
 }
 
 /** Deps `rig identity` needs; the seams default to the real implementations. */

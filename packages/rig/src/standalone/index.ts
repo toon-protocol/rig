@@ -1,21 +1,32 @@
 /**
- * `@toon-protocol/rig/standalone` — the standalone embedded Publisher (#228).
+ * `@toon-protocol/rig/standalone` — the embedded Publisher that pays a TOON
+ * connector (`@toon-protocol/client` 2.x).
  *
  * Separate subpath entry so the core package stays light at import time:
- * only this entry needs `@toon-protocol/client` (a regular runtime
- * dependency since #259; the daemon-backed Publisher in
- * `@toon-protocol/client-mcp` (#227) needs none of this).
+ * only this entry needs `@toon-protocol/client`.
  */
 
 export {
-  StandalonePublisher,
-  StandalonePublishError,
-  deriveRouteDestinations,
+  ConnectorPublisher,
+  ConnectorPublishError,
   extractArweaveTxId,
-  type SignedNostrEvent,
-  type StandalonePublisherOptions,
-  type ToonClientLike,
-} from './standalone-publisher.js';
+  type ConnectorPublisherOptions,
+  type PaidClientLike,
+  type PaidFulfilled,
+  type PaidLeg,
+  type PaidRefused,
+  type PaidRequest,
+  type PaidSendOptions,
+  type PaidSendResult,
+  type RouteTerms,
+} from './connector-publisher.js';
+
+export {
+  deriveNostrKeyFromMnemonic,
+  nostrDerivationPath,
+  MAX_ACCOUNT_INDEX,
+  type NostrKey,
+} from './nostr-identity.js';
 
 export type {
   ChannelCloseOutcome,
