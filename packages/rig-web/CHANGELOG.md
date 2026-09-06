@@ -1,5 +1,19 @@
 # @toon-protocol/rig
 
+## Unreleased
+
+This package is `private` and listed in `ignore` in `.changeset/config.json`, so
+`changeset version` never bumps it and never writes to this file. Entries below
+this heading are recorded by hand; a changeset file is NOT the way to note a
+rig-web change, because an `ignore`d-only changeset is inert and blocks releases
+of `@toon-protocol/rig` (see the changeset gate in `.github/workflows/ci.yml`).
+
+- Default the ArNS result URL and the pointer-page asset gateway to mainnet
+  ar.io gateways. `ar-io.dev` is ar.io's testnet gateway (its ArNS resolver runs
+  against the Solana devnet contracts), so a mainnet name printed as
+  `https://<name>.ar-io.dev/` was a guaranteed 404. `RIG_ARNS_GATEWAY` still
+  overrides. (Shipped in #104.)
+
 ## 0.2.46
 
 ### Patch Changes
