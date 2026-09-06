@@ -99,10 +99,11 @@ Commands rig owns:
                              (free — chain reads and local state only)
   chain [set <c>|unset]      choose which chain/USDC settles paid writes
                              (evm|sol|mina); free — reads/writes local config
-  entry [apex|sandbox|url]   choose the network entry node (payment ingress +
-                             relay): apex settles evm|sol|mina, sandbox is the
-                             Mina-only multihop demo path; free — writes local
-                             config and clears the cached topology
+  entry <url> | entry clear  choose the connector that prices and settles paid
+                             writes — one URL is the whole configuration, since
+                             its GET /ilp describes it; --relay <wss-url>
+                             records the free-read relay beside it; free —
+                             writes local config
   name buy <name>            ArNS naming (#367): buy points a human name at an
   name set <name> <txId>     Arweave txId, owned + paid by this identity's
   name status <name>         Solana key. buy spends mARIO on Solana via the
