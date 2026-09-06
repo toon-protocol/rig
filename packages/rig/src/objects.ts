@@ -30,10 +30,33 @@ export interface GitObject {
 }
 
 /**
- * Maximum uploadable git object body size: 95KB safety margin under the
- * 100KB free tier (R10-005). Larger objects are a hard error in v1.
+ * The storage upstream's FREE per-item ceiling, in bytes.
+ *
+ * Read live from `https://upload.ardrive.io/`, which publishes it twice and
+ * agreeing (2026-09-06):
+ *
+ *     { "freeUploadLimitBytes": 107520,
+ *       "freeTier": { "maxItemBytes": 107520, ... } }
+ *
+ * The old value was `95 * 1024` (97,280) described as a "95KB safety margin
+ * under the 100KB free tier". The service publishes no 100KB limit — the
+ * figure was never upstream's — so the margin refused ~10 KiB of objects the
+ * upstream would have taken for free (#102).
+ *
+ * This is a PRICING boundary, not a cap. An object at or under it rides the
+ * free tier; a larger one is uploaded and PAID FOR through the store route's
+ * per-KiB schedule (ADR 0065) — `g.toon.relay.store` advertises
+ * `{price: "1001", pricePerKib: "10"}`, and that per-KiB term exists precisely
+ * because size costs the serving node money. Nothing rejects on size.
  */
-export const MAX_OBJECT_SIZE = 95 * 1024;
+export const FREE_TIER_MAX_ITEM_BYTES = 107_520;
+
+/**
+ * @deprecated Renamed to {@link FREE_TIER_MAX_ITEM_BYTES}, and no longer a
+ * maximum: objects above it upload as paid writes rather than erroring. Kept
+ * as an alias so the 4.x export keeps resolving.
+ */
+export const MAX_OBJECT_SIZE = FREE_TIER_MAX_ITEM_BYTES;
 
 /**
  * Git's universal empty-blob SHA-1: the object for a zero-byte file.

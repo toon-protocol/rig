@@ -28,7 +28,12 @@ import { runBalance } from './balance.js';
 import { runChain } from './chain.js';
 import { runChannel } from './channel.js';
 import { runClone } from './clone.js';
-import { runComment, runIssue, runPr, type EventCommandDeps } from './events.js';
+import {
+  runComment,
+  runIssue,
+  runPr,
+  type EventCommandDeps,
+} from './events.js';
 import { runEntry } from './entry.js';
 import { runFetch } from './fetch.js';
 import { runFund } from './fund.js';
@@ -98,7 +103,7 @@ Commands rig owns:
   balance                    wallet balances + payment-channel holdings
                              (free — chain reads and local state only)
   chain [set <c>|unset]      choose which chain/USDC settles paid writes
-                             (evm|sol|mina); free — reads/writes local config
+                             (evm|sol); free — reads/writes local config
   entry <url> | entry clear  choose the connector that prices and settles paid
                              writes — one URL is the whole configuration, since
                              its GET /ilp describes it; --relay <wss-url>
@@ -167,7 +172,11 @@ export interface DispatchDeps extends EventCommandDeps {
  */
 export function rigVersion(): string {
   const require = createRequire(import.meta.url);
-  for (const rel of ['../package.json', '../../package.json', '../../../package.json']) {
+  for (const rel of [
+    '../package.json',
+    '../../package.json',
+    '../../../package.json',
+  ]) {
     try {
       const pkg = require(rel) as { name?: string; version?: string };
       if (pkg.name === '@toon-protocol/rig' && pkg.version) return pkg.version;

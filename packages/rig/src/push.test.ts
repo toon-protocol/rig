@@ -15,7 +15,11 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { EMPTY_BLOB_SHA, hashGitObject, MAX_OBJECT_SIZE } from './objects.js';
+import {
+  EMPTY_BLOB_SHA,
+  FREE_TIER_MAX_ITEM_BYTES,
+  hashGitObject,
+} from './objects.js';
 import type { UnsignedEvent } from './nip34-events.js';
 import {
   type FeeRates,
@@ -26,12 +30,7 @@ import {
 } from './publisher.js';
 import { GitRepoReader } from './repo-reader.js';
 import type { RemoteState } from './remote-state.js';
-import {
-  NonFastForwardError,
-  OversizeObjectsError,
-  executePush,
-  planPush,
-} from './push.js';
+import { NonFastForwardError, executePush, planPush } from './push.js';
 
 // ---------------------------------------------------------------------------
 // Fixture repository
@@ -107,9 +106,12 @@ beforeAll(() => {
   git(['commit', '-m', 'feature'], repoDir);
   featureCommit = git(['rev-parse', 'HEAD'], repoDir);
 
-  // Oversize branch: one blob just over MAX_OBJECT_SIZE, from commit1.
+  // Oversize branch: one blob just over FREE_TIER_MAX_ITEM_BYTES, from commit1.
   git(['checkout', '-b', 'big', commit1], repoDir);
-  writeFileSync(join(repoDir, 'big.bin'), Buffer.alloc(MAX_OBJECT_SIZE + 1, 7));
+  writeFileSync(
+    join(repoDir, 'big.bin'),
+    Buffer.alloc(FREE_TIER_MAX_ITEM_BYTES + 1, 7)
+  );
   git(['add', 'big.bin'], repoDir);
   git(['commit', '-m', 'big blob'], repoDir);
 
@@ -389,29 +391,31 @@ describe('planPush', () => {
     ).rejects.toBeInstanceOf(NonFastForwardError);
   });
 
-  it('oversize object is a hard error carrying path + size', async () => {
+  it('an object above the free tier is planned as a paid upload, not refused', async () => {
+    // #102: this used to throw OversizeObjectsError. The store route prices
+    // per KiB, so size is charged for rather than rejected — the object must
+    // appear in the plan, and its bytes must be counted so the fee table the
+    // user confirms reflects what the oversize blob actually costs.
     const remote = cannedRemote();
-    const promise = planPush({
+    const plan = await planPush({
       repoReader: reader,
       remoteState: remote,
       feeRates: FEE_RATES,
       repoId: REPO_ID,
       refs: ['refs/heads/big'],
     });
-    await expect(promise).rejects.toBeInstanceOf(OversizeObjectsError);
-    try {
-      await promise;
-    } catch (err) {
-      const oversize = err as OversizeObjectsError;
-      expect(oversize.objects).toHaveLength(1);
-      expect(oversize.objects[0]).toMatchObject({
-        type: 'blob',
-        size: MAX_OBJECT_SIZE + 1,
-        path: 'big.bin',
-      });
-      expect(oversize.message).toContain('big.bin');
-      expect(oversize.message).toContain(String(MAX_OBJECT_SIZE + 1));
-    }
+
+    const big = plan.objects.find((o) => o.path === 'big.bin');
+    expect(big).toBeDefined();
+    expect(big).toMatchObject({
+      type: 'blob',
+      size: FREE_TIER_MAX_ITEM_BYTES + 1,
+    });
+    // Its bytes reach the confirm table, so an expensive object is visible
+    // before anything is spent.
+    expect(plan.estimate.totalObjectBytes).toBeGreaterThan(
+      FREE_TIER_MAX_ITEM_BYTES
+    );
   });
 
   it('resolveMissing rescues SHAs the arweave tags do not cover', async () => {

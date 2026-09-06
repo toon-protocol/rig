@@ -7,7 +7,14 @@
  * under an isolated TOON_CLIENT_HOME.
  */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  mkdirSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -54,7 +61,10 @@ describe('rig chain', () => {
     writeFileSync(configPath(), JSON.stringify(o));
   }
   function readConfig(): Record<string, unknown> {
-    return JSON.parse(readFileSync(configPath(), 'utf8')) as Record<string, unknown>;
+    return JSON.parse(readFileSync(configPath(), 'utf8')) as Record<
+      string,
+      unknown
+    >;
   }
 
   // ── show ────────────────────────────────────────────────────────────────
@@ -80,7 +90,11 @@ describe('rig chain', () => {
     const h = makeHarness(env({ TOON_CLIENT_CHAIN: 'evm' }));
     expect(await runChain(['--json'], h.deps)).toBe(0);
     const doc = JSON.parse(h.out.join('\n'));
-    expect(doc).toMatchObject({ command: 'chain', chain: 'evm', source: 'env' });
+    expect(doc).toMatchObject({
+      command: 'chain',
+      chain: 'evm',
+      source: 'env',
+    });
     expect(doc.usdc).toMatch(/EVM USDC/);
   });
 
@@ -93,14 +107,34 @@ describe('rig chain', () => {
     expect(h.out.join('\n')).toMatch(/EVM USDC/);
   });
 
-  it('set sol / mina normalize to canonical families', async () => {
+  it('set sol / eth normalize to canonical families', async () => {
     const h1 = makeHarness(env());
     expect(await runChain(['set', 'sol'], h1.deps)).toBe(0);
     expect(readConfig()['chain']).toBe('solana');
 
     const h2 = makeHarness(env());
-    expect(await runChain(['set', 'mina'], h2.deps)).toBe(0);
-    expect(readConfig()['chain']).toBe('mina');
+    expect(await runChain(['set', 'eth'], h2.deps)).toBe(0);
+    expect(readConfig()['chain']).toBe('evm');
+  });
+
+  // 4.0.0 removed Mina with the client and its changelog says `rig chain set
+  // mina` is refused — but nothing refused it: it returned 0 and pinned a
+  // settlement chain no paid command can use.
+  it('set mina is refused by name, and writes nothing', async () => {
+    const h = makeHarness(env());
+    expect(await runChain(['set', 'mina'], h.deps)).toBe(2);
+    expect(existsSync(configPath())).toBe(false);
+    expect(h.err.join('\n')).toMatch(
+      /Mina settlement was removed in rig 4\.0\.0/
+    );
+    expect(h.err.join('\n')).toMatch(/evm or solana/);
+  });
+
+  it('set on a full mina: chain id is refused the same way', async () => {
+    const h = makeHarness(env());
+    expect(await runChain(['set', 'mina:devnet'], h.deps)).toBe(2);
+    expect(existsSync(configPath())).toBe(false);
+    expect(h.err.join('\n')).toMatch(/Mina settlement was removed/);
   });
 
   it('set accepts a full chain id verbatim', async () => {
@@ -111,14 +145,18 @@ describe('rig chain', () => {
   });
 
   it('set preserves every other config field (read-merge-write)', async () => {
-    writeConfig({ network: 'devnet', relayUrl: 'wss://x', preferredTokens: { a: 'b' } });
+    writeConfig({
+      network: 'devnet',
+      relayUrl: 'wss://x',
+      preferredTokens: { a: 'b' },
+    });
     const h = makeHarness(env());
-    expect(await runChain(['set', 'mina'], h.deps)).toBe(0);
+    expect(await runChain(['set', 'sol'], h.deps)).toBe(0);
     expect(readConfig()).toEqual({
       network: 'devnet',
       relayUrl: 'wss://x',
       preferredTokens: { a: 'b' },
-      chain: 'mina',
+      chain: 'solana',
     });
   });
 
@@ -132,7 +170,7 @@ describe('rig chain', () => {
   it('set warns when supportedChains takes precedence', async () => {
     writeConfig({ supportedChains: ['evm:base:84532', 'solana:devnet'] });
     const h = makeHarness(env());
-    expect(await runChain(['set', 'mina'], h.deps)).toBe(0);
+    expect(await runChain(['set', 'sol'], h.deps)).toBe(0);
     expect(h.err.join('\n')).toMatch(/supportedChains.*precedence/);
   });
 

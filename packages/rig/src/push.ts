@@ -64,7 +64,13 @@ export class NonFastForwardError extends Error {
   }
 }
 
-/** One object exceeding {@link MAX_OBJECT_SIZE}. */
+/**
+ * One object exceeding the old hard upload cap.
+ *
+ * @deprecated Nothing produces this any more (#102). Size is priced, not
+ * refused, so there is no "oversize" class of object to report. Retained so
+ * the 4.x type export keeps resolving.
+ */
 export interface OversizeObject {
   sha: string;
   type: GitObjectType;
@@ -75,8 +81,11 @@ export interface OversizeObject {
 }
 
 /**
- * Thrown by {@link planPush} when any object in the delta exceeds the 95KB
- * upload limit (hard error in v1 — the paid blob path is a follow-up spike).
+ * @deprecated NEVER THROWN as of #102. `planPush` used to reject any object
+ * over a hard 95 KiB cap; the store route prices per KiB, so a large object is
+ * now a more expensive upload rather than a refusal, and there is nothing left
+ * to throw. Retained so the 4.x export keeps resolving — a `catch` for it is
+ * dead code and can be removed.
  */
 export class OversizeObjectsError extends Error {
   constructor(
@@ -334,14 +343,11 @@ export async function planPush(options: PlanPushOptions): Promise<PushPlan> {
     );
   }
 
-  const oversize: OversizeObject[] = [];
-  for (const stat of stats) {
-    if (stat.size > MAX_OBJECT_SIZE) {
-      const path = pathBySha.get(stat.sha);
-      oversize.push({ ...stat, ...(path ? { path } : {}) });
-    }
-  }
-  if (oversize.length > 0) throw new OversizeObjectsError(oversize);
+  // No size gate. An object larger than FREE_TIER_MAX_ITEM_BYTES is not an
+  // error — it is simply a paid upload: the store route prices per KiB
+  // (ADR 0065), so size is charged for rather than refused (#102). The fee
+  // table the caller confirms already reflects the per-KiB cost, so an
+  // expensive object is visible before anything is spent.
 
   // 4. Split off the empty blob, then order the rest ref-tips-last. ----------
   // The git empty blob uploads as an empty kind:5094 `i` value, which the

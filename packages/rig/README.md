@@ -488,8 +488,10 @@ non-fast-forward updates; `--repo-id <id>` overrides the configured repo id.
 
 Repo addressing (`30617:<owner>:<repoId>`) comes from the `toon.repoid` / `toon.owner`
 git config keys `rig init` writes — an unconfigured repo is a clear "run `rig init`"
-error, and pushing never mutates git config. Objects over 95KB are a hard error in
-v1 (large-object support: toon-client#235).
+error, and pushing never mutates git config. Objects over the storage upstream's
+free per-item ceiling (107,520 bytes) are **not** an error — they upload as paid
+writes, priced by the store route's per-KiB schedule, and the confirm table shows
+the cost before anything is spent.
 
 ## Relays are origins
 
@@ -550,7 +552,8 @@ it — that stays behind the `Publisher` seam:
 
 - `objects.ts` — git object construction with SHA-1 envelope hashing: `createGitBlob`,
   `createGitTree`, `createGitCommit`, `createGitTag`, `hashGitObject`, and the
-  `MAX_OBJECT_SIZE` (95KB) upload guard.
+  `FREE_TIER_MAX_ITEM_BYTES` (107,520) free-tier threshold (`MAX_OBJECT_SIZE` is
+  a deprecated alias; it is no longer a cap).
 - `nip34-events.ts` — NIP-34 event builders returning `UnsignedEvent`:
   `buildRepoAnnouncement` (30617), `buildRepoRefs` (30618), `buildIssue` (1621),
   `buildComment` (1622), `buildPatch` (1617), `buildStatus` (1630–1633).
