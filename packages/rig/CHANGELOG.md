@@ -1,5 +1,51 @@
 # @toon-protocol/rig
 
+## 4.1.0
+
+### Minor Changes
+
+- 585762f: Add a payout pointer tag to kind:30617 and `rig payout set|clear|show` (rig#92, payout epic toon-protocol/toon-meta#391 R1).
+
+  The payout pointer is the identity half of the payout epic: no pointer on a
+  repo's announcement means a serving node keeps 100% of repo-scoped write
+  fees; a declared `["payout", "evm", <address>]` tag opts the repo into that
+  node's declared `ownerFeeShare` split (decided off-hot-path, downstream in
+  connector#968/#969). v1 accepts exactly one chain, `evm` — the payout
+  accrual ledger is EVM-only today
+  (`crates/connector-client-edge/src/btp.rs:270-272`) — but the tag shape
+  carries the chain label so nothing re-shapes later.
+
+  - `nip34-events.ts`: `buildRepoAnnouncement` gains an optional `payout`
+    parameter; `parsePayout` reads it back (EIP-55 checksum-validated,
+    normalized to checksummed form, tolerant of relay noise — an unsupported
+    chain or malformed/extra tag is dropped with a `console.warn`, first
+    valid tag wins). `RemoteState.payout` surfaces it from `fetchRemoteState`.
+  - New `rig payout set <address>|clear|show`, mirroring `rig maintainers`
+    exactly: `show` is a free relay read; `set`/`clear` republish the 30617
+    (one paid event), preserving name/description/maintainers byte-for-byte,
+    owner-identity-only, and refuse on an unannounced repo. A malformed
+    address (bad shape or bad EIP-55 checksum) is refused client-side before
+    any relay/identity work — no event is ever published.
+  - `rig maintainers add/remove` now also preserves an existing payout
+    pointer across its own republish (previously would have silently wiped
+    it, since it built the 30617 without carrying `remote.payout` through).
+
+### Patch Changes
+
+- c6058c9: Correct two pieces of shipped documentation that 4.0.0 left behind
+
+  - `rig --help` still advertised `entry [apex|sandbox|url]`, describing the
+    `apex` and `sandbox` presets and the topology cache that #116 removed.
+    `rig entry apex` has exited non-zero with `unknown entry "apex" — expected a
+connector http(s):// URL or 'clear'` since 4.0.0, so the primary help screen
+    documented a path that cannot work. It now describes the real shape:
+    `rig entry <connector-url>` / `rig entry clear`, plus `--relay <wss-url>`.
+  - The devnet faucet table listed `POST /api/solana/request` ("2 SOL + 1000
+    USDC"). That route is gone — it answers **404**, while the two routes above
+    it answer 400 on a bad address, i.e. they still exist. `rig fund` only ever
+    called the two USDC-only routes, so this was a stale row rather than a
+    broken code path. Removed.
+
 ## 4.0.0
 
 ### Major Changes
