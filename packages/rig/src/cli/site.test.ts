@@ -245,7 +245,7 @@ describe('site publish — execute', () => {
     expect(doc).toMatchObject({
       command: 'site publish',
       executed: true,
-      manifest: { txId: MANIFEST_TX, url: `https://ar-io.dev/${MANIFEST_TX}/` },
+      manifest: { txId: MANIFEST_TX, url: `https://arweave.net/${MANIFEST_TX}/` },
     });
     expect(doc.nameHint).toContain(`rig name set <name> ${MANIFEST_TX}`);
     expect(h.uploadBlobBodies).toHaveLength(1);
@@ -397,7 +397,7 @@ describe('site url (free lookup)', () => {
       command: 'site url',
       found: true,
       manifestTxId: MANIFEST_TX,
-      url: `https://ar-io.dev/${MANIFEST_TX}/`,
+      url: `https://arweave.net/${MANIFEST_TX}/`,
     });
   });
 
@@ -406,7 +406,7 @@ describe('site url (free lookup)', () => {
     await runSite(['publish', '--relay', RELAY, '--yes'], pub.deps);
     const hit = makeDeps(env, repoDir, fullMap);
     await runSite(['url'], hit.deps);
-    expect(hit.out).toEqual([`https://ar-io.dev/${MANIFEST_TX}/`]);
+    expect(hit.out).toEqual([`https://arweave.net/${MANIFEST_TX}/`]);
   });
 });
 

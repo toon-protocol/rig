@@ -179,17 +179,8 @@ async function resolveProfileRelay(
     ...toonRelays,
   ].filter((u): u is string => u !== undefined && isWebSocketRelay(u));
   if (candidates[0] !== undefined) return candidates[0];
-  // Offline fallback: the committed genesis apex relay (core >= 2.0.1). Loaded
-  // lazily so a repo that already has a relay never drags core into init.
-  try {
-    const { loadGenesisSeed } = await import(
-      '../standalone/network-bootstrap.js'
-    );
-    const seed = loadGenesisSeed();
-    if (seed?.relayUrl && isWebSocketRelay(seed.relayUrl)) return seed.relayUrl;
-  } catch {
-    // Seed unavailable → no relay; author falls back to the npub.
-  }
+  // No relay anywhere: the author falls back to the npub. (There is no
+  // built-in network seed since 4.0 — a node is named, never discovered.)
   return undefined;
 }
 

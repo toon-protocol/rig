@@ -84,6 +84,49 @@ export interface PublishReceipt {
 }
 
 /**
+ * One NIP-90 job for a store node's DVM, carried on the PAID path (#101).
+ *
+ * The store sits behind the connector's payment termination, so there is no
+ * public HTTP endpoint to POST these to — a reachable one would be an
+ * anonymous free gateway to a paid handler, which is the failure ADR 0020
+ * exists to close. The job therefore travels exactly as a kind:5094 store
+ * write does: inside a paid ILP packet, with `/store` as the envelope target
+ * BENEATH the route's handler path rather than as a URL path.
+ */
+export interface StoreJobRequest {
+  /** NIP-90 job kind — 5095 brokered ArNS buy, 5096 gas station. */
+  kind: number;
+  /** Job arguments, sent as `["param", key, value]` tags. */
+  params: [string, string][];
+}
+
+/**
+ * A store DVM's answer, opened from the sealed FULFILL.
+ *
+ * ⚠️ A refusal is a RESULT, not an error. Under ADR 0020 an HTTP status is
+ * envelope content and never a packet outcome, so `accept: false` arrives on a
+ * FULFILL and the payer was charged for it either way. Implementations must
+ * return it rather than throw: the zero-ARIO rehearsal (submit a buy with no
+ * `processId` and watch the handler refuse by name before it quotes or touches
+ * the registry) is the cheapest proof the whole paid path works, and it only
+ * works if the refusal comes back as data.
+ */
+export interface StoreJobResponse {
+  /** HTTP status the app answered with, inside the envelope. */
+  status: number;
+  /** The DVM's own accept flag. `false` is a refusal, not a transport fault. */
+  accept: boolean;
+  /** Machine-readable refusal reason, when the DVM sent one. */
+  code?: string;
+  /** Human-readable detail, when the DVM sent one. */
+  message?: string;
+  /** The job's output, shape depending on `kind`. */
+  result?: Record<string, unknown>;
+  /** Fee paid to carry this job, in the smallest asset unit. */
+  feePaid: bigint;
+}
+
+/**
  * Fee rates used by `planPush` for the pre-push estimate.
  *
  * Both figures are FLAT per packet. ADR 0020 (toon-client#452) removed
@@ -102,6 +145,12 @@ export interface FeeRates {
    * price, so an estimate built from it is exactly what a push pays.
    */
   uploadFee: bigint;
+  /**
+   * The store route's per-kibibyte rate, when it meters by size (ADR 0065: a
+   * price is a schedule `{base, per_kib}`; a flat route has no slope). Absent
+   * or zero means every upload costs exactly `uploadFee`.
+   */
+  uploadPerKib?: bigint;
   /**
    * Flat cost per published event (smallest asset unit). Implementations
    * already fold any per-packet route-price floor into this flat value, so
@@ -132,6 +181,16 @@ export interface Publisher {
    */
   uploadBlob?(upload: BlobUpload): Promise<UploadReceipt>;
   /**
+   * Submit one NIP-90 job to the store node's DVM over the paid path and
+   * return its answer; paid. Used by `rig name buy/set --via` (#101) for the
+   * brokered kind:5095 buy and the kind:5096 gas station.
+   *
+   * Optional for the same reason as {@link uploadBlob}: transports that only
+   * move git objects (and pre-#101 test fakes) need not implement it, and
+   * `rig name --via` errors clearly when it is absent.
+   */
+  submitStoreJob?(request: StoreJobRequest): Promise<StoreJobResponse>;
+  /**
    * Sign (implementation-held key) and pay-to-publish one event to the
    * given relay(s).
    */
@@ -139,4 +198,38 @@ export interface Publisher {
     event: UnsignedEvent,
     relayUrls: string[]
   ): Promise<PublishReceipt>;
+}
+
+// ---------------------------------------------------------------------------
+// Per-upload charge on a metered route
+// ---------------------------------------------------------------------------
+
+/**
+ * Bytes the connector meters that are not the caller's object: the kind:5094
+ * event around it (id, pubkey, sig, kind, created_at, tag names), the `{event}`
+ * body wrapper, the request envelope and the gift wrap. Measured against the
+ * live edge and rounded up; a KiB boundary crossed by this margin costs one
+ * `uploadPerKib` more than the store will actually charge, never less.
+ */
+export const UPLOAD_ENVELOPE_OVERHEAD_BYTES = 704;
+
+/**
+ * The bytes a connector meters for an upload of `bodyBytes`: the object is
+ * base64 in an `i` tag (4/3 expansion), plus {@link UPLOAD_ENVELOPE_OVERHEAD_BYTES}.
+ */
+export function estimateSealedUploadBytes(bodyBytes: number): number {
+  return Math.ceil(bodyBytes / 3) * 4 + UPLOAD_ENVELOPE_OVERHEAD_BYTES;
+}
+
+/**
+ * What one upload of `bodyBytes` costs under `rates`: the flat `uploadFee`,
+ * plus — on a metered route — `uploadPerKib` per started kibibyte of the
+ * sealed payload, counted from one (the connector's own rule:
+ * `price + pricePerKib × (⌊bytes / 1024⌋ + 1)`).
+ */
+export function uploadChargeFor(rates: FeeRates, bodyBytes: number): bigint {
+  const perKib = rates.uploadPerKib ?? 0n;
+  if (perKib === 0n) return rates.uploadFee;
+  const sealed = estimateSealedUploadBytes(bodyBytes);
+  return rates.uploadFee + perKib * BigInt(Math.floor(sealed / 1024) + 1);
 }

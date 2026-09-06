@@ -37,6 +37,7 @@
  * earlier (usage errors, missing git repo, …).
  */
 
+import { deriveNostrKeyFromMnemonic } from '../standalone/nostr-identity.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -347,7 +348,8 @@ async function loadClientKeys(): Promise<{
     accountIndex?: number
   ): { secretKey: Uint8Array; pubkey: string };
 }> {
-  return await import('@toon-protocol/client');
+  const { loadKeystore } = await import('@toon-protocol/client');
+  return { loadKeystore, deriveNostrKeyFromMnemonic };
 }
 
 /**

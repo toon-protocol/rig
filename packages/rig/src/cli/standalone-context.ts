@@ -59,6 +59,18 @@ export interface StandaloneLoadOptions {
    */
   channelDestination?: string;
   /**
+   * Store-route override (`rig name --via`, #101): the ILP destination of the
+   * store node whose DVM should handle this command's kind:5095/5096 job,
+   * instead of the configured/announced store route.
+   *
+   * Highest precedence, above `TOON_CLIENT_STORE_DESTINATION` and the config
+   * file, because it is a per-invocation choice rather than a setting. Setting
+   * it is all a caller needs to do: the store node's BTP ingress, its route
+   * price and its own payment channel are then discovered from that node's own
+   * kind:10032 announce by the machinery `rig push` already uses (#98).
+   */
+  storeDestination?: string;
+  /**
    * When false, a missing proxy/BTP write uplink is tolerated: free reads
    * (`rig balance`) never send paid writes, so they work from a read-only
    * config. Default true (paid commands fail fast with MissingUplinkError).

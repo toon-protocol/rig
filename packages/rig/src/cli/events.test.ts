@@ -984,7 +984,7 @@ describe('daemon delegation (#279)', () => {
 
   beforeEach(async () => {
     const { deriveNostrKeyFromMnemonic } =
-      await import('@toon-protocol/client');
+      await import('../standalone/nostr-identity.js');
     SELF = deriveNostrKeyFromMnemonic(TEST_MNEMONIC, 0).pubkey;
   });
 

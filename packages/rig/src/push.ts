@@ -30,6 +30,7 @@ import {
   type GitObjectType,
 } from './objects.js';
 import {
+  uploadChargeFor,
   type FeeRates,
   type PublishReceipt,
   type Publisher,
@@ -386,14 +387,18 @@ export async function planPush(options: PlanPushOptions): Promise<PushPlan> {
   }
 
   // 6. Fee estimate. ---------------------------------------------------------
-  // A price is FLAT per packet (ADR 0020), so an upload costs the store
-  // route's price whatever its size: one price × one packet per object, the
-  // exact same figure the publisher claims per packet, so the confirm table
-  // always equals what is paid. `totalObjectBytes` is still reported — it is
-  // what a user wants to see about a push — but it no longer prices it.
+  // A price is a schedule per route (ADR 0065): a flat base per packet, plus
+  // an optional per-KiB slope a metered store route publishes. `uploadChargeFor`
+  // is the one rule for both, so the confirm table equals what is paid.
   const announceNeeded = !remoteState.announced;
   const totalObjectBytes = objects.reduce((sum, o) => sum + o.size, 0);
-  const uploadFee = BigInt(objects.length) * feeRates.uploadFee;
+  // Per object: the store route's base price plus, on a metered route (ADR
+  // 0065 schedule), its per-KiB rate over the sealed payload — the same rule
+  // the client applies to the claim, so the table still equals what is paid.
+  const uploadFee = objects.reduce(
+    (sum, o) => sum + uploadChargeFor(feeRates, o.size),
+    0n
+  );
   const eventCount = 1 + (announceNeeded ? 1 : 0);
   const eventFees = BigInt(eventCount) * feeRates.eventFee;
 

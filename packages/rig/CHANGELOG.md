@@ -1,5 +1,295 @@
 # @toon-protocol/rig
 
+## 4.0.0
+
+### Major Changes
+
+- 3810045: **rig pays a connector, not a network.** The paid write path now runs on `@toon-protocol/client` 2.x.
+
+  One URL is the whole network configuration. A TOON connector describes itself on `GET /ilp` (its ILP addresses, the routes it prices, the chains it settles on, the key a payload is sealed to — connector ADR 0050), and the client reads that once. There is nothing to discover and nothing to negotiate: kind:10032 announces were removed by connector ADR 0046, so the relay-based peer discovery, the topology cache, the chain-negotiation and genesis-seed fallbacks that rig 3.x bootstrapped from are gone with them. `rig push` against a current connector could not find its ingress, its price or its channel at all; now it reads all three off the node.
+
+  - **Configure with `rig entry <connector-url>`** (or `TOON_CONNECTOR`). `--relay <wss-url>` records the node's free-read relay beside it. `rig entry clear` forgets both. The pre-4.0 `proxyUrl` / `TOON_CLIENT_PROXY_URL` are still read with a warning; `btpUrl` is ignored (the BTP endpoint comes from `GET /ilp`); `apex` / `sandbox` and the genesis seed are gone.
+  - **Destinations default from the node.** Events go to the first address the node publishes for itself that it also prices; objects go to its first priced `*.store` route, else `*.ario`. `publishDestination` / `storeDestination` (and the `TOON_CLIENT_*_DESTINATION` env vars) still pin them; `rig name --via` still overrides the store per invocation. `storeConnectorUrl` names a store that terminates on another node holding its own channel; `storeSealTo` seals to it over the same channel.
+  - **Metered routes are priced honestly.** An ADR 0065 schedule `{base, per_kib}` is read from the node and applied per object over the sealed payload, so the confirm table equals the claim. `FeeRates` gains an optional `uploadPerKib`, and `uploadChargeFor(rates, bytes)` is the one rule `push`, `site` and the rig-page pointer share.
+  - **Who pays and who signs are independent.** The author is still the phrase's Nostr key at `m/44'/1237'/0'/0/i` (derived here now, not by the client; `@toon-protocol/rig/standalone` exports `deriveNostrKeyFromMnemonic`). The phrase's EVM account is read under the client's `keyDerivation: 'legacy'` by default, so every channel an existing identity funded is still its own. `solanaKeyFile` / `RIG_SOLANA_KEY_FILE` and `evmPrivateKey` / `RIG_EVM_PRIVATE_KEY` pay with a different key.
+  - **Settlement is EVM and Solana.** Mina is gone with the client: `rig channel deploy-zkapp` is removed, `rig fund` drips two chains, `rig chain set mina` is refused.
+  - **Removed:** `StandalonePublisher` (replaced by `ConnectorPublisher` on the `./standalone` subpath), the factory-job delivery/payment modules that rode the 0.x client's serve-side job handling (`ClientJobDeliveryPort`, `payIncrementOffer`, `decryptIncrementArtifact`; the pure protocol pieces — plan, gate, events, execute — stay), and the `factory-job-proof` script.
+
+  The published package installed a client from before the 2.0 break (`@toon-protocol/client@^0.29.8`, which could never widen); it now depends on `^2.1.1`.
+
+### Patch Changes
+
+- 192f086: `rig name buy/set --via` travel the paid ILP path instead of a bare fetch
+
+  `--via` used to do a raw `fetch(${viaUrl}/store)`. No connector serves
+  `/store`, so the brokered ArNS path could not work against any node:
+
+  | endpoint                                            | `/store` | `/ilp` |
+  | --------------------------------------------------- | -------- | ------ |
+  | `dvm.devnet.toonprotocol.dev` (the shipped default) | 404      | —      |
+  | a third-party node's client edge                    | 404      | 400    |
+  | `proxy.ario.devnet.toonprotocol.dev`                | 404      | 400    |
+
+  The endpoint is absent by design, not by oversight. The store sits behind the
+  connector's payment termination, so a publicly reachable `POST /store` is an
+  unpaid path to a paid handler — the free-gateway failure ADR 0020 names, and
+  the exact door the devnet store box closed on 2026-08-05 (it let anyone spend
+  that box's funded Arweave wallet for free). The default `dvm.` hostname is a
+  second dead end on top of that: it maps to the store's BLS **health** server,
+  whose app registers exactly one route, `GET /health`.
+
+  So `--via` changes meaning: it now names an **ILP destination**, and the job
+  rides a paid packet with `/store` as the envelope target beneath the route's
+  handler path — the same transport `rig push` already uses for kind:5094
+  git-object writes. The kind:5095/5096 `param` tags are unchanged, so the
+  handler sees the identical event either way.
+
+  - `Publisher` gains an optional `submitStoreJob`, following `uploadBlob`'s
+    optional-method pattern. A DVM refusal comes back as **data rather than an
+    exception**: under ADR 0020 `accept: false` arrives on a FULFILL and the
+    payer was charged either way, and the zero-ARIO rehearsal (submit a buy with
+    no `processId`, watch the handler refuse by name before it quotes or touches
+    the registry) is the cheapest proof the whole paid path works.
+  - `StandalonePublisher.submitStoreJob` mirrors `uploadGitObject`: the store
+    leg's own channel, one claim at the store route's flat price, a `bid` tag
+    carrying that same figure, `proxyPath: '/store'`.
+  - `StandaloneLoadOptions` gains `storeDestination`, at highest precedence over
+    `TOON_CLIENT_STORE_DESTINATION` and the config file, since it is a
+    per-invocation choice rather than a setting.
+  - The devnet default is repointed from the unreachable
+    `https://dvm.devnet.toonprotocol.dev` to the ILP destination `g.toon.ario`,
+    which is the path that is actually paid and actually works.
+  - The override is weighed in `createStandaloneContext`'s announce-discovery
+    gate too. Without that, a config pinning store == publish reads as fully
+    explicit, discovery is skipped, and the announce of the node `--via` actually
+    names — the only thing carrying its uplink, price and channel — is never
+    fetched. A pinned `storeBtpUrl` likewise vouches for nothing once `--via`
+    names a different node.
+  - A URL in `--via` is **rejected** with the destination form in the error,
+    rather than failing later as an unroutable address. A URL means the caller
+    still expects the old direct-POST path.
+  - `RIG_ARNS_DVM_DESTINATION` is the env spelling; `RIG_ARNS_DVM_URL` is still
+    read so an existing environment keeps working, and `DEVNET_DVM_URL` stays
+    exported as a deprecated alias of `DEVNET_DVM_DESTINATION`.
+
+- 3b8cffa: Re-check the counterparty before resuming a cached payment channel
+
+  `rig-channels.json` keys a resumed channel by
+  `identity|destination|chain|tokenNetwork` — a ROUTE, with no counterparty in
+  it. When the node terminating an ILP name is replaced (the devnet apex
+  `g.toon` was retired and another node took over `g.toon.relay`), all four key
+  fields still matched, so rig resumed a channel opened against the retired node
+  and signed balance proofs against it. The new connector holds no record of
+  that channel and refuses every packet:
+
+  ```
+  F01 - claim rejected: names a channel this connector has no record of,
+  so there is no counterparty to verify its signature against
+  ```
+
+  Every paid write failed until the cache entry was deleted by hand.
+
+  A record already stores the counterparty it was opened against
+  (`context.recipient`); it is now re-checked against the settlement address the
+  destination announces TODAY before the channel is resumed. On a mismatch the
+  record is superseded and the channel re-resolved — which binds the channel
+  this identity already holds with the new counterparty where one exists, rather
+  than opening (and funding) a fresh one. EVM addresses compare
+  case-insensitively; Solana/Mina addresses compare verbatim.
+
+  A superseded record is MOVED to an archive key rather than deleted: it may
+  still hold an on-chain deposit, and `rig channel list/close/settle` find
+  channels by scanning the map, so deleting it would strand those funds behind
+  hand-editing the JSON. It is never a resume candidate again.
+
+  Records written by older versions carry no `context.recipient`. They are
+  treated as unverified rather than stale: the resume proceeds (no fresh
+  on-chain open, nothing for the user to fix) and the record is back-filled from
+  the announce, so the next run can verify it.
+
+## 3.6.0
+
+### Minor Changes
+
+- ad04b4c: Print a trusted operator notice once per `id` on any bootstrapping command.
+
+  `IlpPeerInfo.notice` (toon-protocol/toon#183) is a kind:10032 announce's one
+  delivery channel to a human running rig. `createStandaloneContext` — the
+  single chokepoint every standalone/paid command bootstraps through — now
+  shows the notice from the payment peer it picks, but only when that peer is
+  authored by a committed genesis-seed pubkey (`genesisSeedPubkeys()`); an
+  untrusted announcer's notice, and its operator-controlled `url`, is never
+  shown or fetched. `action-required` renders as a bordered block distinct
+  from a plain `info` line. Seen ids persist under `TOON_CLIENT_HOME`
+  (`rig-seen-notices.json`, sibling to the channel map and topology cache) so
+  the same id never reprints across process runs; a corrupt or unreadable
+  store degrades to showing the notice again, never to a crash or permanent
+  suppression. No new round trip — this reuses the announce discovery every
+  bootstrapping command already performs.
+
+  Blocked on an external publish, not on this change: `IlpPeerInfo.notice`
+  exists on `@toon-protocol/core`'s `main` (toon#183) but no published core
+  version carries it yet (toon#184 landed the release changeset, not the
+  `npm publish`; registry `latest` was still 3.3.0 as of 2026-08-12).
+  `AnnouncedPeer.info.notice` is widened as `unknown` and validated by rig
+  itself for exactly this reason — today it is always `undefined` regardless
+  of what a live announce carries. Turning it on after core publishes takes a
+  dependency bump (`pnpm update @toon-protocol/core` — the `^3.2.0` range
+  already accepts a 3.4.x, but the lockfile pins 3.2.0) and no rig changes.
+
+### Patch Changes
+
+- ff6335a: Fix `ClientJobDeliveryPort` releasing a factory-job increment's decryption
+  key for any PREPARE carrying the armed condition, regardless of amount.
+
+  The condition is public (it is published on the kind:7000 offer), so any
+  buyer could send a PREPARE for amount 0 with the advertised condition and
+  collect the key for free. `handleJob` now rejects a PREPARE whose `amount`
+  is below the armed increment's `priceUsdc` without consuming the arming, so
+  a correctly-priced PREPARE can still land before the payment timeout.
+
+- 3c01f9e: Fix two defects found by a live devnet run: every paid write 401'd, and each
+  run risked leaking a fresh on-chain payment channel.
+
+  **Paid writes could never reach BTP.** With no explicit entry, topology
+  resolution placed the official proxy (ILP-over-HTTP) and nothing else, so the
+  embedded client built no BTP session at all. The client's default transport
+  precedence is HTTP-first, so every claim-bearing write went out as a
+  `POST /ilp` one-shot carrying only an unauthenticated `ILP-Peer-Id` header —
+  which the live edge answers `401 Unauthorized: identity 'g.toon.client'
+failed to authenticate`, failing `rig push --yes` before any object uploaded.
+  Resolution now ALSO adopts the payment peer's announced `btpEndpoint`
+  whenever no uplink was pinned explicitly, and the embedded client is built
+  with `preferBtpForPaidWrites` (toon-client#482) so claims ride the BTP
+  session, which authenticates on connect. The proxy stays in place as the HTTP
+  leg the x402 greeting bootstrap (connector #617) needs, and as the BTP
+  transport's own fallback; an explicitly pinned `proxyUrl`/`btpUrl` is never
+  overridden. Reads, fee estimates and the channel open are unchanged.
+
+  **Both official default endpoints move off the retired apex.** The two-box
+  cutover destroyed `proxy.devnet.toonprotocol.dev`; it still resolves but
+  refuses connections, and rig's defaults both pointed at it:
+
+  - `OFFICIAL_PROXY_URL` was `https://proxy.devnet.toonprotocol.dev/rust/ilp`
+    and is now `https://proxy.relay.devnet.toonprotocol.dev/ilp` — exactly what
+    the relay's own live kind:10032 announce advertises as its `httpEndpoint`.
+    The PATH moved too: `/rust/ilp` was a legacy path from when the Rust and TS
+    fleets ran side by side, and the live edge answers `410 Gone` on it while
+    serving the ingress at plain `/ilp`. This one is load-bearing beyond paid
+    writes — it is the endpoint the x402 greeting bootstrap dials, so a dead
+    value fails a FRESH channel open even when claims ride BTP.
+  - `OFFICIAL_BTP_URL` is new: `wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp`,
+    the fallback when discovery names no BTP endpoint. Deliberately NOT
+    `@toon-protocol/core`'s genesis seed, which still names the retired apex —
+    and because the embedded client dials BTP during `start()`, adopting a dead
+    endpoint would turn a late 401 into rig refusing to run at all.
+
+  Both now sit on the relay box, which is the one that terminates
+  `OFFICIAL_PUBLISH_DESTINATION` (`g.toon.relay`). After this change no rig
+  default references the retired apex anywhere — a property the tests pin
+  directly, so the next topology move fails loudly rather than silently.
+
+  Because a derived endpoint is only a discovery guess, an unreachable one now
+  DEGRADES instead of failing the run: a bootstrap failure classified as a BTP
+  socket/auth error (`isBtpTransportError`) on a derived endpoint rebuilds the
+  publisher without the BTP leg and retries once over HTTP. An explicitly
+  pinned `btpUrl` is never dropped — that is an operator's choice, and quietly
+  abandoning it would hide a real misconfiguration. This shares the existing
+  #279 cached-topology retry seam, now a bounded ordered chain of single-use
+  recoveries (`bootstrapRecoveries`); bootstrap failures are pre-payment by
+  construction, so no retry can double-pay.
+
+  Note the client's own `requiredTransport` guard (toon-client#558) does not
+  cover this case: not one live kind:10032 announce carries that field, so the
+  guard never fires against the current fleet. `@toon-protocol/client` is bumped
+  to `^0.29.7` for the #558/#563 guards regardless — they are the second line of
+  defence once an announce does declare it, and #563's 402-driven retry needs a
+  `btpUrl` to retry ONTO, which is exactly what this change supplies.
+
+  A further bump will be wanted once a client carrying toon-client#569
+  (`Http401RequiresBtpError` — a 401→BTP retry, the exact failure seen here) and
+  #571 (stop sending the unbacked `ILP-Peer-Id`, so the 401 never happens) is
+  published; neither is on npm yet, and neither is needed for this fix to work.
+  When they ship, rig could drop `preferBtpForPaidWrites` back to an opt-in and
+  let HTTP-first stand, since the 401 would either not occur or self-recover.
+
+  **Leaked on-chain payment channels.** `ChannelManager.peerChannels` is keyed
+  by the composite binding key `<peerId>|<chain>|<tokenNetwork>`
+  (toon-client#489), not the bare peer id. Rig read that key back as if it WERE
+  a peer id, so `peerNegotiations.get(...)` missed and a freshly opened channel
+  was never recorded — rig warned `opened channel 0x… but could not record the
+peer→channel mapping` and the next invocation had nothing to resume. It also
+  seeded resumed channels under the bare peer id, a key `ensureChannel` never
+  looks up. Both sides now spell the binding key the way the client does (with
+  pre-#489 bare keys still read correctly), so one channel serves every
+  invocation. On a devnet where gas is the scarce resource, each duplicate open
+  was a real cost. The unit mocks keyed `peerChannels` by the bare peer id too,
+  which is why the suite stayed green through the regression; they now mirror
+  the client's real key.
+
+  The topology cache key gains a schema tag, so entries written before this
+  change cannot shadow the new resolution for a TTL after upgrading.
+
+- b674608: Print every Arweave gateway from the shared list, and take the default from it
+
+  The Rig-page link is the one URL a user clicks after a push, and it was
+  hardcoded to `ar-io.dev` with a single printed alternate. A gateway can be
+  flat DOWN rather than merely behind: observed 2026-08-15, `ar-io.dev`
+  answered `503` on its own root while a freshly pushed page was `404` on
+  `arweave.net` (not yet indexed) and `200` on `permagate.io` — so the single
+  alternate was also dead and the reader was left with no working link and the
+  impression the push had failed.
+
+  `rig push` now prints every gateway in `ARWEAVE_GATEWAYS` from the shared
+  `@toon-protocol/arweave` package, and both `rig push` and `rig site` take
+  their default primary from the head of that list instead of repeating a
+  literal, so the one list stays the single source of truth. The wording no
+  longer blames indexing speed alone — it says a gateway can be down, because
+  that is the case that sends someone hunting a publish bug that isn't there.
+
+  `RIG_ARWEAVE_GATEWAY` / `--gateway` still override, and an overridden primary
+  is never repeated among its own alternates.
+
+- b674608: Require `@toon-protocol/client` >= 0.29.8
+
+  The store leg cannot open a channel against the store node's own settlement
+  address without the per-destination counterparty resolution that shipped in
+  client 0.29.8 (toon-client#571). On 0.29.7 `openChannel` still falls back to
+  the first negotiated peer, so the store connector refuses every git-object
+  upload with `F01 - claim rejected: names a channel this connector has no
+record of`. Verified directly: the same rig build fails on 0.29.7 and
+  succeeds on 0.29.8. The floor is raised rather than left at `^0.29.7`,
+  because this is a hard requirement, not a preference.
+
+- b674608: Pay store writes on the store node's own channel
+
+  On a fleet where the store route terminates on a different node than
+  publishes, `rig push` signed the git-object claim on the PUBLISH channel and
+  sent it to the store node, which refuses it outright — `F01 - claim rejected:
+names a channel this connector has no record of`. There is no transit to lean
+  on either: the publish node's only route is its own publish prefix, so the
+  store has to be reached directly.
+
+  The store leg now gets its own uplink, resolved from the store node's own
+  kind:10032 announce (each node publishes only its own BTP ingress), its own
+  payment channel against that node's settlement address, and its own watermark
+  file — two live clients pointed at one channel store clobber each other's
+  watermarks. It is built lazily on the first store write, so a publish-only run
+  opens no second on-chain channel.
+
+  Two supporting fixes fell out of it:
+
+  - Route prices are now read from `routePrices`, the shape the live connector
+    actually publishes, in addition to the older `capabilities` array — and from
+    the announce of whichever node terminates the address, since each node
+    prices its own routes. Without this the upload fee floored at 0 and the
+    store answered `F03 - claim rejected: advances value by 0, less than this
+route's price`.
+  - A config pinning a store route on a different node is no longer treated as
+    "fully explicit" unless it also pins that node's uplink (`storeBtpUrl` /
+    `TOON_CLIENT_STORE_BTP_URL`). It previously skipped discovery entirely and
+    so never learned the store endpoint.
+
 ## 3.5.3
 
 ### Patch Changes

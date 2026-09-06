@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { deriveNostrKeyFromMnemonic } from '@toon-protocol/client';
+import { deriveNostrKeyFromMnemonic } from '../standalone/nostr-identity.js';
 import type { GitEventResponse } from '../routes.js';
 import {
   DaemonGitClient,

@@ -17,7 +17,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { deriveNostrKeyFromMnemonic } from '@toon-protocol/client';
+import { deriveNostrKeyFromMnemonic } from '../standalone/nostr-identity.js';
 import { runIdentity, type IdentityDeps } from './identity-cmd.js';
 import type { CliIo } from './output.js';
 

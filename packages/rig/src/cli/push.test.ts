@@ -12,6 +12,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { ARWEAVE_GATEWAYS } from '@toon-protocol/arweave';
+import { PREFERRED_GATEWAY } from '../gateway-preference.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -436,7 +438,7 @@ describe('standalone push (Publisher seam)', () => {
     expect(fake1.blobs[0]?.body).toContain('/#/npub1');
     expect(fake1.blobs[0]?.body).toContain('demo?relay=');
     const out1 = h1.out.join('\n');
-    expect(out1).toContain(`Rig page: https://ar-io.dev/${POINTER_TX}`);
+    expect(out1).toContain(`Rig page: https://arweave.net/${POINTER_TX}`);
     // The confirm plan shows the pointer fee before any spend.
     expect(out1).toContain('rig page');
     expect(readRigPointerRecord(env, 'demo')?.pointerTxId).toBe(POINTER_TX);
@@ -451,7 +453,7 @@ describe('standalone push (Publisher seam)', () => {
     expect(await runPush(['--yes'], h2.deps)).toBe(0);
     expect(fake2.blobs).toHaveLength(0);
     expect(h2.out.join('\n')).toContain(
-      `Rig page: https://ar-io.dev/${POINTER_TX}`
+      `Rig page: https://arweave.net/${POINTER_TX}`
     );
   });
 
@@ -487,7 +489,7 @@ describe('standalone push (Publisher seam)', () => {
     expect(fake2.blobs).toHaveLength(1);
     expect(h2.out.join('\n')).toContain('the Rig page is stale');
     expect(h2.out.join('\n')).toContain(
-      `Rig page: https://ar-io.dev/${POINTER_TX}`
+      `Rig page: https://arweave.net/${POINTER_TX}`
     );
     expect(readRigPointerRecord(env, 'demo')?.contentHash).not.toBe(
       'f0'.repeat(32)
@@ -533,7 +535,7 @@ describe('standalone push (Publisher seam)', () => {
       rigPage: {
         status: 'published',
         txId: POINTER_TX,
-        url: `https://ar-io.dev/${POINTER_TX}`,
+        url: `https://arweave.net/${POINTER_TX}`,
       },
     });
   });
@@ -666,6 +668,60 @@ describe('standalone push (Publisher seam)', () => {
     expect(text).toContain('RIG_MNEMONIC environment variable');
     expect(text).toContain('.env');
     expect(text).toContain(join(homeDir, 'config.json'));
+  });
+
+  // ---------------------------------------------------------------------------
+  // Printed gateway addresses
+  //
+  // The Rig-page link is the one URL a user actually clicks after a push, and a
+  // gateway can be flat DOWN rather than merely behind: on 2026-08-15
+  // `ar-io.dev` answered 503 on its own root while the page was live and
+  // byte-identical on the other two. Printing a single alternate is one outage
+  // away from leaving the reader with no working link and the impression the
+  // push failed — so every gateway in the SHARED list is printed, and the list
+  // is the single source of truth rather than a literal repeated per call site.
+  // ---------------------------------------------------------------------------
+
+  describe('rig page — printed gateway addresses', () => {
+    it('prints every gateway in the shared list, the first MAINNET one as primary', async () => {
+      const fake = makeStandalone(emptyRemoteState(), { withBlobUpload: true });
+      const h = makeDeps(env, repoDir, { loadStandalone: fake.load });
+      expect(await runPush(['--yes'], h.deps)).toBe(0);
+      const out = h.out.join('\n');
+
+      // The primary is the shared list's first mainnet gateway — never ar.io's
+      // testnet (`ar-io.dev`), which cannot serve a mainnet upload.
+      expect(out).toContain(`Rig page: ${PREFERRED_GATEWAY}/`);
+      expect(out).not.toContain('Rig page: https://ar-io.dev/');
+      // and EVERY other gateway is offered as a fallback.
+      for (const gateway of ARWEAVE_GATEWAYS.filter(
+        (g) => g !== PREFERRED_GATEWAY
+      )) {
+        expect(out).toContain(`${gateway}/`);
+      }
+    });
+
+    it('tells the reader a gateway can be down, not just lagging', async () => {
+      // The old copy blamed indexing speed only, which sends someone hunting a
+      // publish bug when the gateway is simply returning 503.
+      const fake = makeStandalone(emptyRemoteState(), { withBlobUpload: true });
+      const h = makeDeps(env, repoDir, { loadStandalone: fake.load });
+      expect(await runPush(['--yes'], h.deps)).toBe(0);
+      expect(h.out.join('\n')).toMatch(/can be down/);
+    });
+
+    it('honours RIG_ARWEAVE_GATEWAY as the primary and never lists it twice', async () => {
+      const pinned = ARWEAVE_GATEWAYS[1] ?? 'https://arweave.net';
+      const fake = makeStandalone(emptyRemoteState(), { withBlobUpload: true });
+      const h = makeDeps({ ...env, RIG_ARWEAVE_GATEWAY: pinned }, repoDir, {
+        loadStandalone: fake.load,
+      });
+      expect(await runPush(['--yes'], h.deps)).toBe(0);
+      const out = h.out.join('\n');
+      expect(out).toContain(`Rig page: ${pinned}/`);
+      // The pinned primary must not also appear among its own alternates.
+      expect(out.split(`${pinned}/`).length - 1).toBe(1);
+    });
   });
 });
 
@@ -901,7 +957,7 @@ describe('daemon delegation (#279)', () => {
 
   beforeEach(async () => {
     const { deriveNostrKeyFromMnemonic } =
-      await import('@toon-protocol/client');
+      await import('../standalone/nostr-identity.js');
     SELF = deriveNostrKeyFromMnemonic(TEST_MNEMONIC, 0).pubkey;
     await writeToonConfig(repoDir, { repoId: 'demo' });
     git(['remote', 'add', 'origin', 'wss://origin-relay.example'], repoDir);

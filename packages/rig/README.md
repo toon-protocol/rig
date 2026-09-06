@@ -8,9 +8,11 @@ lives in NIP-34 Nostr events and the objects live on Arweave.
   wallet, nothing configured.
 - **Writes are paid** — pushing objects and publishing events spends from a
   payment channel funded by your wallet. Writes are permanent and non-refundable.
-- **Standalone by default** — `rig` embeds its own payment client built from your
-  seed phrase. No daemon is required (though a running `toon-clientd` makes paid
-  commands faster — see [Daemon as accelerator](#daemon-as-accelerator)).
+- **One node URL is the whole network configuration** — `rig` embeds its own
+  payment client (`@toon-protocol/client` 2.x) built from your seed phrase and
+  pays the TOON connector you name with `rig entry <url>`. The node describes
+  itself on `GET /ilp`; there is nothing to discover (see
+  [Pointing at a node](#pointing-at-a-node)).
 
 `rig` owns a handful of TOON verbs (`init`, `remote`, `clone`, `fetch`, `push`,
 `issue`, `pr`, `comment`, `identity`, `fund`, `balance`, `channel`). **Every other
@@ -78,35 +80,42 @@ rig init                      # repo id defaults to the directory name
 Not a git repo yet? `rig init` offers to `git init` (or pass `--git-init`). No
 identity yet? It offers to generate one (or pass `--generate-identity`).
 
-### 4. Point at a relay
+### 4. Point at a node, and at its relay
 
-Relays are configured as **real git remotes**. Add the shared devnet relay as
-`origin` — this is your default publish target, and it also tells `rig fund` (next
-step) which faucet to use.
+Two addresses, one node. The **connector** is where paid writes go: it is an
+`https://` URL, and its `GET /ilp` describes everything rig needs (the routes it
+prices, the chains it settles on, the key packets are sealed to). The **relay**
+is where free reads come from, configured as a **real git remote** — `origin` is
+your default publish target, and it also tells `rig fund` (next step) which
+faucet to use.
 
 ```sh
+rig entry https://proxy.relay.devnet.toonprotocol.dev   # the shared devnet relay node
 rig remote add origin wss://relay-ws.devnet.toonprotocol.dev
 rig remote list
 ```
 
+`rig entry` shows what is in effect; `TOON_CONNECTOR` overrides it per shell.
+Any node works the same way — its operator hands you these two URLs.
+
 ### 5. Fund your wallet
 
 Pushing is paid, so your wallet needs a balance. On devnet, `rig fund` drips test
-**USDC** (the settlement token) to every supported chain — it's free and needs no
+**USDC** (the settlement token) to both supported chains — it's free and needs no
 faucet URL because it infers devnet from your `origin` remote. The drip assumes
 your wallet already holds enough native gas (the EVM leg still best-effort tops
-up Base Sepolia gas; hold a little SOL/MINA for the other chains).
+up Base Sepolia gas; hold a little SOL for Solana).
 
 ```sh
-rig fund                 # devnet USDC drip, all chains (Mina can take ~75s)
-rig fund sol             # or fund a single chain: evm | sol | mina
+rig fund                 # devnet USDC drip, both chains
+rig fund sol             # or fund a single chain: evm | sol
 rig balance              # confirm the funds landed
 ```
 
 Prefer a browser? The same faucet has a web UI at
 **<https://faucet.devnet.toonprotocol.dev>** — pick a chain, paste an address,
-get USDC. (See [Devnet reference](#devnet-reference-public-chains) for the API
-routes and every deployed contract address.)
+get USDC. (See [Devnet](#devnet) for the API routes; contract addresses are
+read from the node's `GET /ilp`, never configured.)
 
 > On any non-devnet network there is no faucet: `rig fund` prints your wallet
 > address(es) so you can fund them externally, then `rig push` draws from there.
@@ -195,7 +204,7 @@ rig pr status <event-id> applied
 | `rig identity import` | free | write an existing phrase (read from stdin, never argv) to the keystore |
 | `rig init` | free | one-shot repo setup: git repo + identity + `toon.*` config + repo-local git commit-author from your Nostr identity |
 | `rig remote add/remove/list` | free | relays as REAL git remotes (`origin` = default publish target) |
-| `rig fund [chain]` | free | devnet USDC drip (gas assumed) to the active identity's wallet; `chain` = evm \| sol \| mina \| all; prints addresses to fund externally off-devnet |
+| `rig fund [chain]` | free | devnet USDC drip (gas assumed) to the active identity's wallet; `chain` = evm \| sol \| all; prints addresses to fund externally off-devnet |
 | `rig balance` | free | the active wallet's multi-chain balances |
 | `rig clone <relay-url> <owner>/<repo-id> [dir]` | free | bootstrap a repo from TOON: relay state + SHA-verified Arweave objects → a real git repo. Shadows `git clone` |
 | `rig fetch [remote]` | free | download the missing object delta + update `refs/remotes/<remote>/*`. Shadows `git fetch` |
@@ -211,8 +220,8 @@ rig pr status <event-id> applied
 | `rig name status <name>` | free | an ArNS name's registry record, ANT process, and current target txId |
 | `rig name buy <name>` / `rig name set <name> <txId>` | **paid¹** | buy an ArNS name / point it at an Arweave txId. On the devnet, buy/set default to brokering through the deployed store DVM (`--direct` opts out). ¹Paid in mARIO on Solana via the ar.io registry — **not** ILP; needs the optional `@ar.io/sdk` dep |
 | `rig channel list/open/close/settle` | free / **paid** | inspect or manage the payment channels paid commands hold (`rig channels` = `rig channel list`) |
-| `rig chain [set <c>\|unset]` | free | pin which chain/USDC settles paid writes: evm \| sol \| mina |
-| `rig entry [apex\|sandbox\|url]` | free | choose the network entry node (payment ingress + relay); `sandbox` is the Mina-only multihop demo entry |
+| `rig chain [set <c>\|unset]` | free | pin which chain/USDC settles paid writes: evm \| sol (default: the first chain the node settles on that your identity holds a key for) |
+| `rig entry [<connector-url>\|clear]` | free | name the TOON connector paid writes go to (`--relay <wss-url>` records its free-read relay too); bare `rig entry` shows what is in effect |
 | `rig help` / `rig --version` | free | usage / version |
 | everything else | — | executed as `git <args...>` with rig's stdio and git's exit code |
 
@@ -326,107 +335,94 @@ the human-readable snapshot (verified live 2026-07-17), useful when auditing
   same id on every cluster); the asset pubkey is the SDK's `processId`.
 - Free devnet test loop (#381): ARIO faucet `https://faucet.services.ar-io.dev/` →
   `rig name buy --network devnet` → `rig name set` → resolves at the
-  devnet-connected gateway `https://<name>.ar-io.dev/`.
+  devnet-connected gateway `https://<name>.ar-io.dev/`. ⚠️ That gateway is
+  ar.io's **testnet** and resolves devnet names ONLY; a **mainnet** name never
+  appears there (nor on `arweave.net`, which runs a forked ArNS). Check mainnet
+  names on a mainnet gateway, e.g. `https://<name>.permagate.io/` or
+  `https://<name>.ardrive.net/`.
 - `--process-id <id>` overrides the arns registry program outright (wins over
   `--network`) — for pointing at a fresh/staging registry deployment.
 
 ---
 
-## Devnet reference (public chains)
+## Pointing at a node
 
-Since 2026-07-19 the TOON devnet settles on **public networks** — there is no
-self-hosted chain infrastructure. The authoritative, machine-readable source for
-everything below is the apex's **kind:10032 announce** on the relay; the
-authoritative doc is
-[toon-meta `docs/deployment.md`](https://github.com/toon-protocol/toon-meta/blob/main/docs/deployment.md).
+A TOON connector is a paid reverse proxy in front of an ordinary app (a relay, a
+store). It describes itself on **`GET /ilp`** (connector ADR 0050): its ILP
+addresses, the routes it prices, the settlement chains it accepts and the key a
+payload is sealed to. That one document is everything rig reads about the
+network — there is no announce to discover (kind:10032 was removed by connector
+ADR 0046) and no topology to negotiate.
 
-### Endpoints
+```sh
+curl -s https://proxy.relay.devnet.toonprotocol.dev/ilp | jq '{ilpAddresses, routes, settlements: [.settlements[].chain]}'
+```
+
+What rig derives from it, and the knob that overrides each:
+
+| fact | default | override (env / `~/.toon-client/config.json`) |
+|---|---|---|
+| the connector | — (required) | `TOON_CONNECTOR` / `connectorUrl` (`rig entry <url>` writes it) |
+| where events go | the node's first own address it also prices | `TOON_CLIENT_PUBLISH_DESTINATION` / `publishDestination` |
+| where git objects go | the node's first priced `*.store` route, else `*.ario` | `TOON_CLIENT_STORE_DESTINATION` / `storeDestination`; `rig name --via` per invocation |
+| a store on another node | — | `storeConnectorUrl` (that node holds its own channel: uploads ride a second client and watermark) or `storeSealTo` (same channel, sealed to that node) |
+| settlement chain | the first chain in `settlements[]` your identity holds a key for | `TOON_CLIENT_CHAIN` / `chain` — `evm` or `solana` (`evm:8453` is read by its family) |
+| chain RPC | the client's devnet preset | `TOON_CLIENT_RPC_URL` / `rpcUrl` / `chainRpcUrls[<chain>]` — **set this for a mainnet node** |
+| who pays | the phrase's key on that chain | `RIG_SOLANA_KEY_FILE` / `solanaKeyFile` (a `solana-keygen` JSON), `RIG_EVM_PRIVATE_KEY` / `evmPrivateKey` |
+| claim watermark file | `<TOON_CLIENT_HOME>/channels.json` | `TOON_CLIENT_CHANNEL_STORE` / `channelStorePath` — one file per channel writer, or two processes replay each other's nonces |
+| first-open collateral | the client default | `TOON_CLIENT_DEPOSIT` / `deposit` (base units) |
+| carriage | `auto` (HTTP unless the node requires BTP) | `TOON_CLIENT_TRANSPORT` / `transport` |
+
+**Prices are schedules.** A route publishes a base price and, when it meters by
+size, a `pricePerKib` (connector ADR 0065). `rig push`'s fee table prices every
+object by its sealed size with the same rule the client puts on the claim, so
+the estimate equals what is paid.
+
+**Who pays and who signs are independent.** The repo owner is the phrase's
+Nostr key at `m/44'/1237'/0'/0/<account>` — unchanged from every earlier rig.
+Its EVM wallet is that same key (the client's `keyDerivation: 'legacy'`, rig's
+default, so channels an existing identity funded are still its own); set
+`TOON_CLIENT_KEY_DERIVATION=standard` for a fresh identity you want to import
+into MetaMask. The payer key may be a different key entirely: the connector
+attributes payment from the claim, never from the event.
+
+### Devnet
+
+The shared devnet's nodes and the faucet (authoritative:
+[toon-meta `docs/deployment.md`](https://github.com/toon-protocol/toon-meta/blob/main/docs/deployment.md);
+the node URLs are also `@toon-protocol/client`'s `DEVNET` preset):
 
 | What | URL |
 |---|---|
 | Faucet (web UI + API) | `https://faucet.devnet.toonprotocol.dev` |
-| Relay (free reads, `rig clone`/`fetch`) | `wss://relay-ws.devnet.toonprotocol.dev` |
-| Payment proxy (paid writes, BTP) | `wss://proxy.devnet.toonprotocol.dev:443` |
-| Store DVM (ArNS buyfor/gas-station jobs, `--via`) | `https://dvm.devnet.toonprotocol.dev` |
+| Relay node (paid writes: `rig entry`) | `https://proxy.relay.devnet.toonprotocol.dev` |
+| Relay (free reads: `rig remote add origin`) | `wss://relay-ws.devnet.toonprotocol.dev` |
+| Store route (`--via` for ArNS jobs) | an ILP **destination** the node prices, e.g. `g.toon.relay.store` |
 
-### Faucet routes
+`--via` names an ILP destination rather than an HTTP endpoint. The store sits
+behind the connector's payment termination, so it has no public job endpoint to
+POST to, and a reachable one would be an unpaid path to a paid handler. The
+kind:5095 buy and kind:5096 gas-station jobs therefore travel as paid packets,
+exactly as `rig push`'s git-object writes do.
 
-| `POST` path | Drips |
+Faucet routes (`POST`, body `{"address": "<wallet>"}`):
+
+| path | drips |
 |---|---|
 | `/api/base-sepolia/request` | 1000 USDC (ungated on-chain mint) + best-effort Base Sepolia gas |
 | `/api/solana/usdc-request` | 1000 USDC (treasury transfer, no SOL leg) |
-| `/api/mina/usdc-request` | USDC (treasury self-mint, rate-limited token; no MINA leg) |
 | `/api/solana/request` | 2 SOL + 1000 USDC (airdrop leg subject to the public devnet's per-IP quota) |
-| `/api/mina/request` | 5 MINA + USDC (treasury self-mint, rate-limited token) |
 
-Body: `{"address": "<wallet>"}`. `rig fund` hits the **USDC-only** routes
-(`/api/base-sepolia/request`, `/api/solana/usdc-request`, `/api/mina/usdc-request`)
-for the identity's derived wallets — it funds USDC and assumes gas is already
-present. The combined native-plus-USDC routes above remain for manual use.
+`rig fund` hits the two USDC-only routes for the identity's derived wallets —
+it funds USDC and assumes gas is already present.
 
-### Settlement contracts
+Settlement facts (contract and program addresses, token mints) are **read from
+the node's `GET /ilp`, never configured** — the table that used to sit here went
+stale the first time a contract moved. Base Sepolia's official RPC
+(`sepolia.base.org`) is a load-balancer that serves stale reads; channel opens
+want a single-backend RPC such as `base-sepolia-rpc.publicnode.com`.
 
-Chain ids below are the **announced spellings** — use them verbatim with
-`TOON_CLIENT_CHAIN=<id> rig push` to pin a settlement chain.
-
-| Chain (`TOON_CLIENT_CHAIN`) | Payment-channel contract/program/zkApp | USDC token (6dp) | Explorer |
-|---|---|---|---|
-| `evm:84532` (Base Sepolia) | TokenNetwork `0x1E95493fEF46707E034b4a1945f25a8C76A1823D` (registry `0xcC9079adE929b168B54145f6d25262b64FAB9D5b`) | `0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` | [base-sepolia.blockscout.com](https://base-sepolia.blockscout.com) |
-| `solana:devnet` | program `2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip` | mint `xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in` | [explorer.solana.com/?cluster=devnet](https://explorer.solana.com/?cluster=devnet) |
-| `mina:devnet` | PaymentChannel zkApp `B62qmgPhv2Xo6QVEtwjLja8UZJUtu8yapRFAR6gaoGtbM9zE5hG7Tkf` | token `B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d`<br>tokenId `9497120696276615621907376728658022802954262638363646162765282600447713419198` | [minascan.io/devnet](https://minascan.io/devnet/home) |
-
-### Config notes (rig ≥ 2.10.2)
-
-Keep `~/.toon-client/config.json` **minimal** — settlement parameters derive
-from the announce. Three additions are load-bearing on today's devnet:
-
-```jsonc
-{
-  "feePerEvent": "1000",             // = the announced route price
-  "chainRpcUrls": {                   // per-field overrides only
-    "evm:84532":   "https://base-sepolia-rpc.publicnode.com",
-    "mina:devnet": "https://api.minascan.io/node/devnet/v1/graphql"
-  },
-  "minaChannel": {                    // Mina is not announce-derivable yet
-    "graphqlUrl": "https://api.minascan.io/node/devnet/v1/graphql",
-    "zkAppAddress": "B62qmgPhv2Xo6QVEtwjLja8UZJUtu8yapRFAR6gaoGtbM9zE5hG7Tkf",
-    "tokenId": "9497120696276615621907376728658022802954262638363646162765282600447713419198",
-    "networkId": "devnet"
-  }
-}
-```
-
-- Do **not** set `supportedChains`/`tokenNetworks`/`preferredTokens` explicitly —
-  explicit topology bypasses the announce's route prices and paid writes get
-  rejected (F06).
-- After config changes, delete `~/.toon-client/rig-topology-cache.json` (cached
-  topology can mask edits).
-- Base Sepolia's official RPC (`sepolia.base.org`) is a load-balancer that
-  serves stale reads — channel opens need a single-backend RPC like
-  `base-sepolia-rpc.publicnode.com` (already in the snippet above).
-
-## Strict `--json` stdout (machine consumers)
-
-With `--json`, stdout carries **exactly one JSON document** — everything
-human-facing (identity reports, deprecation nudges, progress lines, even stray
-`console.log` from dependencies) is routed to stderr, so `rig <command> --json | jq`
-always parses. Errors emit one machine envelope (`{"error": "<code>", "detail": …}`)
-on stdout with the human detail on stderr and a non-zero exit. `--json` is a
-per-subcommand flag on the commands rig owns, **not** a global rig flag.
-
-## Git passthrough
-
-Any subcommand rig does not own is executed as `git <args...>` verbatim: the exact
-argv tail is handed to system git with `stdio: 'inherit'` (interactive commands,
-pagers, colors, and prompts work), and git's exit code becomes rig's exit code (a
-child killed by a signal maps to the shell convention 128+N). rig-owned verbs always
-take precedence — in particular `rig push` is the TOON transport and shadows
-`git push`; plain-git pushes remain available by calling `git push` directly. If no
-system git is installed, passthrough fails with a clear error (exit 127).
-
-The passthrough is exempt from the `--json` contract: `rig status --json` runs
-`git status --json` (git rejects the flag), and flags before the subcommand
-(`rig --json status`) pass through to git untouched.
+---
 
 ## Identity
 
@@ -466,32 +462,19 @@ Every paid command reports which source is active and the derived pubkey
 (`Identity: <pubkey> (from …)`, and an `identity` object in `--json` output) — the
 phrase itself is never printed and never written to git config or any repo file.
 
-## Daemon as accelerator
+## What a paid command does first
 
-Every standalone paid command pays a fixed bootstrap cost (relay discovery, peer
-negotiation, channel resume). Two things remove most of it:
+Every standalone paid command bootstraps the same way: resolve the identity,
+read the connector's `GET /ilp`, open or adopt the payment channel with that
+node, then sign one claim per packet. Adoption is free — a channel's id derives
+from its participants, so a node you have paid before is found again without a
+transaction. Money state (the claim watermark, the channel map) lives under
+`TOON_CLIENT_HOME` and is never cached away.
 
-- **Automatic daemon delegation** — when a running `toon-clientd` on the loopback
-  control port (`TOON_CLIENT_HTTP_PORT`, default 8787) holds the **same identity**,
-  paid write commands (`push`, `issue`, `comment`, `pr create`, `pr status`)
-  delegate to its `/git/*` routes instead of bootstrapping an embedded client. The
-  daemon already owns the payment channel's cumulative-claim watermark, so one
-  process signs all claims. The identity match is confirmed against `GET /status`
-  **before** anything is sent; a daemon on a different identity, or none at all,
-  runs standalone. The chosen path prints on stderr (`rig: paid path: …`) and lands
-  in `--json` as `"path": "daemon" | "standalone"`. Commands the daemon has no route
-  for — `rig fund`, `rig balance`, `rig channel open|close|settle` — always run
-  standalone (the on-chain channel mutations among them refuse while a same-identity
-  daemon runs, so as not to race its live claims: stop the daemon for those).
-- **Standalone topology cache** — the resolved network topology (announce discovery,
-  payment-peer pick, settlement-chain selection) is cached under `TOON_CLIENT_HOME`
-  (`rig-topology-cache.json`), keyed by relay + identity + explicit config, for 15
-  minutes (`RIG_TOPOLOGY_TTL_MS` overrides; `0` disables). A cached topology that
-  fails to bootstrap is invalidated and re-resolved live. Money state (claim
-  watermarks, channel map) is never cached.
-
-The `rig` bin also exits as soon as a command finishes and stdio is flushed, rather
-than letting the embedded client's keep-alive socket hold the process open for ~30s.
+Two rig processes on one identity race the claim nonce, so a per-identity lock
+refuses the second (`RIG_STANDALONE=1` skips only the check for a same-identity
+`toon-clientd`; the lock stays). The `rig` bin exits as soon as a command
+finishes and stdio is flushed.
 
 ## Pushing
 
@@ -590,32 +573,9 @@ it — that stays behind the `Publisher` seam:
   [toon-meta#262](https://github.com/toon-protocol/toon-meta/issues/262) "agents
   earning"): `planFactoryJob`/`executeFactoryJob` mirror `planPush`/`executePush`'s
   split, and `JobDeliveryPort` is the injected seam for the per-increment
-  encrypt/pay leg. `factory-job-delivery-client.ts` (`ClientJobDeliveryPort`) is
-  the concrete `JobDeliveryPort`, backed by `@toon-protocol/client`'s real
-  hashlock helpers; `factory-job-pay.ts` is the buyer-side counterpart
-  (`payIncrementOffer`/`decryptIncrementArtifact`). See "Factory job proof"
-  below.
+  encrypt/pay leg. The concrete port and the buyer-side payment helpers that
+  rode the 0.x client's serve-side job API were removed with the move to
+  `@toon-protocol/client` 2.x; the protocol pieces stay so a port can be
+  written against the 2.x client.
 
-### Factory job proof — one paid increment end to end (#56)
-
-`scripts/factory-job-proof.ts` is the runnable proof that a provider can
-deliver one factory-job increment to a buyer and get paid for it, entirely
-off-chain, using the real `@toon-protocol/client` (no fakes): encrypt → upload
-→ offer → pay → fulfil → decrypt, then assert the provider's `getClaimState()`
-spendable balance rose with the on-chain deposit unchanged (no settlement).
-
-```sh
-cd packages/rig
-pnpm factory-job-proof
-```
-
-By default this generates and faucet-funds two fresh devnet identities (a
-provider and a buyer) against the public devnet (see "Devnet reference"
-below) and tears them down at the end — safe to re-run any number of times.
-Set `FACTORY_JOB_PROOF_PROVIDER_MNEMONIC` / `FACTORY_JOB_PROOF_BUYER_MNEMONIC`
-to reuse already-funded identities instead, or `FACTORY_JOB_PROOF_SKIP_FUND=1`
-to skip the faucet drip. See the script's own header comment for the full env
-var list.
-
-Part of [epic #222](https://github.com/toon-protocol/toon-client/issues/222) and
 [epic #246](https://github.com/toon-protocol/toon-client/issues/246).

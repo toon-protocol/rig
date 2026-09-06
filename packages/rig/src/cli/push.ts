@@ -47,7 +47,7 @@ import {
   RIG_WEB_URL_ENV,
   generateRigPointerHtml,
 } from '../rig-pointer.js';
-import { ARWEAVE_GATEWAYS } from '@toon-protocol/arweave';
+import { PREFERRED_GATEWAY, mirrorGatewaysFor } from '../gateway-preference.js';
 import { hexToNpub } from '../npub.js';
 import { planPush, executePush } from '../push.js';
 import { GitRepoReader } from '../repo-reader.js';
@@ -62,6 +62,7 @@ import {
   type GitEstimateResponse,
   type GitPushResponse,
 } from '../routes.js';
+import { uploadChargeFor, type FeeRates } from '../publisher.js';
 import {
   resolvePaidSession,
   type PaidSession,
@@ -395,32 +396,27 @@ export interface RigPageReport {
 }
 
 /**
- * Gateway for printed Rig-page URLs. Must be a gateway that serves the
- * store's FRESH uploads — `ar-io.dev` (the head of the fetch-redundancy
- * list): the store currently uploads to the ar.io testnet, which
- * `arweave.net` (mainnet) never serves, and even for mainnet uploads it
- * lags until the bundle settles. The mirror URL printed alongside covers
- * the other gateway. Distinct from the BUNDLE gateway embedded in the
- * pointer HTML ({@link DEFAULT_RIG_WEB_GATEWAY}), which tracks where the
- * rig-web deploy lives. `RIG_ARWEAVE_GATEWAY` overrides, same as
- * `rig site`.
+ * Gateway for printed Rig-page URLs: the shared list's first MAINNET gateway
+ * ({@link PREFERRED_GATEWAY} — never ar.io's testnet), `RIG_ARWEAVE_GATEWAY`
+ * overriding, same as `rig site`. Distinct from the BUNDLE gateway embedded in
+ * the pointer HTML ({@link DEFAULT_RIG_WEB_GATEWAY}), which tracks where the
+ * rig-web deploy lives.
  */
 function pointerGateway(env: NodeJS.ProcessEnv): string {
-  return (env['RIG_ARWEAVE_GATEWAY'] ?? 'https://ar-io.dev').replace(
-    /\/+$/,
-    ''
-  );
+  return (env['RIG_ARWEAVE_GATEWAY'] ?? PREFERRED_GATEWAY).replace(/\/+$/, '');
 }
 
 /**
- * A second gateway to print alongside the primary pointer URL. Gateways
- * index fresh uploads at different speeds (arweave.net serves Turbo
- * uploads immediately; ar-io.dev can lag until the bundle is unbundled —
- * and vice versa for older data), so printing two addresses gives the
- * user a working link whichever side is behind.
+ * Every OTHER gateway from the shared list, printed under the primary.
+ *
+ * All of them, not just one: a gateway can be flat DOWN, not merely behind.
+ * Observed 2026-08-15 — `ar-io.dev` answered `503` on its own root while the
+ * page was live and byte-identical on both other gateways, and a single
+ * printed alternate is one outage away from leaving the reader with no
+ * working link and the impression their push failed.
  */
-function mirrorGateway(primary: string): string | undefined {
-  return ARWEAVE_GATEWAYS.find((g) => g !== primary);
+function mirrorGateways(primary: string): string[] {
+  return mirrorGatewaysFor(primary);
 }
 
 /** Build the Rig-pointer plan: deterministic pointer + content-addressed skip. */
@@ -429,8 +425,8 @@ function planRigPointer(args: {
   ownerPubkey: string;
   repoId: string;
   relay: string;
-  /** Flat cost of one upload — the store route's price (see FeeRates.uploadFee). */
-  uploadFee: bigint;
+  /** The store route's terms; the pointer's upload is priced by its size. */
+  feeRates: FeeRates;
 }): RigPointerPlan {
   const html = generateRigPointerHtml({
     bundle: {
@@ -470,7 +466,7 @@ function planRigPointer(args: {
     html,
     contentHash,
     bytes,
-    fee: args.uploadFee,
+    fee: uploadChargeFor(args.feeRates, bytes),
   };
 }
 
@@ -652,7 +648,7 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
           ownerPubkey: ctx.ownerPubkey,
           repoId,
           relay: relaysUsed[0],
-          uploadFee: feeRates.uploadFee,
+          feeRates,
         });
       }
     } else {
@@ -729,11 +725,17 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
               : '') +
             '  (renders this repo from Arweave)'
         );
-        const mirror = rigPage.txId ? mirrorGateway(gateway) : undefined;
-        if (mirror) {
+        const mirrors = rigPage.txId ? mirrorGateways(gateway) : [];
+        if (mirrors.length > 0 && rigPage.txId) {
+          const txId = rigPage.txId;
           io.out(
-            `     also: ${mirror}/${rigPage.txId}  (same page; gateways index fresh uploads at different speeds)`
+            '     also: (same page — try these if the address above does ' +
+              'not load; gateways index fresh uploads at different speeds, ' +
+              'and any one of them can be down)'
           );
+          for (const mirror of mirrors) {
+            io.out(`           ${mirror}/${txId}`);
+          }
         }
       } else if (rigPage.detail) {
         io.err(`rig page: ${rigPage.detail}`);
