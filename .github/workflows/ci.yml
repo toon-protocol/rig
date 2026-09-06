@@ -53,9 +53,39 @@ jobs:
       # This repo has the same shape and the same exposure:
       # `.changeset/config.json` lists `@toon-protocol/rig-web` in `ignore`, so
       # one hand-written changeset naming both it and `@toon-protocol/rig` would
-      # wedge releases here the same way. Nothing is wrong today — both pending
-      # changesets name only `@toon-protocol/rig` — so this is the guard ported
-      # BEFORE it is needed rather than after.
+      # wedge releases here the same way.
+      #
+      # That guard was ported for the MIXED case, where `changeset version`
+      # EXITS NON-ZERO and this step catches it. The case that actually wedged
+      # this repo is the neighbouring one it does not catch: a changeset naming
+      # ONLY `ignore`d packages. There `changeset version` exits 0, writes no
+      # plan, and LEAVES THE FILE IN PLACE — so it is never consumed:
+      #
+      #   $ cat .changeset/x.md        # '@toon-protocol/rig-web': patch
+      #   $ changeset version; echo $? # 🦋 All files have been updated.  -> 0
+      #   $ git diff --stat            # (empty)
+      #   $ ls .changeset/             # config.json  x.md   <- still there
+      #
+      # PR #104 did exactly this. It touched `packages/rig-web/**` AND
+      # `packages/rig/README.md`, so the step above DEMANDED a changeset; the
+      # author wrote one for the package they were really changing, rig-web,
+      # which is `ignore`d. This step ran `changeset version`, got exit 0, and
+      # passed it green. After merge the file sat on main forever, and because
+      # `changesets/action` publishes only when NO changeset is pending, every
+      # subsequent push to main took the version-PR branch instead, then failed
+      # to open a PR with no commits in it:
+      #
+      #   HttpError: Validation Failed: No commits between main and
+      #   changeset-release/main
+      #
+      # So `Version Packages (#107)` merged, bumping rig to 4.0.0, and 4.0.0
+      # was never published — npm stayed on 3.6.0 with main four versions
+      # ahead, and no later fix could reach npm either.
+      #
+      # Hence the second assertion below: a changeset this PR ADDS must be
+      # CONSUMED by `changeset version`. That is the precise tell — a changeset
+      # that survives versioning is inert, and an inert changeset on main is a
+      # permanent publish block, not a no-op.
       #
       # `changeset version` rather than `changeset status`: it is the
       # byte-identical command `release.yml`'s `changesets/action` runs as its
@@ -70,10 +100,38 @@ jobs:
       - name: Assert the changesets form a valid release plan
         run: |
           set -euo pipefail
+
+          # Record the changesets THIS PR adds, before the tree is mutated.
+          added=$(git diff --name-only --diff-filter=A \
+                    "origin/${{ github.base_ref }}...HEAD" -- '.changeset/*.md' || true)
+
           pnpm changeset version
           echo "--- the release plan this PR would produce ---"
           git --no-pager diff --stat
-          echo "✅ changeset version succeeds — release.yml can get past versioning"
+
+          # Every changeset this PR adds must have been CONSUMED (deleted) by
+          # `changeset version`. One that survives names only `ignore`d or
+          # otherwise unversionable packages: it produces no release plan, is
+          # never consumed, and once on main it blocks EVERY subsequent publish.
+          survivors=
+          for f in $added; do
+            [ -e "$f" ] && survivors="$survivors $f"
+          done
+
+          if [ -n "$survivors" ]; then
+            echo "::error::Inert changeset —$survivors survived 'changeset version', so it will never be consumed."
+            echo
+            echo "A changeset naming only packages in the 'ignore' list of .changeset/config.json"
+            echo "(currently: @toon-protocol/rig-web) produces no version bump. It stays on main"
+            echo "forever, and changesets/action publishes ONLY when no changeset is pending — so"
+            echo "it permanently blocks releases to npm. This is what happened in PR #104."
+            echo
+            echo "Fix: name a publishable package (@toon-protocol/rig) in the changeset, or drop"
+            echo "the changeset entirely if this PR genuinely changes nothing that ships to npm."
+            exit 1
+          fi
+
+          echo "✅ changeset version succeeds and consumes every changeset this PR adds"
 
   build:
     runs-on: ubuntu-latest
