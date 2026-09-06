@@ -9,6 +9,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  FREE_TIER_MAX_ITEM_BYTES,
   MAX_OBJECT_SIZE,
   createGitBlob,
   createGitCommit,
@@ -173,8 +174,16 @@ describe('hashGitObject', () => {
   });
 });
 
-describe('MAX_OBJECT_SIZE', () => {
-  it('is the 95KB free-tier safety margin (R10-005)', () => {
-    expect(MAX_OBJECT_SIZE).toBe(95 * 1024);
+describe('FREE_TIER_MAX_ITEM_BYTES', () => {
+  // #102: the old value was 95 * 1024, described as a margin under a "100KB
+  // free tier" the upstream does not publish. This is the figure the service
+  // actually publishes, as both `freeUploadLimitBytes` and
+  // `freeTier.maxItemBytes` at https://upload.ardrive.io/.
+  it("is the upstream's published free per-item ceiling", () => {
+    expect(FREE_TIER_MAX_ITEM_BYTES).toBe(107_520);
+  });
+
+  it('is aliased by the deprecated MAX_OBJECT_SIZE export', () => {
+    expect(MAX_OBJECT_SIZE).toBe(FREE_TIER_MAX_ITEM_BYTES);
   });
 });

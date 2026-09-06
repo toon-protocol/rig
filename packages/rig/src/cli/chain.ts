@@ -2,8 +2,9 @@
  * `rig chain` — choose which chain (and therefore which USDC token) settles
  * paid `rig` writes.
  *
- * Each supported chain has its own USDC: EVM (Base Sepolia), Solana devnet, and
- * Mina devnet. "Which USDC is spent" == "which settlement chain rig picks", and
+ * Each supported chain has its own USDC: EVM (Base Sepolia) and Solana devnet.
+ * (Mina was removed in 4.0.0 with the Mina client.) "Which USDC is spent" ==
+ * "which settlement chain rig picks", and
  * that is a session/config-level choice — there is no per-`rig push` flag. This
  * command persists the choice to the shared client config's `chain` field
  * (`~/.toon-client/config.json`) — the exact knob `resolveNetworkTopology`
@@ -11,7 +12,7 @@
  * settles on the named chain.
  *
  *   rig chain               show the current preference (and what USDC it maps to)
- *   rig chain set <chain>   pin the settlement chain: evm | sol | mina (or a
+ *   rig chain set <chain>   pin the settlement chain: evm | sol (or a
  *                           full id like evm:base:84532)
  *   rig chain unset         clear the pin — revert to automatic selection
  *
@@ -37,7 +38,19 @@ import type { CliIo } from './output.js';
 const FAMILY_USDC: Record<string, string> = {
   evm: 'EVM USDC (Base Sepolia on devnet)',
   solana: 'Solana USDC',
-  mina: 'Mina USDC',
+};
+
+/**
+ * Families rig used to settle on, mapped to why they are gone. 4.0.0 dropped
+ * Mina with the client (`rig channel deploy-zkapp` went with it), and the
+ * 4.0.0 changelog states `rig chain set mina` is refused — but nothing
+ * refused it: `set mina` returned 0 and wrote `"chain": "mina"` to the config,
+ * pinning a settlement chain no paid command can use. Refusing it BY NAME
+ * (rather than letting it fall through to "unknown chain") is what tells a
+ * user with mina already pinned what actually happened to it.
+ */
+const REMOVED_FAMILIES: Record<string, string> = {
+  mina: 'Mina settlement was removed in rig 4.0.0 along with the Mina client and `rig channel deploy-zkapp`',
 };
 
 /**
@@ -51,11 +64,10 @@ const FAMILY_ALIASES: Record<string, string> = {
   eth: 'evm',
   sol: 'solana',
   solana: 'solana',
-  mina: 'mina',
 };
 
 /** Human list of accepted `set` arguments (for usage/errors). */
-const CHAIN_ARG_LIST = 'evm | sol | solana | mina (or a full id like evm:base:84532)';
+const CHAIN_ARG_LIST = 'evm | sol | solana (or a full id like evm:base:84532)';
 
 export const CHAIN_USAGE = `Usage: rig chain [set <chain> | unset]
 
@@ -68,7 +80,6 @@ the local config file is touched.
   rig chain set <chain>   pin the settlement chain / USDC:
                             evm   → EVM USDC (Base Sepolia on devnet)
                             sol   → Solana USDC
-                            mina  → Mina USDC
                           (a full id like evm:base:84532 or solana:devnet also
                           works; \`solana\` is accepted for \`sol\`, \`eth\` for \`evm\`)
   rig chain unset         clear the pin — revert to automatic selection
@@ -135,34 +146,51 @@ function writeChainConfig(configPath: string, file: ChainConfigFile): void {
 
 /**
  * Normalize a `set` argument to the string stored in config. A value with a
- * `:` is a full chain id (family must be evm/solana/mina); otherwise it is a
- * family alias. Throws a usage error on anything else.
+ * `:` is a full chain id (family must be evm/solana); otherwise it is a family
+ * alias. Throws a usage error on anything else, and a REMOVED-family error by
+ * name for a family rig no longer settles on (#4.0 dropped mina).
  */
 function normalizeChain(raw: string): string {
   if (raw.includes(':')) {
     const family = raw.split(':')[0]?.toLowerCase() ?? '';
+    const removed = REMOVED_FAMILIES[family];
+    if (removed) {
+      throw new Error(`${removed}; settle on evm or solana instead`);
+    }
     if (!(family in FAMILY_USDC)) {
       throw new Error(
-        `unknown chain family in ${JSON.stringify(raw)} — must start with evm:, solana:, or mina:`
+        `unknown chain family in ${JSON.stringify(raw)} — must start with evm: or solana:`
       );
     }
     return raw;
   }
-  const canonical = FAMILY_ALIASES[raw.toLowerCase()];
+  const lowered = raw.toLowerCase();
+  const removed = REMOVED_FAMILIES[lowered];
+  if (removed) {
+    throw new Error(`${removed}; settle on evm or solana instead`);
+  }
+  const canonical = FAMILY_ALIASES[lowered];
   if (!canonical) {
-    throw new Error(`chain must be one of ${CHAIN_ARG_LIST}, got ${JSON.stringify(raw)}`);
+    throw new Error(
+      `chain must be one of ${CHAIN_ARG_LIST}, got ${JSON.stringify(raw)}`
+    );
   }
   return canonical;
 }
 
 /** The USDC family label for a stored chain value (family or full id). */
 function usdcFor(chain: string): string {
-  const family = (chain.includes(':') ? (chain.split(':')[0] ?? chain) : chain).toLowerCase();
+  const family = (
+    chain.includes(':') ? (chain.split(':')[0] ?? chain) : chain
+  ).toLowerCase();
   return FAMILY_USDC[family] ?? `${family} USDC`;
 }
 
 /** Run `rig chain`; returns the process exit code. */
-export async function runChain(args: string[], deps: ChainDeps): Promise<number> {
+export async function runChain(
+  args: string[],
+  deps: ChainDeps
+): Promise<number> {
   const { io, env } = deps;
 
   let positionals: string[];
@@ -190,7 +218,9 @@ export async function runChain(args: string[], deps: ChainDeps): Promise<number>
 
   const [sub, ...subRest] = positionals;
   if (sub !== undefined && sub !== 'set' && sub !== 'unset') {
-    io.err(`unknown subcommand ${JSON.stringify(sub)} — expected \`set\`, \`unset\`, or no argument`);
+    io.err(
+      `unknown subcommand ${JSON.stringify(sub)} — expected \`set\`, \`unset\`, or no argument`
+    );
     io.err(CHAIN_USAGE);
     return 2;
   }
@@ -265,7 +295,9 @@ export async function runChain(args: string[], deps: ChainDeps): Promise<number>
         return 0;
       }
       io.out(`Settlement chain set to ${value} → spends ${usdcFor(value)}.`);
-      io.out(`Saved to ${configPath}. Applies to the next paid command (e.g. \`rig push\`).`);
+      io.out(
+        `Saved to ${configPath}. Applies to the next paid command (e.g. \`rig push\`).`
+      );
       for (const w of warnings) io.err(`warning: ${w}`);
       return 0;
     }
@@ -281,11 +313,18 @@ export async function runChain(args: string[], deps: ChainDeps): Promise<number>
         io.emitJson({
           command: 'chain',
           chain: stillPinned ?? null,
-          source: envChain !== undefined ? 'env' : supported0 !== undefined ? 'supportedChains' : 'auto',
+          source:
+            envChain !== undefined
+              ? 'env'
+              : supported0 !== undefined
+                ? 'supportedChains'
+                : 'auto',
           usdc: stillPinned ? usdcFor(stillPinned) : null,
           wrote: null,
           configPath,
-          ...(precedenceWarnings(null).length ? { warnings: precedenceWarnings(null) } : {}),
+          ...(precedenceWarnings(null).length
+            ? { warnings: precedenceWarnings(null) }
+            : {}),
         } satisfies ChainJson);
         return 0;
       }
@@ -295,9 +334,13 @@ export async function runChain(args: string[], deps: ChainDeps): Promise<number>
           : 'No settlement-chain pin was set.'
       );
       if (stillPinned !== undefined) {
-        io.out(`Still pinned to ${stillPinned} by ${envChain !== undefined ? 'TOON_CLIENT_CHAIN' : 'config supportedChains'} → ${usdcFor(stillPinned)}.`);
+        io.out(
+          `Still pinned to ${stillPinned} by ${envChain !== undefined ? 'TOON_CLIENT_CHAIN' : 'config supportedChains'} → ${usdcFor(stillPinned)}.`
+        );
       } else {
-        io.out('Reverted to automatic selection (most-recent channel → first funded announced chain → first EVM).');
+        io.out(
+          'Reverted to automatic selection (most-recent channel → first funded announced chain → first EVM).'
+        );
       }
       return 0;
     }
@@ -329,13 +372,19 @@ export async function runChain(args: string[], deps: ChainDeps): Promise<number>
           : source === 'config'
             ? `config \`chain\` (${configPath})`
             : `config \`supportedChains[0]\``;
-      io.out(`Settlement chain: ${effective} → spends ${usdcFor(effective)} (from ${via}).`);
-      io.out('Change it with `rig chain set <evm|sol|mina>`, or `rig chain unset` for auto.');
+      io.out(
+        `Settlement chain: ${effective} → spends ${usdcFor(effective)} (from ${via}).`
+      );
+      io.out(
+        'Change it with `rig chain set <evm|sol>`, or `rig chain unset` for auto.'
+      );
     } else {
       io.out('Settlement chain: (auto) — no pin set.');
-      io.out('rig picks your most-recent open channel, else the first announced chain your');
+      io.out(
+        'rig picks your most-recent open channel, else the first announced chain your'
+      );
       io.out('wallet holds USDC on, else the first announced EVM chain.');
-      io.out('Pin one with `rig chain set <evm|sol|mina>`.');
+      io.out('Pin one with `rig chain set <evm|sol>`.');
     }
     return 0;
   } catch (err) {

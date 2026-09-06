@@ -1,12 +1,12 @@
 import { getPublicKey, verifyEvent } from 'nostr-tools/pure';
 import { describe, expect, it } from 'vitest';
+import { FREE_TIER_MAX_ITEM_BYTES } from '../objects.js';
 import {
   estimateSealedUploadBytes,
   uploadChargeFor,
   UPLOAD_ENVELOPE_OVERHEAD_BYTES,
 } from '../publisher.js';
 import {
-  ConnectorPublishError,
   ConnectorPublisher,
   extractArweaveTxId,
   type PaidClientLike,
@@ -302,7 +302,10 @@ describe('ConnectorPublisher', () => {
     );
   });
 
-  it('refuses an object over the size cap before paying anything', async () => {
+  // #102: this used to refuse anything over a hard 95 KiB cap before paying.
+  // The store route prices per KiB, so a large blob is a more expensive upload
+  // rather than a refusal — it must reach the client and come back with a txId.
+  it('uploads a blob above the free-tier ceiling instead of refusing it', async () => {
     const client = fakeClient({
       prices: {
         'g.node.relay': { price: 1n },
@@ -310,13 +313,12 @@ describe('ConnectorPublisher', () => {
       },
       answer: () => ok({ txId: TX }),
     });
-    await expect(
-      publisherWith(client).uploadBlob({
-        body: Buffer.alloc(95 * 1024 + 1),
-        contentType: 'text/plain',
-      })
-    ).rejects.toThrow(ConnectorPublishError);
-    expect(client.calls).toHaveLength(0);
+    const receipt = await publisherWith(client).uploadBlob({
+      body: Buffer.alloc(FREE_TIER_MAX_ITEM_BYTES + 1),
+      contentType: 'text/plain',
+    });
+    expect(receipt.txId).toBe(TX);
+    expect(client.calls.length).toBeGreaterThan(0);
   });
 
   it("publishes an event signed by the owner as {event} and reads the relay's eventId", async () => {

@@ -30,7 +30,6 @@
  */
 
 import { finalizeEvent } from 'nostr-tools/pure';
-import { MAX_OBJECT_SIZE } from '../objects.js';
 import { contentTypeForPath, DEFAULT_CONTENT_TYPE } from '../mime.js';
 import type { UnsignedEvent } from '../nip34-events.js';
 import {
@@ -334,11 +333,8 @@ export class ConnectorPublisher implements Publisher {
   }
 
   async uploadGitObject(upload: GitObjectUpload): Promise<UploadReceipt> {
-    if (upload.body.length > MAX_OBJECT_SIZE) {
-      throw new ConnectorPublishError(
-        `git object ${upload.sha} exceeds the ${String(MAX_OBJECT_SIZE)}-byte limit: ${String(upload.body.length)} bytes`
-      );
-    }
+    // No size gate (#102): the store route prices per KiB, so a body above
+    // FREE_TIER_MAX_ITEM_BYTES is a paid upload rather than a refusal.
     const contentType =
       upload.type === 'blob'
         ? contentTypeForPath(upload.path)
@@ -357,11 +353,9 @@ export class ConnectorPublisher implements Publisher {
   }
 
   async uploadBlob(upload: BlobUpload): Promise<UploadReceipt> {
-    if (upload.body.length > MAX_OBJECT_SIZE) {
-      throw new ConnectorPublishError(
-        `blob exceeds the ${String(MAX_OBJECT_SIZE)}-byte limit: ${String(upload.body.length)} bytes`
-      );
-    }
+    // No size gate (#102), matching uploadGitObject: the store route prices
+    // per KiB, so a blob above FREE_TIER_MAX_ITEM_BYTES costs more rather than
+    // being refused.
     return this.storeWrite(
       [
         ['i', upload.body.toString('base64'), 'blob'],
