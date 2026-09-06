@@ -4,13 +4,17 @@ TOON Protocol's git-to-TOON write path (`@toon-protocol/rig`, CLI) and its decen
 
 ## Agent skills
 
+### Workflow
+
+Planning is done by a human at the keyboard: `/wayfinder` (when what to build is still unclear) or `/grill-with-docs` (when the design is solid and needs ADRs and glossary written), then `/to-spec`, then `/to-tickets` with each ticket added as a sub-issue of the spec issue. Only after that does an agent drive the spec issue to completion with `/implement`. No one-shot prompts for features.
+
 ### Issue tracker
 
 Issues and specs are GitHub issues in `toon-protocol/rig`, driven with the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
-The five triage roles map onto the existing Sandcastle labels: `ready-for-agent` is `agent:implement` (which starts a factory run) and `ready-for-human` is `needs:human`; `needs-triage` and `needs-info` are new. See `docs/agents/triage-labels.md`.
+The five default triage labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`), kept separate from the Sandcastle factory labels so a triage decision never starts a factory run. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
