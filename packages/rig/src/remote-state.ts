@@ -30,7 +30,12 @@ import {
 } from '@toon-protocol/arweave';
 import { REPOSITORY_ANNOUNCEMENT_KIND } from '@toon-protocol/core/nip34';
 
-import { REPOSITORY_STATE_KIND, parseMaintainers } from './nip34-events.js';
+import {
+  REPOSITORY_STATE_KIND,
+  parseMaintainers,
+  parsePayout,
+  type PayoutPointer,
+} from './nip34-events.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -123,6 +128,12 @@ export interface RemoteState {
    * when unannounced or owner-only.
    */
   maintainers: string[];
+  /**
+   * Declared payout pointer (rig#92) from the announcement `payout` tag, or
+   * `null` when unannounced or no pointer is declared — no pointer means the
+   * serving node keeps 100% of repo-scoped write fees (toon-meta#391).
+   */
+  payout: PayoutPointer | null;
   /**
    * Resolve SHAs to Arweave txIds: served from the `arweave` tag map when
    * present, otherwise via the GraphQL Git-SHA resolver. SHAs that resolve
@@ -466,6 +477,8 @@ export async function fetchRemoteState(
   const maintainers = announceEvent
     ? parseMaintainers(announceEvent.tags)
     : [];
+  // Declared payout pointer (rig#92): the `payout` tag on the 30617.
+  const payout = announceEvent ? parsePayout(announceEvent.tags) : null;
 
   const resolveMissing = async (
     shas: string[]
@@ -502,6 +515,7 @@ export async function fetchRemoteState(
     description,
     relays,
     maintainers,
+    payout,
     resolveMissing,
   };
 }

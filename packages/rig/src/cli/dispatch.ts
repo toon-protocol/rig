@@ -37,6 +37,7 @@ import { runIdentity } from './identity-cmd.js';
 import { runInit } from './init.js';
 import { runMaintainers } from './maintainers.js';
 import { runName, type LoadArns } from './name.js';
+import { runPayout } from './payout.js';
 import { runPush, PUSH_USAGE } from './push.js';
 import { runRemote } from './remote.js';
 import { runSite } from './site.js';
@@ -87,6 +88,10 @@ Commands rig owns:
   maintainers add <pubkey>   remove republish the kind:30617 to change who may
   maintainers remove <pubkey>  author authoritative issue/PR status (owner is
                              always an implicit maintainer)
+  payout show                show the repo's declared payout pointer (free);
+  payout set <address>       set/clear republish the kind:30617 — no pointer
+  payout clear               means the serving node keeps 100% of
+                             repo-scoped write fees (v1: evm addresses only)
   fund                       drip devnet faucet funds to this identity's
                              wallet (free); on other networks prints the
                              address(es) to fund externally
@@ -205,6 +210,8 @@ export async function dispatch(
       return runPr(rest, deps);
     case 'maintainers':
       return runMaintainers(rest, deps);
+    case 'payout':
+      return runPayout(rest, deps);
     case 'channel':
       return runChannel(rest, deps);
     case 'channels':

@@ -107,6 +107,7 @@ function emptyRemoteState(): RemoteState {
     description: null,
     relays: [],
     maintainers: [],
+    payout: null,
     resolveMissing: async () => new Map(),
   };
 }

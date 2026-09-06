@@ -65,6 +65,9 @@ importers:
       nostr-tools:
         specifier: ^2.20.0
         version: 2.24.1(typescript@5.9.3)
+      viem:
+        specifier: ^2.0.0
+        version: 2.55.5(typescript@5.9.3)(zod@3.25.76)
     optionalDependencies:
       '@ar.io/sdk':
         specifier: ^4.0.3
