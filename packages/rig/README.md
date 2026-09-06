@@ -411,7 +411,6 @@ Faucet routes (`POST`, body `{"address": "<wallet>"}`):
 |---|---|
 | `/api/base-sepolia/request` | 1000 USDC (ungated on-chain mint) + best-effort Base Sepolia gas |
 | `/api/solana/usdc-request` | 1000 USDC (treasury transfer, no SOL leg) |
-| `/api/solana/request` | 2 SOL + 1000 USDC (airdrop leg subject to the public devnet's per-IP quota) |
 
 `rig fund` hits the two USDC-only routes for the identity's derived wallets —
 it funds USDC and assumes gas is already present.

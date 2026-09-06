@@ -36,6 +36,22 @@ export const TEST_MNEMONIC =
 export const DEFAULT_ARNS_NAME = 'ardrive';
 export const DEFAULT_DEVNET_RELAY = 'wss://relay-ws.devnet.toonprotocol.dev';
 
+// A connector URL is MANDATORY as of 4.0.0. #116 removed the `apex`/`sandbox`
+// presets and the genesis-seed/topology discovery rig used to bootstrap from,
+// so `site publish` now aborts locally — before any I/O — with:
+//
+//   no connector configured: set TOON_CONNECTOR to the node's URL (the one
+//   whose GET /ilp describes it), run `rig entry <url>`, or add connectorUrl
+//   to <home>/.toon-client/config.json
+//
+// This script predates that change (untouched since 2026-07-24) and set no
+// connector, so it failed deterministically against any 4.x build for a reason
+// having nothing to do with the published artifact. Since it runs automatically
+// on `workflow_run: Release`, that turned every release red.
+//
+// This is the shared devnet relay node documented at README.md:93 and :398.
+export const DEFAULT_CONNECTOR = 'https://proxy.relay.devnet.toonprotocol.dev';
+
 // ---------------------------------------------------------------------------
 // Pure validators (unit-tested in smoke-published.test.mjs)
 // ---------------------------------------------------------------------------
@@ -241,7 +257,17 @@ export function main(env = process.env, log = console.log) {
   const rigBin = env.RIG_BIN ?? 'rig';
   const arnsName = env.SMOKE_ARNS_NAME ?? DEFAULT_ARNS_NAME;
   const relayUrl = env.SMOKE_DEVNET_RELAY ?? DEFAULT_DEVNET_RELAY;
-  const identityEnv = { ...env, RIG_MNEMONIC: TEST_MNEMONIC };
+  // An explicit TOON_CONNECTOR in the environment wins, then SMOKE_CONNECTOR,
+  // then the documented devnet node — so a maintainer can point the smoke run
+  // at another node without editing this file.
+  const connectorUrl =
+    env.TOON_CONNECTOR ?? env.SMOKE_CONNECTOR ?? DEFAULT_CONNECTOR;
+  const identityEnv = {
+    ...env,
+    RIG_MNEMONIC: TEST_MNEMONIC,
+    TOON_CONNECTOR: connectorUrl,
+  };
+  log(`using connector ${connectorUrl}`);
 
   const results = [];
   checkHelp(rigBin, log, results, 'name');
