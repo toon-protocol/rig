@@ -446,6 +446,35 @@ describe('selectServiceRequests', () => {
     expect(result.open.map((c) => c.eventId)).toEqual([r1.eventId, r2.eventId]);
   });
 
+  it('accepts an operator-allowlisted requester (NIP-C1 operator policy); their Stop closes only their own request', () => {
+    const rx = control('request', STRANGER, 100, '01');
+    const opts = {
+      coordinatorPubkey: COORDINATOR,
+      repoAddr: ADDR,
+      authorized,
+      acceptedRequesters: new Set([STRANGER.toUpperCase()]),
+    };
+    expect(selectServiceRequests([rx], opts).active?.eventId).toBe(rx.eventId);
+    // Their Stop is author-local: it closes their own request, never a maintainer's.
+    const r2 = control('request', MAINTAINER, 200, '02');
+    const stop = control('stop', STRANGER, 300, '03');
+    const after = selectServiceRequests([rx, r2, stop], opts);
+    expect(after.open.map((c) => c.eventId)).toEqual([r2.eventId]);
+    // A maintainer Stop still closes everything, the allowlisted request included.
+    expect(
+      selectServiceRequests([rx, control('stop', OWNER, 400, '04')], opts)
+        .active
+    ).toBeNull();
+    // Without the allowlist the same request is ignored.
+    expect(
+      selectServiceRequests([rx], {
+        coordinatorPubkey: COORDINATOR,
+        repoAddr: ADDR,
+        authorized,
+      }).active
+    ).toBeNull();
+  });
+
   it('a maintainer Stop closes every earlier request; a later request re-opens service', () => {
     const r1 = control('request', OWNER, 100, '01');
     const r2 = control('request', MAINTAINER, 200, '02');

@@ -48,6 +48,13 @@ export interface MaterializeCommitOptions {
   dir: string;
   /** kind:1617 path: apply this format-patch text on top of `commit`. */
   patch?: { content: string };
+  /**
+   * Extra object ids to fetch alongside the commit's closure — the annotated
+   * tag objects a Manual Trigger names as additional `c` values, so the
+   * coordinator can peel them in the checkout. A missing one is NOT fatal
+   * here (the caller decides what an unpeelable id means).
+   */
+  extraObjectIds?: readonly string[];
   webSocketFactory?: WebSocketFactory;
   fetchFn?: FetchLike;
   resolveSha?: (sha: string, repo: string) => Promise<string | null>;
@@ -134,16 +141,22 @@ export const materializeCommit: MaterializeCommit = async (opts) => {
 
   // ── Download + verify the commit's closure — free ───────────────────────
   const collected = await collectRepoObjects({
-    tips: [opts.commit],
+    tips: [opts.commit, ...(opts.extraObjectIds ?? [])],
     shaToTxId: remote.shaToTxId,
     resolveMissing: (shas) => remote.resolveMissing(shas),
     ...(opts.fetchFn ? { fetchFn: opts.fetchFn } : {}),
     ...(opts.gateways ? { gateways: opts.gateways } : {}),
   });
-  if (collected.missing.length > 0) {
+  const extra = new Set(
+    (opts.extraObjectIds ?? []).map((id) => id.toLowerCase())
+  );
+  const fatal = collected.missing.filter(
+    (m) => !extra.has(m.sha.toLowerCase())
+  );
+  if (fatal.length > 0) {
     throw new MaterializeError(
       missingObjectsMessage(
-        collected.missing,
+        fatal,
         `cannot materialize ${opts.commit.slice(0, 7)}`
       )
     );

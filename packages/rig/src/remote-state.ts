@@ -160,7 +160,12 @@ function isValidRelayUrl(url: string): boolean {
 /** WHATWG WebSocket OPEN ready state. */
 const WS_OPEN = 1;
 
-function defaultWebSocketFactory(url: string): WebSocketLike {
+/**
+ * The production {@link WebSocketFactory}: the global WHATWG WebSocket (Node
+ * >= 22). Shared by every relay reader so the "no global WebSocket" failure
+ * reads the same everywhere.
+ */
+export function defaultWebSocketFactory(url: string): WebSocketLike {
   const ctor = (
     globalThis as { WebSocket?: new (url: string) => WebSocketLike }
   ).WebSocket;
@@ -250,7 +255,9 @@ export function queryRelay(
     try {
       ws = webSocketFactory(relayUrl);
     } catch (err) {
-      reject(new Error(`Failed to connect to relay ${relayUrl}: ${String(err)}`));
+      reject(
+        new Error(`Failed to connect to relay ${relayUrl}: ${String(err)}`)
+      );
       return;
     }
 
@@ -480,9 +487,7 @@ export async function fetchRemoteState(
   }
   // Declared maintainers (#287): the `maintainers` tag on the 30617. Owner is
   // an implicit maintainer and is NOT listed here.
-  const maintainers = announceEvent
-    ? parseMaintainers(announceEvent.tags)
-    : [];
+  const maintainers = announceEvent ? parseMaintainers(announceEvent.tags) : [];
   // Declared payout pointer (rig#92): the `payout` tag on the 30617.
   const payout = announceEvent ? parsePayout(announceEvent.tags) : null;
 
@@ -500,9 +505,7 @@ export async function fetchRemoteState(
       }
     }
     const lookups = await Promise.all(
-      missing.map(
-        async (sha) => [sha, await resolveSha(sha, repoId)] as const
-      )
+      missing.map(async (sha) => [sha, await resolveSha(sha, repoId)] as const)
     );
     for (const [sha, txId] of lookups) {
       if (txId) resolved.set(sha, txId);

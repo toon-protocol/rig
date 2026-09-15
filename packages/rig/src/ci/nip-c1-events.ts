@@ -686,6 +686,13 @@ export interface SelectServiceRequestsOptions {
   repoAddr?: RepoAddress;
   /** Current owner ∪ maintainers (lowercase hex) — the accepted requesters. */
   authorized: Set<string>;
+  /**
+   * Extra requester pubkeys the operator explicitly accepts (NIP-C1: "an
+   * operator MAY explicitly accept other requester pubkeys"). Their Requests
+   * count, but they stay non-maintainers: their Stops close only their own
+   * Requests, and runs they cause carry lower trust.
+   */
+  acceptedRequesters?: Set<string>;
 }
 
 export interface SelectedServiceRequests {
@@ -708,6 +715,10 @@ export function selectServiceRequests(
 ): SelectedServiceRequests {
   const coordinator = opts.coordinatorPubkey.toLowerCase();
   const authorized = new Set([...opts.authorized].map((p) => p.toLowerCase()));
+  const accepted = new Set([
+    ...authorized,
+    ...[...(opts.acceptedRequesters ?? [])].map((p) => p.toLowerCase()),
+  ]);
   const relevant = controls
     .filter(
       (c) =>
@@ -720,7 +731,7 @@ export function selectServiceRequests(
   for (const control of relevant) {
     const author = control.pubkey.toLowerCase();
     if (control.kind === 'request') {
-      if (authorized.has(author)) open.push(control);
+      if (accepted.has(author)) open.push(control);
       continue;
     }
     open = authorized.has(author)

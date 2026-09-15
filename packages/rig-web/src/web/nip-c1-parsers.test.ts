@@ -604,6 +604,27 @@ describe('deriveTrustLevel', () => {
     ).toBe('no-known-context');
   });
 
+  it("a forged quote naming a maintainer but pointing at a STRANGER's request is not directed", () => {
+    // rig's trust.ts requires the on-record request to be AUTHORED by the
+    // quoted pubkey; rig-web must agree, or a coordinator could dress up a
+    // stranger's request as maintainer-directed by lying in the quote.
+    const strangers = request(STRANGER, 100);
+    expect(
+      deriveTrustLevel({
+        publisherPubkey: COORD.toUpperCase(),
+        provenance: {
+          kind: 'service-request',
+          eventId: strangers.eventId,
+          relayUrl: RELAY,
+          pubkey: MAINTAINER,
+        },
+        authorized: AUTHORIZED,
+        controls: [strangers],
+        runCreatedAt: 500,
+      })
+    ).toBe('seen-in-network');
+  });
+
   it('operationally-associated: a standing maintainer request, but the run carries no quote', () => {
     expect(
       deriveTrustLevel({

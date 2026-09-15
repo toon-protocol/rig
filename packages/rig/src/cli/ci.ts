@@ -44,6 +44,7 @@ import {
   repoAddress,
   type CiAdvertisement,
 } from '../ci/nip-c1-events.js';
+import type { CanAfford } from '../ci/coordinator.js';
 import type { Runner } from '../ci/runner.js';
 import {
   encryptSecretUpdate,
@@ -57,10 +58,10 @@ import { runGit } from '../materialize.js';
 import type { UnsignedEvent } from '../nip34-events.js';
 import { ownerToHex } from '../npub.js';
 import {
+  defaultWebSocketFactory,
   queryRelay,
   type NostrEvent,
   type WebSocketFactory,
-  type WebSocketLike,
 } from '../remote-state.js';
 import {
   serializeEventReceipt,
@@ -103,6 +104,11 @@ export interface CiDeps extends EventCommandDeps {
   stateDir?: string;
   /** Stops a running coordinator (default: SIGINT/SIGTERM). */
   signal?: AbortSignal;
+  /**
+   * Affordability seam for `serve` (default: the recorded-channel / wallet
+   * check in ./ci-serve.ts). Tests inject a scripted answer.
+   */
+  canAfford?: CanAfford;
 }
 
 const defaultReadStdin = async (): Promise<string> => {
@@ -278,18 +284,6 @@ function parseCoordinator(positionals: string[]): string {
     );
   }
   return hex;
-}
-
-function defaultWebSocketFactory(url: string): WebSocketLike {
-  const ctor = (
-    globalThis as { WebSocket?: new (url: string) => WebSocketLike }
-  ).WebSocket;
-  if (!ctor) {
-    throw new Error(
-      'No global WebSocket constructor (Node >= 22 required) — pass webSocketFactory'
-    );
-  }
-  return new ctor(url);
 }
 
 // ---------------------------------------------------------------------------

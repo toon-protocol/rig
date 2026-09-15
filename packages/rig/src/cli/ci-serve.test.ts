@@ -10,6 +10,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { clearShaCache } from '@toon-protocol/arweave';
@@ -29,7 +30,15 @@ import { FakeRunner } from '../ci/runner.js';
 import type { NostrEvent } from '../remote-state.js';
 import { hexToNpub } from '../npub.js';
 import type { CiDeps } from './ci.js';
-import { runCiServe } from './ci-serve.js';
+import {
+  estimateRunCost,
+  makeAffordabilityCheck,
+  runCiServe,
+} from './ci-serve.js';
+import {
+  ChannelMapStore,
+  resolveChannelPaths,
+} from '../standalone/channel-map.js';
 import { dispatch } from './dispatch.js';
 import type { CliIo } from './output.js';
 import {
@@ -41,6 +50,7 @@ import type { StandaloneContext } from './standalone-context.js';
 
 const OWNER = 'ab'.repeat(32);
 const MAINT = 'cd'.repeat(32);
+const STRANGER = 'ef'.repeat(32);
 const COORD = '12'.repeat(32);
 const REPO = 'demo';
 const RELAY = 'wss://relay.test.example';
@@ -181,11 +191,15 @@ function makeServeWorld() {
   const rec = makeIo();
   const stateDir = join(tempDir('rig-ci-serve-state-'), 'state');
   const runner = new FakeRunner();
+  const home = tempDir('rig-ci-serve-home-');
   const deps: CiDeps = {
     io: rec.io,
-    env: {},
+    env: { TOON_CLIENT_HOME: home },
     cwd: tempDir('rig-ci-serve-cwd-'),
     loadStandalone: async () => context,
+    // The default wallet check reads THIS identity's recorded channels under
+    // TOON_CLIENT_HOME; the affordability tests below drop this override.
+    canAfford: async () => true,
     webSocketFactory: relay.factory,
     fetchFn: gateway.fetchFn,
     resolveSha: async () => null,
@@ -203,6 +217,8 @@ function makeServeWorld() {
     deps,
     runner,
     stateDir,
+    home,
+    context,
     stoppedCount: () => stopped,
     push(createdAt: number) {
       writeFileSync(join(srcDir, 'code.txt'), `v${createdAt}\n`);
@@ -385,5 +401,231 @@ describe('rig ci serve: a serve session', () => {
       error: expect.any(String),
     });
     expect(world.rec.err.join('\n')).toContain('no identity found');
+  });
+});
+
+describe('rig ci serve: --requester (story 21)', () => {
+  it('rejects a malformed requester (exit 2)', async () => {
+    const rec = makeIo();
+    expect(
+      await runCiServe(
+        ['--relay', RELAY, '--repo', REPO_FLAG, '--requester', 'nope'],
+        { io: rec.io, env: {}, cwd: '/x' }
+      )
+    ).toBe(2);
+    expect(rec.err[0]).toContain('--requester');
+  });
+
+  it("serves on an allowlisted stranger's request and reports the requesters", async () => {
+    const world = makeServeWorld();
+    // Only the STRANGER has asked; without --requester nothing would run.
+    const { announce, refsEvent } = world.snapshot(1000);
+    world.relay.serve([
+      announce,
+      refsEvent,
+      signed(
+        buildCiServiceRequest(repoAddress(OWNER, REPO), COORD, RELAY, 1100),
+        STRANGER,
+        7
+      ),
+    ]);
+    const running = runCiServe(
+      [
+        '--relay',
+        RELAY,
+        '--repo',
+        REPO_FLAG,
+        '--requester',
+        hexToNpub(STRANGER),
+        '--json',
+      ],
+      world.deps
+    );
+    await waitFor(() => world.rec.json.length === 1, 'the JSON document');
+    expect(world.rec.json[0]).toMatchObject({ requesters: [STRANGER] });
+    world.push(2000);
+    await waitFor(
+      () => world.publisher.ofKind(CI_WORKFLOW_RESULT_KIND).length === 1,
+      'the workflow result'
+    );
+    world.abort.abort();
+    expect(await running).toBe(0);
+  });
+});
+
+describe('rig ci serve: the wallet check (story 15)', () => {
+  const RATES = { uploadFee: 1000n, uploadPerKib: 10n, eventFee: 5n };
+
+  it('estimates a run as events × eventFee + uploads × the metered upload charge', () => {
+    // 4 events × 5 + 1 upload × (1000 + 10 × (⌊sealed(64 KiB)/1024⌋ + 1))
+    expect(estimateRunCost({ events: 4, uploads: 1, rates: RATES })).toBe(
+      20n +
+        1000n +
+        10n *
+          BigInt(Math.floor((Math.ceil((64 * 1024) / 3) * 4 + 704) / 1024) + 1)
+    );
+  });
+
+  function recordChannel(
+    home: string,
+    identity: string,
+    deposit: string,
+    claimed: string
+  ): void {
+    const paths = resolveChannelPaths({ TOON_CLIENT_HOME: home });
+    const store = new ChannelMapStore(paths);
+    store.record({
+      channelId: '0x' + '11'.repeat(32),
+      peerId: 'nostr-test',
+      identity,
+      destination: 'g.toon.relay',
+      chain: 'evm:31337',
+      tokenNetwork: '0x' + '22'.repeat(20),
+      context: {
+        chainType: 'evm',
+        chainId: 31337,
+        tokenNetworkAddress: '0x' + '22'.repeat(20),
+        tokenAddress: '0x' + '33'.repeat(20),
+        recipient: '0x' + '44'.repeat(20),
+      },
+      depositTotal: deposit,
+    });
+    mkdirSync(dirname(paths.watermarkPath), { recursive: true });
+    writeFileSync(
+      paths.watermarkPath,
+      JSON.stringify({
+        ['0x' + '11'.repeat(32)]: { nonce: 3, cumulativeAmount: claimed },
+      })
+    );
+  }
+
+  it('refuses a run when the best open channel cannot cover it, and allows it when it can', async () => {
+    const logs: string[] = [];
+    const ctx = makeServeWorld().context;
+    const home = tempDir('rig-ci-serve-wallet-');
+    const check = makeAffordabilityCheck({
+      ctx,
+      env: { TOON_CLIENT_HOME: home },
+      log: (l) => logs.push(l),
+    });
+    const estimate = { events: 4, uploads: 1, rates: RATES };
+    const cost = estimateRunCost(estimate);
+
+    recordChannel(home, COORD, (cost - 1n).toString(), '0');
+    expect(await check(estimate)).toBe(false);
+    expect(logs.at(-1)).toMatch(/wallet check: the best open channel has/);
+
+    recordChannel(home, COORD, (cost + 500n).toString(), '500');
+    expect(await check(estimate)).toBe(true);
+
+    // Claimed past the deposit → nothing available.
+    recordChannel(home, COORD, cost.toString(), (cost + 1n).toString());
+    expect(await check(estimate)).toBe(false);
+  });
+
+  it('falls back to the wallet before any channel is recorded; unreadable or absent → refuse', async () => {
+    const logs: string[] = [];
+    const base = makeServeWorld().context;
+    const home = tempDir('rig-ci-serve-wallet-');
+    const estimate = { events: 4, uploads: 1, rates: RATES };
+    const cost = estimateRunCost(estimate);
+    const withWallet = (tokens: { symbol?: string; amount: string }[]) =>
+      makeAffordabilityCheck({
+        ctx: {
+          ...base,
+          money: {
+            openChannel: async () => {
+              throw new Error('unused');
+            },
+            closeChannel: async () => {
+              throw new Error('unused');
+            },
+            settleChannel: async () => {
+              throw new Error('unused');
+            },
+            walletChainBalances: async () => [
+              { chain: 'evm', chainKey: 'evm:31337', address: '0x0', tokens },
+            ],
+          },
+        },
+        env: { TOON_CLIENT_HOME: home },
+        log: (l) => logs.push(l),
+      });
+
+    expect(
+      await withWallet([{ symbol: 'USDC', amount: (cost - 1n).toString() }])(
+        estimate
+      )
+    ).toBe(false);
+    expect(logs.at(-1)).toMatch(/no channel recorded yet/);
+    expect(
+      await withWallet([{ symbol: 'USDC', amount: cost.toString() }])(estimate)
+    ).toBe(true);
+    // A non-USDC token never counts.
+    expect(
+      await withWallet([{ symbol: 'ETH', amount: (cost * 10n).toString() }])(
+        estimate
+      )
+    ).toBe(false);
+
+    // No wallet reader at all → refuse.
+    const noMoney = makeAffordabilityCheck({
+      ctx: base,
+      env: { TOON_CLIENT_HOME: home },
+      log: (l) => logs.push(l),
+    });
+    expect(await noMoney(estimate)).toBe(false);
+    expect(logs.at(-1)).toMatch(/no wallet reader/);
+
+    // Unreadable wallet → refuse.
+    const broken = makeAffordabilityCheck({
+      ctx: {
+        ...base,
+        money: {
+          openChannel: async () => {
+            throw new Error('unused');
+          },
+          closeChannel: async () => {
+            throw new Error('unused');
+          },
+          settleChannel: async () => {
+            throw new Error('unused');
+          },
+          walletChainBalances: async () => {
+            throw new Error('rpc down');
+          },
+        },
+      },
+      env: { TOON_CLIENT_HOME: home },
+      log: (l) => logs.push(l),
+    });
+    expect(await broken(estimate)).toBe(false);
+    expect(logs.at(-1)).toMatch(/wallet unreadable \(rpc down\)/);
+  });
+
+  it('is wired into serve by default: an empty home with no wallet reader starts no run and says why on stderr', async () => {
+    const world = makeServeWorld();
+    delete world.deps.canAfford;
+    const running = runCiServe(
+      ['--relay', RELAY, '--repo', REPO_FLAG],
+      world.deps
+    );
+    await waitFor(
+      () => world.publisher.ofKind(CI_ADVERTISEMENT_KIND).length === 1,
+      'the advertisement'
+    );
+    world.push(2000);
+    await waitFor(
+      () => world.rec.err.some((l) => l.includes('wallet check')),
+      'the wallet refusal'
+    );
+    await flush();
+    expect(world.publisher.ofKind(CI_WORKFLOW_RESULT_KIND)).toHaveLength(0);
+    expect(world.runner.requests).toHaveLength(0);
+    expect(world.rec.err.some((l) => l.includes('wallet cannot cover'))).toBe(
+      true
+    );
+    world.abort.abort();
+    expect(await running).toBe(0);
   });
 });

@@ -162,6 +162,28 @@ describe('deriveTrustLevel', () => {
     ).toBe('seen-in-network');
   });
 
+  it("seen-in-network, not directed: a run quoting an operator-allowlisted NON-maintainer's request", () => {
+    // `rig ci serve --requester <stranger>` lets a contributor run their own
+    // coordinator against a repo they do not maintain (story 21). The run's
+    // frozen quote names the stranger's request, which the trust derivation
+    // must NOT elevate: nothing a maintainer signed backs it.
+    const req = control('request', STRANGER, 100, '01');
+    expect(
+      deriveTrustLevel({
+        publisherPubkey: COORDINATOR,
+        provenance: {
+          kind: 'service-request',
+          eventId: req.eventId,
+          relayUrl: RELAY,
+          pubkey: STRANGER,
+        },
+        authorized,
+        controls: [req],
+        runCreatedAt: 200,
+      })
+    ).toBe('seen-in-network');
+  });
+
   it('no-known-context: nothing ties the publisher to the repo', () => {
     expect(
       deriveTrustLevel({

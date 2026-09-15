@@ -628,37 +628,38 @@ describe('push trigger', () => {
 // Secrets
 // ---------------------------------------------------------------------------
 
-describe('secrets', () => {
-  function secretUpdate(
-    world: World,
-    handle: CoordinatorHandle,
-    author: string,
-    set: Record<string, string>,
-    remove: string[] = []
-  ) {
-    const sender = generateSecretsKey();
-    const created_at = world.clock.now();
-    const ciphertext = encryptSecretUpdate(
-      { author, created_at, set, remove },
-      sender.secretKey,
-      handle.secretsKeyPubkey
-    );
-    return signed(
-      buildCiSecretUpdate({
-        // NIP-C1: the maintainer's OWN perspective, signer == its pubkey.
-        repoAddr: repoAddress(author, REPO),
-        coordinatorPubkey: COORD,
-        advertisementId: handle.advertisementId as string,
-        advertisementRelayHint: RELAY,
-        senderPubkey: sender.pubkey,
-        recipientPubkey: handle.secretsKeyPubkey,
-        ciphertext,
-        createdAt: created_at,
-      }),
-      author
-    );
-  }
+/** A kind:29846 update from `author`, encrypted to the coordinator's current secrets-key. */
+function secretUpdate(
+  world: World,
+  handle: CoordinatorHandle,
+  author: string,
+  set: Record<string, string>,
+  remove: string[] = []
+) {
+  const sender = generateSecretsKey();
+  const created_at = world.clock.now();
+  const ciphertext = encryptSecretUpdate(
+    { author, created_at, set, remove },
+    sender.secretKey,
+    handle.secretsKeyPubkey
+  );
+  return signed(
+    buildCiSecretUpdate({
+      // NIP-C1: the maintainer's OWN perspective, signer == its pubkey.
+      repoAddr: repoAddress(author, REPO),
+      coordinatorPubkey: COORD,
+      advertisementId: handle.advertisementId as string,
+      advertisementRelayHint: RELAY,
+      senderPubkey: sender.pubkey,
+      recipientPubkey: handle.secretsKeyPubkey,
+      ciphertext,
+      createdAt: created_at,
+    }),
+    author
+  );
+}
 
+describe('secrets', () => {
   it('injects a maintainer-provisioned secret into a maintainer push, never into a stranger PR', async () => {
     const world = makeWorld();
     const { announce, refsEvent } = world.snapshot(1000);
@@ -1066,6 +1067,158 @@ describe('manual trigger (kind:9840)', () => {
       conclusion: 'startup_failure',
       jobs: [],
     });
+    await handle.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Operator requester allowlist (story 21)
+// ---------------------------------------------------------------------------
+
+describe('operator-accepted requesters', () => {
+  it("serves on an allowlisted stranger's request, quotes it, gives them no secrets, and honours their author-local Stop", async () => {
+    const world = makeWorld();
+    const { announce, refsEvent } = world.snapshot(1000);
+    world.relay.serve([announce, refsEvent, serviceRequest(STRANGER, 1100)]);
+    const handle = await world.start({ acceptedRequesters: [STRANGER] });
+    expect(must(handle.serving()[0]).serving).toBe(true);
+    expect(
+      world.logs.some((l) => l.includes('operator-accepted requester'))
+    ).toBe(true);
+
+    // A maintainer-provisioned secret exists…
+    world.relay.push(
+      secretUpdate(world, handle, MAINT, { DEPLOY_TOKEN: 'hunter2' })
+    );
+    await handle.idle();
+
+    // …an owner push (a maintainer-authored trigger) gets it, quoting the
+    // stranger's request as the run's provenance.
+    const base = push(world, 2000);
+    await handle.idle();
+    expect(must(world.runner.requests[0]).secrets).toEqual({
+      DEPLOY_TOKEN: 'hunter2',
+    });
+    expect(resultEvents(world.publisher)[0]).toMatchObject({
+      provenance: { kind: 'service-request', pubkey: STRANGER },
+    });
+
+    // The stranger's own kind:1617 PR runs, with NO secrets.
+    const contrib = tempDir('rig-ci-coord-contrib-');
+    git(['clone', '-q', world.srcDir, '.'], contrib);
+    writeFileSync(join(contrib, 'pr.txt'), 'mine\n');
+    git(['add', '.'], contrib);
+    git(['commit', '-m', 'my change'], contrib);
+    const patch = signed(
+      {
+        kind: 1617,
+        content: git(['format-patch', '--stdout', `${base}..HEAD`], contrib),
+        created_at: 2500,
+        tags: [
+          ['a', ADDR],
+          ['p', OWNER],
+          ['subject', 'my change'],
+          ['commit', git(['rev-parse', 'HEAD'], contrib)],
+          ['parent-commit', base],
+        ],
+      },
+      STRANGER
+    );
+    world.relay.push(patch);
+    await handle.idle();
+    expect(must(world.runner.requests[1]).secrets).toEqual({});
+    expect(must(world.runner.requests[1]).trigger.reason).toBe('pull_request');
+
+    // Their Stop closes only their own request: with a maintainer request
+    // also standing, service continues; without one, it stops.
+    world.relay.push(serviceRequest(MAINT, 2600));
+    await handle.idle();
+    world.relay.push(serviceStop(STRANGER, 2700));
+    await handle.idle();
+    expect(must(handle.serving()[0]).serving).toBe(true);
+    world.relay.push(serviceStop(MAINT, 2800));
+    await handle.idle();
+    expect(must(handle.serving()[0]).serving).toBe(false);
+    await handle.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Manual Trigger: NIP-C1 `c` peeling and `a` scope
+// ---------------------------------------------------------------------------
+
+describe('manual trigger: annotated tags and extra repo coordinates', () => {
+  function manualFor(
+    commit: string,
+    createdAt: number,
+    extra: { tagObjectIds?: string[]; extraRepoAddrs?: string[] } = {}
+  ): NostrEvent {
+    return signed(
+      buildCiManualTrigger(
+        COORD,
+        {
+          repoAddr: ADDR,
+          commit,
+          workflow: {
+            path: '.github/workflows/ci.yml',
+            sha256: sha256Hex(WORKFLOW),
+          },
+          ...extra,
+        },
+        createdAt
+      ),
+      MAINT
+    );
+  }
+
+  it('runs when every extra c peels to the commit, keeps them as c tags, and never republishes unverified a tags', async () => {
+    const world = makeWorld();
+    git(['tag', '-a', 'v1', '-m', 'release v1'], world.srcDir);
+    const tagObject = git(['rev-parse', 'v1'], world.srcDir);
+    const commit = git(['rev-parse', 'v1^{commit}'], world.srcDir);
+    expect(tagObject).not.toBe(commit);
+    const { announce, refsEvent } = world.snapshot(1000);
+    world.relay.serve([announce, refsEvent]);
+    const handle = await world.start();
+
+    world.relay.push(
+      manualFor(commit, 1500, {
+        tagObjectIds: [tagObject],
+        extraRepoAddrs: [repoAddress(MAINT, REPO)],
+      })
+    );
+    await handle.idle();
+    expect(publishedKinds(world.publisher)).toEqual([
+      39842, 39842, 9841, 39842, 9842, 39842,
+    ]);
+    const result = must(resultEvents(world.publisher)[0]);
+    expect(result.trigger.commit).toBe(commit);
+    expect(result.trigger.tagObjectIds).toEqual([tagObject]);
+    expect(result.trigger.extraRepoAddrs).toBeUndefined();
+    await handle.stop();
+  });
+
+  it('ignores a request whose extra c does not peel to the same commit, publishing nothing', async () => {
+    const world = makeWorld();
+    git(['tag', '-a', 'old', '-m', 'old tag'], world.srcDir);
+    const oldTag = git(['rev-parse', 'old'], world.srcDir);
+    const newer = world.commit('next.txt', 'n\n', 'next');
+    const { announce, refsEvent } = world.snapshot(1000);
+    world.relay.serve([announce, refsEvent]);
+    const handle = await world.start();
+
+    world.relay.push(manualFor(newer, 1500, { tagObjectIds: [oldTag] }));
+    await handle.idle();
+    expect(publishedKinds(world.publisher)).toEqual([]);
+    expect(world.runner.requests).toHaveLength(0);
+    expect(world.logs.some((l) => l.includes('does not peel to'))).toBe(true);
+
+    // An id that is not in the repository at all is ignored the same way.
+    world.relay.push(
+      manualFor(newer, 1600, { tagObjectIds: ['9'.repeat(40)] })
+    );
+    await handle.idle();
+    expect(publishedKinds(world.publisher)).toEqual([]);
     await handle.stop();
   });
 });

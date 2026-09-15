@@ -19,9 +19,12 @@
  *
  * Authorization (user story 12): a repo is served only while
  * `selectServiceRequests` finds an accepted, unstopped 9843 from the owner or
- * a declared maintainer, re-evaluated at EVERY trigger and again at runner
- * handoff (the frozen `service-request` quote). A Manual Trigger needs its
- * author to be a maintainer and no standing request. Secrets (story 7) are
+ * a declared maintainer — or from a pubkey the operator explicitly accepts
+ * (`acceptedRequesters`, NIP-C1's operator policy; story 21: a contributor
+ * serving a repo they do not maintain, at lower trust) — re-evaluated at
+ * EVERY trigger and again at runner handoff (the frozen `service-request`
+ * quote). A Manual Trigger needs its author to be a maintainer and no
+ * standing request. Secrets (story 7) are
  * injected only when the trigger's author is a maintainer; a stranger's pull
  * request runs with an empty secret set.
  *
@@ -66,13 +69,14 @@ import type { UnsignedEvent } from '../nip34-events.js';
 import type { FetchLike } from '../object-fetch.js';
 import type { FeeRates, Publisher } from '../publisher.js';
 import {
+  defaultWebSocketFactory,
   fetchRemoteState,
   queryRelay,
   type NostrEvent,
   type NostrFilter,
   type WebSocketFactory,
-  type WebSocketLike,
 } from '../remote-state.js';
+import { runGit } from '../materialize.js';
 import {
   MaterializeError,
   materializeCommit,
@@ -186,6 +190,13 @@ export interface CoordinatorOptions {
   materialize?: MaterializeCommit;
   /** Affordability seam (default: always true once fee rates are readable). */
   canAfford?: CanAfford;
+  /**
+   * Requester pubkeys (hex) whose Service Requests are accepted in addition
+   * to the repo's owner and maintainers (NIP-C1 operator policy). They are
+   * NOT maintainers: their Stops close only their own Requests, their pushes
+   * and PRs get no secrets, and runs they cause carry lower trust.
+   */
+  acceptedRequesters?: Iterable<string>;
   /** Advertisement TTL in seconds (≤ 1800; default 1800, renewed at 5/6). */
   advertisementTtlSeconds?: number;
   /** Keep checkouts after their runs (default: delete). */
@@ -240,7 +251,6 @@ interface PendingTrigger {
     pubkey: string;
     workflow: CiWorkflowRef;
     tagObjectIds?: string[];
-    extraRepoAddrs?: string[];
   };
 }
 
@@ -351,6 +361,9 @@ export async function startCoordinator(
   const log = opts.log ?? (() => undefined);
   const materialize = opts.materialize ?? materializeCommit;
   const canAfford: CanAfford = opts.canAfford ?? (async () => true);
+  const acceptedRequesters = new Set(
+    [...(opts.acceptedRequesters ?? [])].map((p) => p.toLowerCase())
+  );
   const adTtl = Math.min(
     opts.advertisementTtlSeconds ?? DEFAULT_ADVERTISEMENT_TTL,
     1800
@@ -447,6 +460,7 @@ export async function startCoordinator(
       coordinatorPubkey: me,
       repoAddr: repo.addr,
       authorized: repo.authorized,
+      acceptedRequesters,
     }).active !== null;
   const handleControl = (ev: NostrEvent): void => {
     const control = parseCiServiceControl(ev);
@@ -457,12 +471,16 @@ export async function startCoordinator(
     repo.controls.set(control.eventId, control);
     const after = isServing(repo);
     if (before !== after) {
+      const who = repo.authorized.has(control.pubkey)
+        ? 'maintainer'
+        : 'operator-accepted requester';
       log(
-        `[ci] ${repo.repoId}: ${after ? 'serving (maintainer Service Request accepted)' : 'service stopped'}`
+        `[ci] ${repo.repoId}: ${after ? `serving (${who} Service Request accepted)` : 'service stopped'}`
       );
     } else if (
       control.kind === 'request' &&
-      !repo.authorized.has(control.pubkey)
+      !repo.authorized.has(control.pubkey) &&
+      !acceptedRequesters.has(control.pubkey.toLowerCase())
     ) {
       log(
         `[ci] ${repo.repoId}: Service Request from non-maintainer ${control.pubkey.slice(0, 8)} ignored`
@@ -538,7 +556,7 @@ export async function startCoordinator(
   };
   await advertise();
 
-  // ── Run queue + worker pool ──────────────────────────────────────────────
+  // ── Run queue + concurrency slots ───────────────────────────────────────
   const queue: QueuedRun[] = [];
   const activeAborts = new Set<AbortController>();
   let active = 0;
@@ -604,6 +622,7 @@ export async function startCoordinator(
           coordinatorPubkey: me,
           repoAddr: repo.addr,
           authorized: repo.authorized,
+          acceptedRequesters,
         }
       );
       if (!request) {
@@ -914,6 +933,9 @@ export async function startCoordinator(
           commit: t.commit,
           dir,
           ...(t.patch ? { patch: { content: t.patch.content } } : {}),
+          ...(t.manual?.tagObjectIds && t.manual.tagObjectIds.length > 0
+            ? { extraObjectIds: t.manual.tagObjectIds }
+            : {}),
           ...(opts.webSocketFactory
             ? { webSocketFactory: opts.webSocketFactory }
             : {}),
@@ -956,8 +978,31 @@ export async function startCoordinator(
       }
 
       const checkout: Checkout = { dir: materialized.dir, refs: 0 };
-      const workflows = await discoverWorkflows(materialized.dir);
       const commit = materialized.commit;
+
+      // NIP-C1 Manual Trigger: "A coordinator MUST resolve every supplied `c`
+      // object and ignore the request unless all supplied object ids peel to
+      // the same commit id." Extra `c` values are annotated tags; peel each
+      // in the checkout and drop the request on any miss or mismatch.
+      if (t.manual?.tagObjectIds && t.manual.tagObjectIds.length > 0) {
+        const mismatch = await findUnpeelableTagId(
+          materialized.dir,
+          t.manual.tagObjectIds,
+          commit
+        );
+        if (mismatch !== null) {
+          log(
+            `[ci] manual trigger ignored: c ${mismatch.slice(0, 7)} does not peel to ${commit.slice(0, 7)} (or is not in the repo)`
+          );
+          if (!opts.keepCheckouts)
+            await rm(materialized.dir, { recursive: true, force: true }).catch(
+              () => undefined
+            );
+          return;
+        }
+      }
+
+      const workflows = await discoverWorkflows(materialized.dir);
       const tagObjectIds = [
         ...(t.manual?.tagObjectIds ?? []),
         ...(commit !== t.commit && !t.patch ? [t.commit] : []),
@@ -1012,11 +1057,14 @@ export async function startCoordinator(
         return;
       }
       for (const wf of selected) {
+        // Only the served perspective is published as `a`. NIP-C1 lets a
+        // Manual Trigger name other maintainers' announcements, but "a
+        // coordinator MUST resolve every `a` tag independently and MUST NOT
+        // run a workflow for a repository merely because it was named": rig
+        // serves one perspective per repo and verifies only that one, so it
+        // does not republish the others as if it had.
         const trigger: CiTriggerContext = {
           repoAddr: repo.addr,
-          ...(t.manual?.extraRepoAddrs && t.manual.extraRepoAddrs.length > 0
-            ? { extraRepoAddrs: t.manual.extraRepoAddrs }
-            : {}),
           commit,
           ...(tagObjectIds.length > 0 ? { tagObjectIds } : {}),
           workflow: { path: wf.path, sha256: wf.sha256 },
@@ -1219,7 +1267,6 @@ export async function startCoordinator(
         pubkey: manual.pubkey,
         workflow: t.workflow,
         ...(t.tagObjectIds ? { tagObjectIds: t.tagObjectIds } : {}),
-        ...(t.extraRepoAddrs ? { extraRepoAddrs: t.extraRepoAddrs } : {}),
       },
     });
   };
@@ -1449,13 +1496,32 @@ export async function startCoordinator(
   };
 }
 
-function defaultWebSocketFactory(url: string): WebSocketLike {
-  const ctor = (
-    globalThis as { WebSocket?: new (url: string) => WebSocketLike }
-  ).WebSocket;
-  if (!ctor)
-    throw new Error(
-      'No global WebSocket constructor (Node >= 22 required) — pass webSocketFactory'
-    );
-  return new ctor(url);
+/**
+ * Peel every `c` tag id a Manual Trigger supplied and return the first one
+ * that is missing from the checkout or peels to a different commit than the
+ * run's, or null when they all agree (NIP-C1 Manual Trigger rule).
+ */
+async function findUnpeelableTagId(
+  checkoutDir: string,
+  tagObjectIds: readonly string[],
+  commit: string
+): Promise<string | null> {
+  for (const id of tagObjectIds) {
+    if (!/^[0-9a-f]{40}$/i.test(id)) return id;
+    let peeled: string;
+    try {
+      peeled = (
+        await runGit(checkoutDir, [
+          'rev-parse',
+          '--verify',
+          '--quiet',
+          `${id}^{commit}`,
+        ])
+      ).trim();
+    } catch {
+      return id;
+    }
+    if (peeled.toLowerCase() !== commit.toLowerCase()) return id;
+  }
+  return null;
 }

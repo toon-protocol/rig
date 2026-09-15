@@ -605,14 +605,21 @@ export function deriveTrustLevel(args: DeriveTrustArgs): CiTrustLevel {
   const publisher = args.publisherPubkey.toLowerCase();
   const { provenance, authorized } = args;
   const forCoordinator = args.controls.filter(
-    (c) => c.coordinatorPubkey === publisher
+    (c) => c.coordinatorPubkey.toLowerCase() === publisher
   );
   const repoAddr = forCoordinator[0]?.repoAddr;
 
   if (provenance && authorized.has(provenance.pubkey.toLowerCase())) {
     if (provenance.kind === 'manual-trigger') return 'maintainer-directed';
+    // The quoted request must be on record AND authored by the quoted
+    // pubkey (same rule as rig's trust.ts): a quote is the coordinator's
+    // claim, the 9843 on the relay is the maintainer's.
+    const quoted = provenance.pubkey.toLowerCase();
     const onRecord = forCoordinator.some(
-      (c) => c.kind === 'request' && c.eventId === provenance.eventId
+      (c) =>
+        c.kind === 'request' &&
+        c.eventId === provenance.eventId &&
+        c.pubkey.toLowerCase() === quoted
     );
     if (onRecord) return 'maintainer-directed';
   }

@@ -27,9 +27,17 @@ import { ActRunner, DEFAULT_ACT_PLATFORMS } from '../ci/act-runner.js';
 import {
   DEFAULT_RUN_TIMEOUT_MS,
   startCoordinator,
+  type CanAfford,
   type CoordinatorHandle,
   type CoordinatorRepo,
+  type RunCostEstimate,
 } from '../ci/coordinator.js';
+import { uploadChargeFor } from '../publisher.js';
+import {
+  ChannelMapStore,
+  channelStatus,
+  resolveChannelPaths,
+} from '../standalone/channel-map.js';
 import type { Runner } from '../ci/runner.js';
 import { defaultCoordinatorStateDir } from '../ci/state.js';
 import { PREFERRED_GATEWAY } from '../gateway-preference.js';
@@ -64,6 +72,10 @@ Options:
   --relay <url>          the relay to watch AND publish to (ws:// or wss://)
                          [required, exactly one]
   --repo <owner>/<id>    a repo to serve (owner as npub or hex); repeatable
+  --requester <pubkey>   also accept Service Requests from this pubkey (npub
+                         or hex; NIP-C1 operator policy); repeatable — for
+                         running your own coordinator against a repo you do
+                         not maintain; such runs show as lower trust
   --concurrency <n>      runs executed at once (default 1); more queue
   --timeout <seconds>    wall-clock budget per run → timed_out (default 1800)
   --gateway <url>        gateway that serves the store's raw bytes, for log +
@@ -85,11 +97,18 @@ resumes from the last processed event. The NIP-44 secrets-key is generated
 fresh every start and never written to disk: after a restart maintainers
 re-send \`rig ci secret set\`; values already accepted survive.
 
+Before each run the coordinator checks that a recorded payment channel (or,
+before the first channel opens, the wallet's USDC) can cover the run's writes;
+otherwise it says so on stderr and starts nothing, so a run is never
+half-published (story 15).
+
 Stop with Ctrl-C (SIGINT) or SIGTERM: active runs conclude \`cancelled\`.`;
 
 interface ServeFlags {
   relay: string;
   repos: CoordinatorRepo[];
+  /** Operator-accepted requester pubkeys (lowercase hex). */
+  requesters: string[];
   concurrency: number;
   timeoutMs: number;
   gateway: string;
@@ -107,6 +126,7 @@ function parseServeArgs(args: string[]): ServeFlags | 'help' {
     options: {
       relay: { type: 'string' },
       repo: { type: 'string', multiple: true },
+      requester: { type: 'string', multiple: true },
       concurrency: { type: 'string' },
       timeout: { type: 'string' },
       gateway: { type: 'string' },
@@ -154,6 +174,17 @@ function parseServeArgs(args: string[]): ServeFlags | 'help' {
       'at least one --repo <owner>/<repo-id> is required'
     );
 
+  const requesters: string[] = [];
+  for (const spec of values.requester ?? []) {
+    try {
+      requesters.push(ownerToHex(spec));
+    } catch (err) {
+      throw new ServeUsageError(
+        `--requester ${JSON.stringify(spec)}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
   const positiveInt = (
     flag: string,
     raw: string | undefined,
@@ -187,6 +218,7 @@ function parseServeArgs(args: string[]): ServeFlags | 'help' {
   return {
     relay: values.relay,
     repos,
+    requesters,
     concurrency,
     timeoutMs,
     gateway: values.gateway ?? PREFERRED_GATEWAY,
@@ -194,6 +226,95 @@ function parseServeArgs(args: string[]): ServeFlags | 'help' {
     ...(platforms ? { platforms } : {}),
     ...(values.workdir !== undefined ? { workdir: values.workdir } : {}),
     json: values.json,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Affordability (story 15)
+// ---------------------------------------------------------------------------
+
+/** What one run is estimated to cost, in the smallest asset unit. */
+export function estimateRunCost(estimate: RunCostEstimate): bigint {
+  // Logs and artifacts are metered per KiB on the store route; 64 KiB is a
+  // generous per-upload envelope for a log tail's full file.
+  return (
+    BigInt(estimate.events) * estimate.rates.eventFee +
+    BigInt(estimate.uploads) * uploadChargeFor(estimate.rates, 64 * 1024)
+  );
+}
+
+/**
+ * The coordinator's wallet check: a run is affordable when a recorded, still
+ * open payment channel of THIS identity has `deposited − claimed ≥ cost`, or —
+ * before any channel is recorded (the first paid write opens one lazily
+ * from the wallet) — when the wallet holds that much USDC on some chain. An
+ * unreadable wallet is NOT affordable: the coordinator must never start a
+ * run it may not be able to finish publishing.
+ */
+export function makeAffordabilityCheck(args: {
+  ctx: StandaloneContext;
+  env: NodeJS.ProcessEnv;
+  log: (line: string) => void;
+}): CanAfford {
+  const { ctx, env, log } = args;
+  return async (estimate) => {
+    const cost = estimateRunCost(estimate);
+    const store = new ChannelMapStore(resolveChannelPaths(env));
+    const mine = store
+      .list()
+      .filter(
+        (record) =>
+          record.identity.toLowerCase() === ctx.ownerPubkey.toLowerCase() &&
+          record.supersededAt === undefined
+      );
+    if (mine.length > 0) {
+      let best = 0n;
+      for (const record of mine) {
+        const watermark = store.readWatermark(record.channelId);
+        if (channelStatus(watermark) !== 'open') continue;
+        if (record.depositTotal === undefined) continue;
+        const remaining =
+          BigInt(record.depositTotal) -
+          BigInt(watermark?.cumulativeAmount ?? '0');
+        if (remaining > best) best = remaining;
+      }
+      if (best >= cost) return true;
+      log(
+        `[ci] wallet check: the best open channel has ${best} available, the run needs ~${cost} — ` +
+          'fund this coordinator (rig fund / rig channel open --deposit) to resume'
+      );
+      return false;
+    }
+    if (!ctx.money) {
+      log(
+        '[ci] wallet check: no channel recorded and no wallet reader — refusing'
+      );
+      return false;
+    }
+    let chains;
+    try {
+      chains = await ctx.money.walletChainBalances();
+    } catch (err) {
+      log(
+        `[ci] wallet check: wallet unreadable (${err instanceof Error ? err.message : String(err)}) — refusing`
+      );
+      return false;
+    }
+    let best = 0n;
+    for (const chain of chains) {
+      if (chain.unreadable) continue;
+      for (const token of chain.tokens) {
+        if (token.symbol !== undefined && !/usdc/i.test(token.symbol)) continue;
+        const amount = BigInt(token.amount);
+        if (amount > best) best = amount;
+      }
+    }
+    if (best >= cost) return true;
+    log(
+      `[ci] wallet check: no channel recorded yet and the wallet holds ${best} USDC base units, the run needs ~${cost} — ` +
+        'fund this coordinator (rig fund) to resume'
+    );
+    return false;
   };
 }
 
@@ -287,6 +408,14 @@ export async function runCiServe(
       version,
       concurrency: flags.concurrency,
       timeoutMs: flags.timeoutMs,
+      acceptedRequesters: flags.requesters,
+      canAfford:
+        forced.canAfford ??
+        makeAffordabilityCheck({
+          ctx,
+          env: forced.env,
+          log: (line) => io.err(line),
+        }),
       ...(forced.webSocketFactory
         ? { webSocketFactory: forced.webSocketFactory }
         : {}),
@@ -310,6 +439,7 @@ export async function runCiServe(
         relay: flags.relay,
         gateway: flags.gateway,
         repos: flags.repos,
+        requesters: flags.requesters,
         runner: { family: runner.family, selectors: runner.selectors },
         concurrency: flags.concurrency,
         timeoutSeconds: flags.timeoutMs / 1000,
@@ -324,6 +454,10 @@ export async function runCiServe(
       io.out(`Coordinator: ${npub}`);
       io.out(`Relay:       ${flags.relay}`);
       io.out(`Serving:     ${repoLabels.join(', ')}`);
+      if (flags.requesters.length > 0)
+        io.out(
+          `Requesters:  maintainers + ${flags.requesters.map(hexToNpub).join(', ')}`
+        );
       io.out(
         `Runner:      ${runner.family} (${runner.selectors.join(', ')}); concurrency ${flags.concurrency}, timeout ${flags.timeoutMs / 1000}s`
       );

@@ -1,9 +1,12 @@
 /**
  * ActRunner tests (rig#125). The parsing half runs everywhere against
  * fixture lines captured from a real `act --json` run (act 0.2.89). The
- * execution half is the ONLY test in the package that touches Docker: it is
- * skipped unless an `act` binary is reachable (RIG_ACT_BIN or PATH) AND
- * `docker info` succeeds, so `pnpm -r test` never needs either.
+ * execution half is the ONLY test in the package that touches Docker, and it
+ * is OPT-IN: it runs only when RIG_ACT_BIN names an act binary explicitly AND
+ * `docker info` succeeds. A dev box that merely has act on PATH does not run
+ * it, so `pnpm -r test` never needs (or waits for) Docker:
+ *
+ *   RIG_ACT_BIN=/path/to/act npx vitest run src/ci/act-runner.test.ts
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -430,7 +433,9 @@ function dockerReachable(): boolean {
   }
 }
 
-const ACT_BIN = resolveActBinary(process.env);
+const ACT_BIN = process.env['RIG_ACT_BIN']
+  ? resolveActBinary(process.env)
+  : null;
 const CAN_RUN = ACT_BIN !== null && dockerReachable();
 
 function git(cwd: string, args: string[]): string {
@@ -463,93 +468,110 @@ jobs:
           path: out.txt
 `;
 
-describe.skipIf(!CAN_RUN)('ActRunner against real act + Docker', () => {
-  it(
-    'runs a trivial workflow: success, log captured, secret injected, artifact collected',
-    async () => {
-      const repo = tmp('rig-act-e2e-');
-      mkdirSync(join(repo, '.github', 'workflows'), { recursive: true });
-      writeFileSync(join(repo, '.github', 'workflows', 'ci.yml'), E2E_WORKFLOW);
-      git(repo, ['init', '-q']);
-      git(repo, ['add', '-A']);
-      git(repo, ['commit', '-qm', 'init']);
-      const commit = git(repo, ['rev-parse', 'HEAD']);
+describe.skipIf(!CAN_RUN)(
+  'ActRunner against real act + Docker (opt-in: RIG_ACT_BIN=<act> + a reachable Docker)',
+  () => {
+    it(
+      'runs a trivial workflow: success, log captured, secret injected, artifact collected',
+      async () => {
+        const repo = tmp('rig-act-e2e-');
+        mkdirSync(join(repo, '.github', 'workflows'), { recursive: true });
+        writeFileSync(
+          join(repo, '.github', 'workflows', 'ci.yml'),
+          E2E_WORKFLOW
+        );
+        git(repo, ['init', '-q']);
+        git(repo, ['add', '-A']);
+        git(repo, ['commit', '-qm', 'init']);
+        const commit = git(repo, ['rev-parse', 'HEAD']);
 
-      const runner = new ActRunner({
-        actBin: ACT_BIN as string,
-        artifactDir: tmp('rig-act-artifacts-'),
-      });
-      const chunks: string[] = [];
-      const request: RunnerRequest = {
-        checkoutDir: repo,
-        workflow: { path: '.github/workflows/ci.yml', sha256: '0'.repeat(64) },
-        trigger: { ...TRIGGER, commit },
-        secrets: { MY_TOKEN: 'abcdef' },
-        timeoutMs: 4 * 60_000,
-        onLog: (_jobId, chunk) => chunks.push(chunk),
-      };
-      const result = await runner.run(request);
+        const runner = new ActRunner({
+          actBin: ACT_BIN as string,
+          artifactDir: tmp('rig-act-artifacts-'),
+        });
+        const chunks: string[] = [];
+        const request: RunnerRequest = {
+          checkoutDir: repo,
+          workflow: {
+            path: '.github/workflows/ci.yml',
+            sha256: '0'.repeat(64),
+          },
+          trigger: { ...TRIGGER, commit },
+          secrets: { MY_TOKEN: 'abcdef' },
+          timeoutMs: 4 * 60_000,
+          onLog: (_jobId, chunk) => chunks.push(chunk),
+        };
+        const result = await runner.run(request);
 
-      expect(result.conclusion).toBe('success');
-      expect(result.jobs).toHaveLength(1);
-      const job = result.jobs[0];
-      expect(job).toMatchObject({
-        jobId: 'build',
-        name: 'Build it',
-        conclusion: 'success',
-        exitCode: 0,
-      });
-      expect(job?.log).toContain('hello from rig');
-      expect(job?.log).toContain('TOKEN_LEN=6');
-      expect(job?.log).not.toContain('abcdef');
-      expect(chunks.join('')).toContain('hello from rig');
-      expect(job?.artifacts.map((a) => [a.name, a.filename])).toEqual([
-        ['outputs', 'out.txt'],
-      ]);
-      expect(existsSync(job?.artifacts[0]?.path ?? '')).toBe(true);
-    },
-    5 * 60_000
-  );
+        expect(result.conclusion).toBe('success');
+        expect(result.jobs).toHaveLength(1);
+        const job = result.jobs[0];
+        expect(job).toMatchObject({
+          jobId: 'build',
+          name: 'Build it',
+          conclusion: 'success',
+          exitCode: 0,
+        });
+        expect(job?.log).toContain('hello from rig');
+        expect(job?.log).toContain('TOKEN_LEN=6');
+        expect(job?.log).not.toContain('abcdef');
+        expect(chunks.join('')).toContain('hello from rig');
+        expect(job?.artifacts.map((a) => [a.name, a.filename])).toEqual([
+          ['outputs', 'out.txt'],
+        ]);
+        expect(existsSync(job?.artifacts[0]?.path ?? '')).toBe(true);
+      },
+      5 * 60_000
+    );
 
-  it(
-    'concludes timed_out when the wall clock expires',
-    async () => {
-      const repo = tmp('rig-act-timeout-');
-      mkdirSync(join(repo, '.github', 'workflows'), { recursive: true });
-      writeFileSync(
-        join(repo, '.github', 'workflows', 'ci.yml'),
-        'on: push\njobs:\n  slow:\n    runs-on: ubuntu-latest\n    steps:\n      - run: sleep 300\n'
-      );
-      git(repo, ['init', '-q']);
-      git(repo, ['add', '-A']);
-      git(repo, ['commit', '-qm', 'init']);
-      const notes: string[] = [];
-      const runner = new ActRunner({
-        actBin: ACT_BIN as string,
-        warn: (line) => notes.push(line),
-      });
-      const result = await runner.run({
-        checkoutDir: repo,
-        workflow: { path: '.github/workflows/ci.yml', sha256: '0'.repeat(64) },
-        trigger: { ...TRIGGER, commit: git(repo, ['rev-parse', 'HEAD']) },
-        secrets: {},
-        // act takes ~20-25 s to create the job container on a warm image;
-        // the wall clock must expire AFTER that, or there is nothing to leak.
-        timeoutMs: 60_000,
-      });
-      expect(result.conclusion).toBe('timed_out');
-      // act 0.2.89 leaves the job container running after SIGTERM; the
-      // runner must have removed it (the sleep would otherwise outlive us).
-      const leftover = execFileSync(
-        'docker',
-        ['ps', '-aq', '--filter', `name=^${actContainerNamePrefix('ci.yml')}`],
-        { encoding: 'utf-8' }
-      ).trim();
-      expect(leftover).toBe('');
-      expect(notes.some((n) => n.includes('removed 1 job container'))).toBe(
-        true
-      );
-    },
-    3 * 60_000
-  );
-});
+    it(
+      'concludes timed_out when the wall clock expires',
+      async () => {
+        const repo = tmp('rig-act-timeout-');
+        mkdirSync(join(repo, '.github', 'workflows'), { recursive: true });
+        writeFileSync(
+          join(repo, '.github', 'workflows', 'ci.yml'),
+          'on: push\njobs:\n  slow:\n    runs-on: ubuntu-latest\n    steps:\n      - run: sleep 300\n'
+        );
+        git(repo, ['init', '-q']);
+        git(repo, ['add', '-A']);
+        git(repo, ['commit', '-qm', 'init']);
+        const notes: string[] = [];
+        const runner = new ActRunner({
+          actBin: ACT_BIN as string,
+          warn: (line) => notes.push(line),
+        });
+        const result = await runner.run({
+          checkoutDir: repo,
+          workflow: {
+            path: '.github/workflows/ci.yml',
+            sha256: '0'.repeat(64),
+          },
+          trigger: { ...TRIGGER, commit: git(repo, ['rev-parse', 'HEAD']) },
+          secrets: {},
+          // act takes ~20-25 s to create the job container on a warm image;
+          // the wall clock must expire AFTER that, or there is nothing to leak.
+          timeoutMs: 60_000,
+        });
+        expect(result.conclusion).toBe('timed_out');
+        // act 0.2.89 leaves the job container running after SIGTERM; the
+        // runner must have removed it (the sleep would otherwise outlive us).
+        const leftover = execFileSync(
+          'docker',
+          [
+            'ps',
+            '-aq',
+            '--filter',
+            `name=^${actContainerNamePrefix('ci.yml')}`,
+          ],
+          { encoding: 'utf-8' }
+        ).trim();
+        expect(leftover).toBe('');
+        expect(notes.some((n) => n.includes('removed 1 job container'))).toBe(
+          true
+        );
+      },
+      3 * 60_000
+    );
+  }
+);

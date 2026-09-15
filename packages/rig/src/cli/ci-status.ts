@@ -50,11 +50,11 @@ import { runGit } from '../materialize.js';
 import { authorizedStatusAuthors } from '../nip34-events.js';
 import { hexToNpub, ownerToHex } from '../npub.js';
 import {
+  defaultWebSocketFactory,
   queryRelay,
   type NostrEvent,
   type NostrFilter,
   type WebSocketFactory,
-  type WebSocketLike,
 } from '../remote-state.js';
 import {
   emitCliError,
@@ -182,18 +182,6 @@ const STATUS_OPTIONS = {
 const FULL_SHA_RE = /^[0-9a-f]{40}$/;
 const WS_URL_RE = /^wss?:\/\//i;
 const RELAY_TIMEOUT_MS = 10_000;
-
-function defaultWebSocketFactory(url: string): WebSocketLike {
-  const ctor = (
-    globalThis as { WebSocket?: new (url: string) => WebSocketLike }
-  ).WebSocket;
-  if (!ctor) {
-    throw new Error(
-      'No global WebSocket constructor (Node >= 22 required) — pass webSocketFactory'
-    );
-  }
-  return new ctor(url);
-}
 
 /** Query every relay with every filter; merge by id; throw only if ALL fail. */
 async function queryAll(
