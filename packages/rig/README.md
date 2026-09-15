@@ -15,7 +15,7 @@ lives in NIP-34 Nostr events and the objects live on Arweave.
   [Pointing at a node](#pointing-at-a-node)).
 
 `rig` owns a handful of TOON verbs (`init`, `remote`, `clone`, `fetch`, `push`,
-`issue`, `pr`, `comment`, `identity`, `fund`, `balance`, `channel`). **Every other
+`issue`, `pr`, `comment`, `identity`, `fund`, `balance`, `channel`, `ci`). **Every other
 command passes through to system `git` verbatim** — `rig status`, `rig add -p`,
 `rig commit`, `rig rebase -i` all behave exactly like git.
 
@@ -219,6 +219,11 @@ rig pr status <event-id> applied
 | `rig site url [ref]` | free | print the last-published site URL for a ref |
 | `rig name status <name>` | free | an ArNS name's registry record, ANT process, and current target txId |
 | `rig name buy <name>` / `rig name set <name> <txId>` | **paid¹** | buy an ArNS name / point it at an Arweave txId. On the devnet, buy/set default to brokering through the deployed store DVM (`--direct` opts out). ¹Paid in mARIO on Solana via the ar.io registry — **not** ILP; needs the optional `@ar.io/sdk` dep |
+| `rig ci request <coordinator>` / `rig ci stop <coordinator>` | **paid** | authorize / revoke a CI coordinator for this repo (kind:9843 / 9844) |
+| `rig ci trigger <coordinator> --workflow <path>` | **paid** | run one exact workflow (path + SHA-256) on one commit (kind:9840) |
+| `rig ci secret set\|remove <coordinator> NAME[=value]` | **paid** | CI secrets, NIP-44 encrypted to the coordinator (kind:29846); values never echoed |
+| `rig ci status <commit>` | free | every run + job for a commit with trust levels; `--json` is one document; exits non-zero unless all green |
+| `rig ci serve --relay <url> --repo <owner>/<id>` | **paid** (its own wallet) | run a coordinator: watch the relay, run workflows with act on Docker, publish NIP-C1 results |
 | `rig channel list/open/close/settle` | free / **paid** | inspect or manage the payment channels paid commands hold (`rig channels` = `rig channel list`) |
 | `rig chain [set <c>\|unset]` | free | pin which chain/USDC settles paid writes: evm \| sol (default: the first chain the node settles on that your identity holds a key for) |
 | `rig entry [<connector-url>\|clear]` | free | name the TOON connector paid writes go to (`--relay <wss-url>` records its free-read relay too); bare `rig entry` shows what is in effect |
@@ -342,6 +347,188 @@ the human-readable snapshot (verified live 2026-07-17), useful when auditing
   `https://<name>.ardrive.net/`.
 - `--process-id <id>` overrides the arns registry program outright (wins over
   `--network`) — for pointing at a fresh/staging registry deployment.
+
+---
+
+## Continuous integration: `rig ci`
+
+A repo published with `rig` gets CI without leaving TOON. The **relay is the
+only control plane**: every command that changes a coordinator's behaviour is a
+signed, paid relay event, every observation is a free relay read, and there is no
+HTTP between a maintainer and a coordinator. The wire contract is
+[NIP-C1 (Nostr CI)](../../docs/specs/nip-c1.md), adopted verbatim so ngit tooling
+can read rig's events.
+
+**Roles** (the words are `CONTEXT.md`'s):
+
+- A **Coordinator** is an ordinary rig identity — its own BIP-39 phrase, wallet and
+  payment channel — that runs `rig ci serve`. It watches the repos it serves on the
+  relay, materializes each triggering commit from the relay + Arweave with the
+  free read path (no GitHub, no git server), runs the matching
+  GitHub-Actions-syntax **Workflows** from `.github/workflows/` (and
+  `.ngit/act/workflows/`) with [`act`](https://github.com/nektos/act) on Docker,
+  uploads logs and artifacts to the TOON store, and publishes NIP-C1 progress
+  (kind:39842), **Job** results (9841) and **Run** results (9842) as paid writes
+  from its own channel. Its budget is its wallet balance; the maintainer's phrase
+  is never on the coordinator host.
+- A **maintainer** authorizes a coordinator with a **Service Request** (9843) and
+  revokes it with a Service Stop (9844). rig's coordinator is *request-required*:
+  it never runs a repo nobody asked it to, and it only honours Requests signed by
+  the repo owner or a declared maintainer (`rig maintainers`).
+- **Triggers**: a push (a new kind:30618 whose refs moved), a pull request or PR
+  update (kinds 1617/1618/1619 — rig's own `rig pr create` patches included),
+  or a Manual Trigger (9840) from a maintainer.
+- The **Runner** is behind one interface. The first implementation is act on the
+  host's Docker; a TOON-lease runner is a later class behind the same seam.
+
+### Maintainer side
+
+```sh
+rig ci request <coordinator>            # authorize <coordinator> (npub or hex) for this repo — paid (9843)
+rig ci stop <coordinator>               # revoke it — paid (9844)
+rig ci trigger <coordinator> --workflow .github/workflows/ci.yml [--commit <sha>] [--ref refs/heads/main]
+                                        # re-run / run one exact workflow on one commit — paid (9840)
+rig ci secret set <coordinator> DEPLOY_TOKEN=…   # CI secrets, encrypted to the coordinator — paid (29846)
+rig ci secret set <coordinator> NPM_TOKEN        # bare NAME reads the value from stdin
+rig ci secret remove <coordinator> OLD_TOKEN
+rig ci status <sha> [--json] [--require-ci-trust maintainer-directed] [--workflow <path>]   # free
+```
+
+The paid verbs take the same flags as `rig issue`/`rig pr` (`--repo-id`,
+`--owner`, `--remote`, `--relay`, `--yes`, `--json`): they quote the fee, ask for
+confirmation (`--yes` skips; `--json` without `--yes` is a free estimate), and
+publish exactly one event to the repo's `origin` relay. `rig ci trigger` reads
+the workflow file at `<commit>` from the local repository and puts its path
+**and SHA-256** in the event, so the coordinator can prove which file ran.
+
+Secrets are NIP-44 v2 encrypted to the `secrets-key` the coordinator advertises
+(kind:19843) with a **fresh sender key per update**: the relay sees who sent an
+update and which repo/coordinator it addresses, never the names or values. The
+coordinator injects secrets only into runs a maintainer caused (pushes, manual
+triggers) and gives a third-party pull request an **empty** secret set, so a
+contributor cannot exfiltrate them. Values are never echoed by rig, in any mode.
+
+`rig ci status <commit>` is the merge gate: one line per run (conclusion,
+workflow, trigger reason, coordinator, trust level) and a summary; with `--json`
+exactly one document (`ok`, `runs[]` with per-job conclusions, log and artifact
+URLs, `summary`). It exits **0** only when at least one run counted and every
+counted run concluded green (`success`/`neutral`/`skipped`); **1** when a run is
+red, still queued/in progress, or nothing was found. `--require-ci-trust <level>`
+drops runs below that level before counting, so a passing run from an unknown
+coordinator does not count as green.
+
+**Trust levels** are derived client-side from Service Requests and the repo's
+declared maintainers, strongest first:
+
+| level | meaning |
+| --- | --- |
+| `maintainer-directed` | the run quotes a Service Request (or Manual Trigger) signed by the owner or a declared maintainer |
+| `operationally-associated` | no quote on the run, but a maintainer's Request for that coordinator was in force when it ran |
+| `seen-in-network` | the coordinator is itself a maintainer, or someone (not a maintainer) requested it for this repo |
+| `no-known-context` | nothing links the coordinator to the repo — e.g. a contributor's own coordinator checking their branch |
+
+### Running a coordinator
+
+```sh
+# on the coordinator host, with Docker available
+export TOON_CLIENT_HOME=~/.rig-ci             # keep the coordinator's identity + state apart from yours
+rig identity create                            # a SEPARATE phrase — never the maintainer's
+rig entry https://<connector> --relay wss://<relay>
+rig fund                                       # devnet; elsewhere fund the printed address — its balance IS the CI budget
+rig ci serve --relay wss://<relay> --repo <owner-npub>/<repo-id> [--repo …]
+```
+
+`rig ci serve` flags:
+
+| flag | default | what it does |
+| --- | --- | --- |
+| `--relay <url>` | (required) | the ONE relay to subscribe to and publish on |
+| `--repo <owner>/<repo-id>` | (required, repeatable) | repos to watch; each is served only while a maintainer's Service Request is in force |
+| `--requester <pubkey>` | (none) | also accept Service Requests from this pubkey (repeatable) — a contributor's own coordinator for a repo they do not maintain; its runs show as lower trust |
+| `--concurrency <n>` | `1` | bounded run slots — more pushes queue (`queue` rounds are published on the progress event) |
+| `--requester <npub\|hex>` | (none) | also accept Service Requests from this pubkey (NIP-C1 operator policy; repeatable) — for running your own coordinator against a repo you do not maintain; such runs show as `seen-in-network` |
+| `--timeout <secs>` | `1800` | wall clock per run; a hung run concludes `timed_out` |
+| `--gateway <url>` | rig's preferred Arweave gateway | prefix for log/artifact URLs (`<gateway>/raw/<txId>`) |
+| `--act-bin <path>` | `act` on PATH (or `RIG_ACT_BIN`) | the act binary |
+| `--platform <label>=<image>` | `ubuntu-latest=catthehacker/ubuntu:act-latest` | `runs-on` label → Docker image (repeatable) |
+| `--workdir <dir>` | `<state-dir>/work` | where commits are materialized |
+| `--json` | | one JSON document with the coordinator, relay, repos and state dir on start |
+
+On start the coordinator publishes an **Advertisement** (19843: runner family
+`act`, its selectors, admission `maintainer-request`, execution
+`request-required`, billing `out-of-band`, and a fresh `secrets-key`) and renews
+it before it expires. State — the per-repo cursor of the last processed event and
+the decrypted secret inventory — lives under
+`$TOON_CLIENT_HOME/rig-ci/<coordinator-pubkey>/`, so a restart resumes where it
+left off and a relay blip loses no runs. The secrets key itself is never
+persisted and rotates every start (NIP-C1), so re-send secrets after a restart.
+When the wallet cannot pay for the writes a run needs, the coordinator says so on
+stderr and starts no run rather than half-publishing one.
+
+Each run publishes, in order: `39842 queued` → `39842 in_progress` (with the
+frozen Service Request quote) → one `9841` per job (log tail in the content, full
+log and artifacts as store URLs) → `9842` → `39842 concluded`. Every event carries
+the repo address, the commit, the workflow path + SHA-256 (`w`), and the
+normalized trigger reason (`o`), so a consumer can verify what ran.
+
+**Departures from ngit's reference coordinator**, all deliberate: logs and
+artifacts go to the **TOON store** and are referenced by gateway URL (TOON has no
+Blossom); the Advertisement's billing policy is `out-of-band` (the operator funds
+the coordinator); kind:1617 patches are accepted as pull-request triggers (the
+coordinator applies the patch on its declared parent) because that is what
+`rig pr create` publishes; and the coordinator's inbox relay is the repo relay
+(`--relay`), so `rig ci secret` publishes to the same place as everything else.
+Not in this slice: renting runners from a TOON provider, kinds 19844/39844,
+schedule triggers, and encrypting logs.
+
+### Packaging
+
+`packages/rig/Dockerfile` builds an image with rig, act and a Docker client
+(`docker build -f packages/rig/Dockerfile -t rig-ci .` from the workspace root).
+Run it with the host's Docker socket and a state volume mounted:
+
+```sh
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v rig-ci-state:/state \
+  -e RIG_MNEMONIC='<coordinator phrase>' -e TOON_CONNECTOR=https://<connector> \
+  rig-ci ci serve --relay wss://<relay> --repo <owner>/<repo-id>
+```
+
+This is the shape a TOON workload will later spawn.
+
+### Dogfooding: rig's own `ci.yml` on the sandbox
+
+The [TOON sandbox](https://github.com/toon-protocol/infra/tree/main/sandbox)
+(full profile — the store and gateway are needed for uploads, so `make up`, not
+`make up-payments`) is a complete network on one machine: relay
+`ws://localhost:7100`, hub `http://localhost:3200`, store edge
+`http://localhost:3210`, gateway `http://localhost:3000`. Two identities, both
+settling on Solana:
+
+```sh
+# common env for BOTH shells (each identity gets its own TOON_CLIENT_HOME)
+export TOON_CONNECTOR=http://localhost:3200 TOON_CLIENT_RELAY_URL=ws://localhost:7100
+export TOON_CLIENT_CHAIN=solana TOON_CLIENT_RPC_URL=http://localhost:8899
+export TOON_CLIENT_STORE_SEAL_TO=http://localhost:3210 RIG_ARWEAVE_GATEWAY=http://localhost:3000
+
+# maintainer shell
+export TOON_CLIENT_HOME=/tmp/rig-maintainer; rig identity create; rig fund   # prints the Solana address: airdrop SOL + mint mock USDC to it (sandbox keys/toon/usdc-authority.json)
+cd rig && rig init && rig remote add origin ws://localhost:7100 && rig push --yes
+
+# coordinator shell
+export TOON_CLIENT_HOME=/tmp/rig-coordinator; rig identity create; rig fund   # fund this one the same way
+rig ci serve --relay ws://localhost:7100 --repo <maintainer-npub>/rig --gateway http://localhost:3000
+
+# maintainer shell again
+rig ci request <coordinator-npub> --yes
+git commit --allow-empty -m 'ci: dogfood' && rig push --yes
+rig ci status HEAD --json | jq .summary
+```
+
+The same flow, end to end and asserted, is
+`src/__integration__/ci-sandbox.integration.test.ts`; it runs only with
+`RIG_CI_SANDBOX=1` and skips itself unless the sandbox's relay, hub, store edge
+and gateway all answer. The act-on-Docker runner test (`src/ci/act-runner.test.ts`)
+is likewise opt-in: set `RIG_ACT_BIN` to an act binary with Docker reachable.
 
 ---
 
