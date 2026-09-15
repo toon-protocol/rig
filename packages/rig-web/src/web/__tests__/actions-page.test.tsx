@@ -16,7 +16,11 @@ vi.mock('@/hooks/use-profile-cache', () => ({
   }),
 }));
 vi.mock('@/hooks/use-rig-config', () => ({
-  useRigConfig: () => ({ relayUrl: 'ws://localhost:7100', repoFilter: undefined, owner: undefined }),
+  useRigConfig: () => ({
+    relayUrl: 'ws://localhost:7100',
+    repoFilter: undefined,
+    owner: undefined,
+  }),
 }));
 
 import { ActionsPage } from '@/app/pages/actions-page';
@@ -67,7 +71,9 @@ function run(overrides: Partial<CiRun> = {}): CiRun {
     inProgress: [],
     createdAt: 1700000000,
     startedAt: 1700000010,
-    jobs: [{ eventId: '88'.repeat(32), relayUrl: '', pubkey: COORD, jobId: 'build' }],
+    jobs: [
+      { eventId: '88'.repeat(32), relayUrl: '', pubkey: COORD, jobId: 'build' },
+    ],
     trust: 'maintainer-directed',
     current: true,
     ...overrides,
@@ -88,7 +94,13 @@ function job(overrides: Partial<CiJobResult> = {}): CiJobResult {
     conclusion: 'success',
     logsUrl: 'http://localhost:3000/raw/tx-log',
     logTail: '[log-tail omitted=120]\nnpm run build\ndone',
-    artifacts: [{ url: 'http://localhost:3000/raw/tx-art', filename: 'dist/index.js', name: 'dist' }],
+    artifacts: [
+      {
+        url: 'http://localhost:3000/raw/tx-art',
+        filename: 'dist/index.js',
+        name: 'dist',
+      },
+    ],
     startedAt: 1700000010,
     exitCode: 0,
     runsOn: ['ubuntu-latest'],
@@ -105,11 +117,14 @@ function renderAt(path: string) {
           <Route path="actions/:runId" element={<RunDetailPage />} />
         </Route>
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
 }
 
-function ciRunsResult(runs: CiRun[], loading = false): ReturnType<typeof useCiRuns> {
+function ciRunsResult(
+  runs: CiRun[],
+  loading = false
+): ReturnType<typeof useCiRuns> {
   return {
     runs,
     runsForCommit: () => [],
@@ -134,15 +149,25 @@ describe('[P1] ActionsPage', () => {
   it('renders skeletons while loading', () => {
     mockUseCiRuns.mockReturnValue(ciRunsResult([], true));
     const { container } = renderAt('/npub1owner/demo/actions');
-    expect(container.querySelectorAll('[data-slot="skeleton"]').length).toBeGreaterThan(0);
+    expect(
+      container.querySelectorAll('[data-slot="skeleton"]').length
+    ).toBeGreaterThan(0);
   });
 
   it('lists runs newest first with conclusion, workflow, reason, commit, coordinator and trust', () => {
     mockUseCiRuns.mockReturnValue(
       ciRunsResult([
-        run({ runId: 'run-2', createdAt: 1700000100, status: 'in_progress', conclusion: undefined, inProgress: ['build'], trust: 'no-known-context', reason: undefined } as never),
+        run({
+          runId: 'run-2',
+          createdAt: 1700000100,
+          status: 'in_progress',
+          conclusion: undefined,
+          inProgress: ['build'],
+          trust: 'no-known-context',
+          reason: undefined,
+        } as never),
         run(),
-      ]),
+      ])
     );
     renderAt('/npub1owner/demo/actions');
     const rows = screen.getAllByRole('link', { name: /ci\.yml/ });
@@ -151,10 +176,9 @@ describe('[P1] ActionsPage', () => {
     expect(screen.getByText('in progress')).toBeInTheDocument();
     expect(screen.getByText('success')).toBeInTheDocument();
     expect(screen.getAllByText('push').length).toBe(2);
-    expect(screen.getAllByRole('link', { name: COMMIT.slice(0, 7) })[0]).toHaveAttribute(
-      'href',
-      `/npub1owner/demo/commit/${COMMIT}`,
-    );
+    expect(
+      screen.getAllByRole('link', { name: COMMIT.slice(0, 7) })[0]
+    ).toHaveAttribute('href', `/npub1owner/demo/commit/${COMMIT}`);
     expect(screen.getAllByText(`user-${COORD.slice(0, 4)}`).length).toBe(2);
     expect(screen.getByText('maintainer-directed')).toBeInTheDocument();
     expect(screen.getByText('no-known-context')).toBeInTheDocument();
@@ -170,15 +194,22 @@ describe('[P1] ActionsPage', () => {
             ...run().trigger,
             reason: 'pull_request',
             ref: undefined,
-            pr: { prEventId: prId, prAuthor: 'cd'.repeat(32), prKind: 1617, sourceEventId: prId, sourceAuthor: 'cd'.repeat(32), sourceKind: 1617 },
+            pr: {
+              prEventId: prId,
+              prAuthor: 'cd'.repeat(32),
+              prKind: 1617,
+              sourceEventId: prId,
+              sourceAuthor: 'cd'.repeat(32),
+              sourceKind: 1617,
+            },
           },
         }),
-      ]),
+      ])
     );
     renderAt('/npub1owner/demo/actions');
     expect(screen.getByRole('link', { name: /pull request/i })).toHaveAttribute(
       'href',
-      `/npub1owner/demo/pulls/${prId}`,
+      `/npub1owner/demo/pulls/${prId}`
     );
   });
 });
@@ -189,12 +220,22 @@ describe('[P1] RunDetailPage', () => {
   });
 
   it('renders the run header, each job with conclusion, timings, log tail and links', () => {
-    mockUseCiRun.mockReturnValue({ run: run(), jobs: [job()], loading: false, error: null });
+    mockUseCiRun.mockReturnValue({
+      run: run(),
+      jobs: [job()],
+      loading: false,
+      error: null,
+    });
     renderAt('/npub1owner/demo/actions/run-1');
-    expect(screen.getByRole('heading', { name: 'ci' })).toHaveAttribute('title', '.github/workflows/ci.yml');
+    expect(screen.getByRole('heading', { name: 'ci' })).toHaveAttribute(
+      'title',
+      '.github/workflows/ci.yml'
+    );
     expect(screen.getByText('Build')).toBeInTheDocument();
     // One badge for the run, one for its job.
-    expect(screen.getAllByText('success', { selector: '[data-slot="badge"]' })).toHaveLength(2);
+    expect(
+      screen.getAllByText('success', { selector: '[data-slot="badge"]' })
+    ).toHaveLength(2);
     expect(screen.getByText(/exit code 0/i)).toBeInTheDocument();
     expect(screen.getByText(/npm run build/)).toBeInTheDocument();
     const logs = screen.getByRole('link', { name: /full log/i });
@@ -202,14 +243,19 @@ describe('[P1] RunDetailPage', () => {
     expect(logs).toHaveAttribute('rel', 'noreferrer');
     expect(screen.getByRole('link', { name: 'dist/index.js' })).toHaveAttribute(
       'href',
-      'http://localhost:3000/raw/tx-art',
+      'http://localhost:3000/raw/tx-art'
     );
     expect(screen.getByText('maintainer-directed')).toBeInTheDocument();
   });
 
   it('lists a pending job from the progress marker before its result arrives', () => {
     mockUseCiRun.mockReturnValue({
-      run: run({ status: 'in_progress', conclusion: undefined, inProgress: ['build', 'test'], jobs: [] }),
+      run: run({
+        status: 'in_progress',
+        conclusion: undefined,
+        inProgress: ['build', 'test'],
+        jobs: [],
+      }),
       jobs: [],
       loading: false,
       error: null,
@@ -221,7 +267,12 @@ describe('[P1] RunDetailPage', () => {
   });
 
   it('says so when the run is unknown', () => {
-    mockUseCiRun.mockReturnValue({ run: null, jobs: [], loading: false, error: null });
+    mockUseCiRun.mockReturnValue({
+      run: null,
+      jobs: [],
+      loading: false,
+      error: null,
+    });
     renderAt('/npub1owner/demo/actions/nope');
     expect(screen.getByText('Run not found.')).toBeInTheDocument();
   });

@@ -21,7 +21,8 @@ import {
 
 const cleanups: string[] = [];
 afterEach(() => {
-  for (const dir of cleanups.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of cleanups.splice(0))
+    rmSync(dir, { recursive: true, force: true });
 });
 
 function checkout(files: Record<string, string>): string {
@@ -58,7 +59,9 @@ jobs:
 describe('sha256Hex', () => {
   it('hashes bytes to lowercase hex', () => {
     const bytes = Buffer.from('hello');
-    expect(sha256Hex(bytes)).toBe(createHash('sha256').update(bytes).digest('hex'));
+    expect(sha256Hex(bytes)).toBe(
+      createHash('sha256').update(bytes).digest('hex')
+    );
   });
 });
 
@@ -80,7 +83,10 @@ describe('parseWorkflow', () => {
   });
 
   it('accepts `on: push` (string) and `on: [push, pull_request]` (array)', () => {
-    const asString = parseWorkflow('a.yml', 'on: push\njobs:\n  a:\n    runs-on: x\n');
+    const asString = parseWorkflow(
+      'a.yml',
+      'on: push\njobs:\n  a:\n    runs-on: x\n'
+    );
     expect(asString.triggers).toEqual({ push: {} });
     const asArray = parseWorkflow(
       'b.yml',
@@ -98,7 +104,10 @@ describe('parseWorkflow', () => {
       'c.yml',
       'on:\n  push:\n  pull_request:\n    branches: main\njobs: {}\n'
     );
-    expect(wf.triggers).toEqual({ push: {}, pull_request: { branches: ['main'] } });
+    expect(wf.triggers).toEqual({
+      push: {},
+      pull_request: { branches: ['main'] },
+    });
   });
 
   it('tolerates the YAML 1.1 `on` → true key quirk', () => {
@@ -118,8 +127,12 @@ describe('parseWorkflow', () => {
   });
 
   it('flags a document that is not a workflow map', () => {
-    expect(parseWorkflow('f.yml', '- just\n- a list\n').parseError).toMatch(/mapping/i);
-    expect(parseWorkflow('g.yml', 'name: x\njobs: {}\n').parseError).toMatch(/on/);
+    expect(parseWorkflow('f.yml', '- just\n- a list\n').parseError).toMatch(
+      /mapping/i
+    );
+    expect(parseWorkflow('g.yml', 'name: x\njobs: {}\n').parseError).toMatch(
+      /on/
+    );
   });
 });
 
@@ -170,12 +183,15 @@ describe('refMatchesPatterns (GitHub branch/tag filter semantics)', () => {
   });
 
   it('applies ! negation in order (later patterns win)', () => {
-    expect(refMatchesPatterns('releases/beta', ['releases/**', '!releases/*-alpha'])).toBe(
-      true
-    );
-    expect(refMatchesPatterns('releases/x-alpha', ['releases/**', '!releases/*-alpha'])).toBe(
-      false
-    );
+    expect(
+      refMatchesPatterns('releases/beta', ['releases/**', '!releases/*-alpha'])
+    ).toBe(true);
+    expect(
+      refMatchesPatterns('releases/x-alpha', [
+        'releases/**',
+        '!releases/*-alpha',
+      ])
+    ).toBe(false);
     // A negation with no prior positive match is not an include.
     expect(refMatchesPatterns('main', ['!other'])).toBe(false);
   });
@@ -205,22 +221,30 @@ describe('matchesPush', () => {
   });
 
   it('a branches-only filter never runs for tags (GitHub semantics), and vice versa', () => {
-    expect(matchesPush(wf({ push: { branches: ['main'] } }), 'refs/tags/v1')).toBe(false);
-    expect(matchesPush(wf({ push: { tags: ['v*'] } }), 'refs/heads/main')).toBe(false);
+    expect(
+      matchesPush(wf({ push: { branches: ['main'] } }), 'refs/tags/v1')
+    ).toBe(false);
+    expect(matchesPush(wf({ push: { tags: ['v*'] } }), 'refs/heads/main')).toBe(
+      false
+    );
   });
 
   it('never runs for a workflow without push or with a parse error', () => {
-    expect(matchesPush(wf({ pull_request: {} }), 'refs/heads/main')).toBe(false);
-    expect(matchesPush({ ...wf({ push: {} }), parseError: 'x' }, 'refs/heads/main')).toBe(
+    expect(matchesPush(wf({ pull_request: {} }), 'refs/heads/main')).toBe(
       false
     );
+    expect(
+      matchesPush({ ...wf({ push: {} }), parseError: 'x' }, 'refs/heads/main')
+    ).toBe(false);
   });
 });
 
 describe('matchesPullRequest', () => {
   it('runs when pull_request is declared and the base branch passes the filter', () => {
     expect(matchesPullRequest(wf({ pull_request: {} }))).toBe(true);
-    expect(matchesPullRequest(wf({ pull_request: {} }), 'refs/heads/main')).toBe(true);
+    expect(
+      matchesPullRequest(wf({ pull_request: {} }), 'refs/heads/main')
+    ).toBe(true);
     const w = wf({ pull_request: { branches: ['main'] } });
     expect(matchesPullRequest(w, 'refs/heads/main')).toBe(true);
     expect(matchesPullRequest(w, 'main')).toBe(true);

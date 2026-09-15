@@ -90,7 +90,9 @@ export function assertSecretUpdateShape(value: unknown): SecretUpdatePlaintext {
     throw new Error('secret update needs a non-empty set or remove');
   }
   if (setNames.length + removeNames.length > MAX_SECRET_NAMES) {
-    throw new Error(`secret update may name at most ${MAX_SECRET_NAMES} secrets`);
+    throw new Error(
+      `secret update may name at most ${MAX_SECRET_NAMES} secrets`
+    );
   }
   for (const name of [...setNames, ...removeNames]) assertName(name);
   const removeSet = new Set(removeNames);
@@ -128,7 +130,9 @@ export function validateSecretUpdate(
     throw new Error('secret update author does not match the signing pubkey');
   }
   if (plain.created_at !== outer.created_at) {
-    throw new Error('secret update created_at does not match the event timestamp');
+    throw new Error(
+      'secret update created_at does not match the event timestamp'
+    );
   }
 }
 
@@ -192,9 +196,7 @@ export interface SecretInventoryEntry {
   origin: string;
 }
 
-export interface SecretInventory {
-  [name: string]: SecretInventoryEntry;
-}
+export type SecretInventory = Record<string, SecretInventoryEntry>;
 
 /**
  * Apply one accepted update to an inventory (immutably). Per name, the
@@ -227,7 +229,9 @@ export function applySecretUpdate(
 }
 
 /** The injectable name → value map (tombstones dropped). */
-export function effectiveSecrets(inventory: SecretInventory): Record<string, string> {
+export function effectiveSecrets(
+  inventory: SecretInventory
+): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [name, entry] of Object.entries(inventory)) {
     if (entry.value !== null) out[name] = entry.value;
@@ -236,7 +240,10 @@ export function effectiveSecrets(inventory: SecretInventory): Record<string, str
 }
 
 /** A fresh NIP-44 recipient (secrets-key) or sender keypair. */
-export function generateSecretsKey(): { secretKey: Uint8Array; pubkey: string } {
+export function generateSecretsKey(): {
+  secretKey: Uint8Array;
+  pubkey: string;
+} {
   const secretKey = generateSecretKey();
   return { secretKey, pubkey: getPublicKey(secretKey) };
 }

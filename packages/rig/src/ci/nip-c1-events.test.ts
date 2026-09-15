@@ -47,6 +47,14 @@ const MAINTAINER = 'cd'.repeat(32);
 const STRANGER = 'ef'.repeat(32);
 const COORDINATOR = '12'.repeat(32);
 const REPO = 'demo-repo';
+
+/** Narrow an optional value or fail the test loudly (no non-null assertions). */
+function must<T>(value: T | undefined | null, what = 'value'): T {
+  if (value === undefined || value === null) {
+    throw new Error(`expected ${what} to be present`);
+  }
+  return value;
+}
 const ADDR = `30617:${OWNER}:${REPO}`;
 const COMMIT = '9a'.repeat(20);
 const TAG_OBJECT = '7b'.repeat(20);
@@ -104,7 +112,10 @@ const PR_TRIGGER: CiTriggerContext = {
 describe('repo address', () => {
   it('builds and parses the 30617:<owner>:<repo-id> coordinate', () => {
     expect(repoAddress(OWNER.toUpperCase(), REPO)).toBe(ADDR);
-    expect(parseRepoAddress(ADDR)).toEqual({ ownerPubkey: OWNER, repoId: REPO });
+    expect(parseRepoAddress(ADDR)).toEqual({
+      ownerPubkey: OWNER,
+      repoId: REPO,
+    });
     expect(parseRepoAddress(`30617:${OWNER}:with:colons`)).toEqual({
       ownerPubkey: OWNER,
       repoId: 'with:colons',
@@ -142,10 +153,10 @@ describe('commonTriggerTags', () => {
       ['c', TAG_OBJECT],
       ['w', '.github/workflows/ci.yml', SHA256],
       ['o', 'pull_request'],
-      ['E', PR_TRIGGER.pr!.prEventId],
+      ['E', must(PR_TRIGGER.pr).prEventId],
       ['K', '1618'],
       ['P', STRANGER],
-      ['e', PR_TRIGGER.pr!.sourceEventId],
+      ['e', must(PR_TRIGGER.pr).sourceEventId],
       ['k', '1619'],
       ['p', STRANGER],
     ]);
@@ -239,11 +250,15 @@ describe('Coordinator Advertisement (19843)', () => {
     expect(tag(event, 'secrets-key')).toEqual([
       ['secrets-key', 'nip44-v2', '77'.repeat(32), RELAY],
     ]);
-    expect(tag(event, 'expiration')).toEqual([['expiration', String(NOW + 900)]]);
+    expect(tag(event, 'expiration')).toEqual([
+      ['expiration', String(NOW + 900)],
+    ]);
   });
 
   it('round-trips through parseCiAdvertisement', () => {
-    const event = signed(buildCiAdvertisement(input, NOW), { id: '19'.repeat(32) });
+    const event = signed(buildCiAdvertisement(input, NOW), {
+      id: '19'.repeat(32),
+    });
     expect(parseCiAdvertisement(event)).toEqual({
       eventId: '19'.repeat(32),
       pubkey: COORDINATOR,
@@ -273,12 +288,12 @@ describe('Coordinator Advertisement (19843)', () => {
     expect(() =>
       buildCiAdvertisement({ ...input, expiresAt: NOW + 1801 }, NOW)
     ).toThrow(/expiration/);
-    expect(() => buildCiAdvertisement({ ...input, expiresAt: NOW }, NOW)).toThrow(
-      /expiration/
-    );
-    expect(() => buildCiAdvertisement({ ...input, selectors: [] }, NOW)).toThrow(
-      /selector/
-    );
+    expect(() =>
+      buildCiAdvertisement({ ...input, expiresAt: NOW }, NOW)
+    ).toThrow(/expiration/);
+    expect(() =>
+      buildCiAdvertisement({ ...input, selectors: [] }, NOW)
+    ).toThrow(/selector/);
     expect(() =>
       buildCiAdvertisement(
         { ...input, secretsKey: { pubkey: '77'.repeat(32), inboxRelays: [] } },
@@ -294,7 +309,10 @@ describe('Coordinator Advertisement (19843)', () => {
       parseCiAdvertisement({ ...good, tags: [...good.tags, ['d', 'x']] })
     ).toBeNull();
     expect(
-      parseCiAdvertisement({ ...good, tags: good.tags.filter((t) => t[0] !== 'M') })
+      parseCiAdvertisement({
+        ...good,
+        tags: good.tags.filter((t) => t[0] !== 'M'),
+      })
     ).toBeNull();
     expect(
       parseCiAdvertisement({
@@ -303,7 +321,10 @@ describe('Coordinator Advertisement (19843)', () => {
       })
     ).toBeNull();
     expect(
-      parseCiAdvertisement({ ...good, tags: good.tags.filter((t) => t[0] !== 'R') })
+      parseCiAdvertisement({
+        ...good,
+        tags: good.tags.filter((t) => t[0] !== 'R'),
+      })
     ).toBeNull();
     // An unknown policy value must not be read as open/automatic service.
     expect(
@@ -535,8 +556,8 @@ describe('Manual Trigger (9840)', () => {
     const event = buildCiManualTrigger(COORDINATOR, trigger, NOW);
     expect(tag(event, 'p')).toEqual([['p', COORDINATOR]]);
     expect(tag(event, 'r')).toEqual([]);
-    expect(tag(event, 'E')).toEqual([['E', PR_TRIGGER.pr!.prEventId]]);
-    expect(tag(event, 'e')).toEqual([['e', PR_TRIGGER.pr!.sourceEventId]]);
+    expect(tag(event, 'E')).toEqual([['E', must(PR_TRIGGER.pr).prEventId]]);
+    expect(tag(event, 'e')).toEqual([['e', must(PR_TRIGGER.pr).sourceEventId]]);
     expect(tag(event, 'k')).toEqual([['k', '1619']]);
   });
 
@@ -566,7 +587,10 @@ describe('Manual Trigger (9840)', () => {
       parseCiManualTrigger({ ...good, tags: [...good.tags, ['p', OWNER]] })
     ).toBeNull();
     expect(
-      parseCiManualTrigger({ ...good, tags: good.tags.filter((t) => t[0] !== 'w') })
+      parseCiManualTrigger({
+        ...good,
+        tags: good.tags.filter((t) => t[0] !== 'w'),
+      })
     ).toBeNull();
     expect(parseCiManualTrigger({ ...good, kind: 9843 })).toBeNull();
   });
@@ -674,7 +698,11 @@ describe('Job Result (9841)', () => {
     logTail: 'step 3 failed\nexit 1',
     logOmittedBytes: 4096,
     artifacts: [
-      { url: 'http://localhost:3000/raw/tx456', filename: 'dist/app.js', name: 'dist' },
+      {
+        url: 'http://localhost:3000/raw/tx456',
+        filename: 'dist/app.js',
+        name: 'dist',
+      },
     ],
     queuedAt: NOW - 20,
     startedAt: NOW - 10,
@@ -685,7 +713,9 @@ describe('Job Result (9841)', () => {
   it('emits common tags, the 39842 progress quote, job/name/conclusion/logs/artifact/timing tags', () => {
     const event = buildCiJobResult(input, NOW);
     expect(event.kind).toBe(CI_JOB_RESULT_KIND);
-    expect(event.content).toBe('[log-tail omitted=4096]\nstep 3 failed\nexit 1');
+    expect(event.content).toBe(
+      '[log-tail omitted=4096]\nstep 3 failed\nexit 1'
+    );
     expect(event.tags).toEqual([
       ...commonTriggerTags(PUSH_TRIGGER),
       ['q', PROGRESS_ADDR, RELAY],
@@ -725,11 +755,14 @@ describe('Job Result (9841)', () => {
 
   it('MAY carry a provenance quote; a Job Result never quotes a service request by default', () => {
     const plain = buildCiJobResult(input, NOW);
-    expect(plain.tags.some((t) => t[0] === 'q' && t[4] === 'service-request')).toBe(
-      false
-    );
+    expect(
+      plain.tags.some((t) => t[0] === 'q' && t[4] === 'service-request')
+    ).toBe(false);
     const withProv = signed(
-      buildCiJobResult({ ...input, provenance: { ...PROVENANCE, kind: 'manual-trigger' } }, NOW)
+      buildCiJobResult(
+        { ...input, provenance: { ...PROVENANCE, kind: 'manual-trigger' } },
+        NOW
+      )
     );
     expect(parseCiJobResult(withProv)?.provenance).toEqual({
       ...PROVENANCE,
@@ -743,12 +776,17 @@ describe('Job Result (9841)', () => {
     expect(bare?.logTail).toBe('just a tail');
     expect(bare?.logOmittedBytes).toBe(0);
     expect(
-      parseCiJobResult({ ...good, tags: good.tags.filter((t) => t[0] !== 'job') })
+      parseCiJobResult({
+        ...good,
+        tags: good.tags.filter((t) => t[0] !== 'job'),
+      })
     ).toBeNull();
     expect(
       parseCiJobResult({
         ...good,
-        tags: good.tags.map((t) => (t[0] === 'conclusion' ? ['conclusion', 'meh'] : t)),
+        tags: good.tags.map((t) =>
+          t[0] === 'conclusion' ? ['conclusion', 'meh'] : t
+        ),
       })
     ).toBeNull();
     expect(
@@ -762,8 +800,18 @@ describe('Job Result (9841)', () => {
 // ---------------------------------------------------------------------------
 
 const JOB_QUOTES = [
-  { eventId: '41'.repeat(32), relayUrl: RELAY, pubkey: COORDINATOR, jobId: 'build' },
-  { eventId: '42'.repeat(32), relayUrl: RELAY, pubkey: '88'.repeat(32), jobId: 'lint' },
+  {
+    eventId: '41'.repeat(32),
+    relayUrl: RELAY,
+    pubkey: COORDINATOR,
+    jobId: 'build',
+  },
+  {
+    eventId: '42'.repeat(32),
+    relayUrl: RELAY,
+    pubkey: '88'.repeat(32),
+    jobId: 'lint',
+  },
 ];
 
 describe('Workflow Result (9842)', () => {
@@ -799,7 +847,9 @@ describe('Workflow Result (9842)', () => {
   });
 
   it('round-trips through parseCiWorkflowResult', () => {
-    const event = signed(buildCiWorkflowResult(input, NOW), { id: '42'.repeat(32) });
+    const event = signed(buildCiWorkflowResult(input, NOW), {
+      id: '42'.repeat(32),
+    });
     expect(parseCiWorkflowResult(event)).toEqual({
       eventId: '42'.repeat(32),
       pubkey: COORDINATOR,
@@ -815,14 +865,20 @@ describe('Workflow Result (9842)', () => {
   });
 
   it('an automatic run omits the provenance quote; manual replays use manual-trigger', () => {
-    const auto = signed(buildCiWorkflowResult({ ...input, provenance: undefined }, NOW));
+    const auto = signed(
+      buildCiWorkflowResult({ ...input, provenance: undefined }, NOW)
+    );
     expect(parseCiWorkflowResult(auto)?.provenance).toBeUndefined();
     const manual = signed(
       buildCiWorkflowResult(
         {
           ...input,
           trigger: { ...PUSH_TRIGGER, reason: 'manual' },
-          provenance: { ...PROVENANCE, kind: 'manual-trigger', pubkey: MAINTAINER },
+          provenance: {
+            ...PROVENANCE,
+            kind: 'manual-trigger',
+            pubkey: MAINTAINER,
+          },
         },
         NOW
       )
@@ -868,7 +924,10 @@ describe('Workflow Progress (39842)', () => {
   };
 
   it('queued: d/status/queue/expiration, NO conclusion, and the service-request quote is omitted', () => {
-    const event = buildCiWorkflowProgress({ ...base, status: 'queued', queue: 2 }, NOW);
+    const event = buildCiWorkflowProgress(
+      { ...base, status: 'queued', queue: 2 },
+      NOW
+    );
     expect(event.kind).toBe(CI_WORKFLOW_PROGRESS_KIND);
     expect(event.content).toBe('');
     expect(event.tags).toEqual([
@@ -889,7 +948,7 @@ describe('Workflow Progress (39842)', () => {
         status: 'in_progress',
         startedAt: NOW - 20,
         inProgress: ['lint'],
-        jobs: [JOB_QUOTES[0]!],
+        jobs: [must(JOB_QUOTES[0])],
       },
       NOW
     );
@@ -899,7 +958,9 @@ describe('Workflow Progress (39842)', () => {
       ['q', '41'.repeat(32), RELAY, COORDINATOR, 'build'],
     ]);
     expect(tag(event, 'queue')).toEqual([]);
-    expect(tag(event, 'started_at')).toEqual([['started_at', String(NOW - 20)]]);
+    expect(tag(event, 'started_at')).toEqual([
+      ['started_at', String(NOW - 20)],
+    ]);
   });
 
   it('concluded: requires a conclusion; non-concluded refuses one', () => {
@@ -913,7 +974,12 @@ describe('Workflow Progress (39842)', () => {
       )
     ).toThrow(/conclusion/);
     const event = buildCiWorkflowProgress(
-      { ...base, status: 'concluded', conclusion: 'timed_out', jobs: JOB_QUOTES },
+      {
+        ...base,
+        status: 'concluded',
+        conclusion: 'timed_out',
+        jobs: JOB_QUOTES,
+      },
       NOW
     );
     expect(tag(event, 'conclusion')).toEqual([['conclusion', 'timed_out']]);
@@ -921,10 +987,16 @@ describe('Workflow Progress (39842)', () => {
 
   it('refuses an expiration beyond 30 minutes or not after created_at', () => {
     expect(() =>
-      buildCiWorkflowProgress({ ...base, status: 'queued', expiresAt: NOW + 1801 }, NOW)
+      buildCiWorkflowProgress(
+        { ...base, status: 'queued', expiresAt: NOW + 1801 },
+        NOW
+      )
     ).toThrow(/expiration/);
     expect(() =>
-      buildCiWorkflowProgress({ ...base, status: 'queued', expiresAt: NOW }, NOW)
+      buildCiWorkflowProgress(
+        { ...base, status: 'queued', expiresAt: NOW },
+        NOW
+      )
     ).toThrow(/expiration/);
   });
 
@@ -968,21 +1040,31 @@ describe('Workflow Progress (39842)', () => {
 
   it('parser rejects a missing d, an unknown status, concluded without conclusion, or no expiration', () => {
     const good = signed(
-      buildCiWorkflowProgress({ ...base, status: 'in_progress', inProgress: ['build'] }, NOW)
+      buildCiWorkflowProgress(
+        { ...base, status: 'in_progress', inProgress: ['build'] },
+        NOW
+      )
     );
-    expect(
-      parseCiWorkflowProgress({ ...good, tags: good.tags.filter((t) => t[0] !== 'd') })
-    ).toBeNull();
     expect(
       parseCiWorkflowProgress({
         ...good,
-        tags: good.tags.map((t) => (t[0] === 'status' ? ['status', 'running'] : t)),
+        tags: good.tags.filter((t) => t[0] !== 'd'),
       })
     ).toBeNull();
     expect(
       parseCiWorkflowProgress({
         ...good,
-        tags: good.tags.map((t) => (t[0] === 'status' ? ['status', 'concluded'] : t)),
+        tags: good.tags.map((t) =>
+          t[0] === 'status' ? ['status', 'running'] : t
+        ),
+      })
+    ).toBeNull();
+    expect(
+      parseCiWorkflowProgress({
+        ...good,
+        tags: good.tags.map((t) =>
+          t[0] === 'status' ? ['status', 'concluded'] : t
+        ),
       })
     ).toBeNull();
     expect(

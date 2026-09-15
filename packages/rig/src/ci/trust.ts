@@ -95,6 +95,9 @@ export function deriveTrustLevel(args: DeriveTrustLevelArgs): CiTrustLevel {
 }
 
 /** True when `level` is at least as strong as `required`. */
-export function trustAtLeast(level: CiTrustLevel, required: CiTrustLevel): boolean {
+export function trustAtLeast(
+  level: CiTrustLevel,
+  required: CiTrustLevel
+): boolean {
   return CI_TRUST_ORDER.indexOf(level) <= CI_TRUST_ORDER.indexOf(required);
 }

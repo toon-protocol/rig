@@ -46,6 +46,14 @@ const REPO = 'demo';
 const RELAY = 'wss://relay.test.example';
 
 const cleanups: string[] = [];
+
+/** Narrow an optional value or fail the test loudly (no non-null assertions). */
+function must<T>(value: T | undefined | null, what = 'value'): T {
+  if (value === undefined || value === null) {
+    throw new Error(`expected ${what} to be present`);
+  }
+  return value;
+}
 afterEach(() => {
   clearShaCache();
   for (const dir of cleanups.splice(0))
@@ -319,7 +327,7 @@ describe('rig ci serve: a serve session', () => {
       'the workflow result'
     );
     expect(world.runner.requests).toHaveLength(1);
-    expect(world.runner.requests[0]!.timeoutMs).toBe(120_000);
+    expect(must(world.runner.requests[0]).timeoutMs).toBe(120_000);
 
     world.abort.abort();
     expect(await running).toBe(0);

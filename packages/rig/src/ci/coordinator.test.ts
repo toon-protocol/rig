@@ -91,6 +91,14 @@ jobs:
 // ---------------------------------------------------------------------------
 
 const cleanups: string[] = [];
+
+/** Narrow an optional value or fail the test loudly (no non-null assertions). */
+function must<T>(value: T | undefined | null, what = 'value'): T {
+  if (value === undefined || value === null) {
+    throw new Error(`expected ${what} to be present`);
+  }
+  return value;
+}
 afterEach(() => {
   clearShaCache();
   for (const dir of cleanups.splice(0))
@@ -246,19 +254,34 @@ function publishedKinds(publisher: FakePublisher): number[] {
 function progressEvents(publisher: FakePublisher, pubkey = COORD) {
   return publisher
     .ofKind(CI_WORKFLOW_PROGRESS_KIND)
-    .map((p) => parseCiWorkflowProgress(publisher.asRelayEvent(p, pubkey)));
+    .map((p) =>
+      must(
+        parseCiWorkflowProgress(publisher.asRelayEvent(p, pubkey)),
+        'a parseable 39842'
+      )
+    );
 }
 
 function resultEvents(publisher: FakePublisher, pubkey = COORD) {
   return publisher
     .ofKind(CI_WORKFLOW_RESULT_KIND)
-    .map((p) => parseCiWorkflowResult(publisher.asRelayEvent(p, pubkey)));
+    .map((p) =>
+      must(
+        parseCiWorkflowResult(publisher.asRelayEvent(p, pubkey)),
+        'a parseable 9842'
+      )
+    );
 }
 
 function jobEvents(publisher: FakePublisher, pubkey = COORD) {
   return publisher
     .ofKind(CI_JOB_RESULT_KIND)
-    .map((p) => parseCiJobResult(publisher.asRelayEvent(p, pubkey)));
+    .map((p) =>
+      must(
+        parseCiJobResult(publisher.asRelayEvent(p, pubkey)),
+        'a parseable 9841'
+      )
+    );
 }
 
 /** A push: commit on the source repo, publish the new 30618 live. */
@@ -340,7 +363,7 @@ describe('startCoordinator: advertisement and first sight of a repo', () => {
     const ads = world.publisher.ofKind(CI_ADVERTISEMENT_KIND);
     expect(ads).toHaveLength(1);
     const ad = parseCiAdvertisement(
-      world.publisher.asRelayEvent(ads[0]!, COORD)
+      world.publisher.asRelayEvent(must(ads[0]), COORD)
     );
     expect(ad).toMatchObject({
       version: '9.9.9-test',
@@ -351,9 +374,9 @@ describe('startCoordinator: advertisement and first sight of a repo', () => {
       billing: 'out-of-band',
       secretsKey: { pubkey: handle.secretsKeyPubkey, inboxRelays: [RELAY] },
     });
-    expect(ad!.expiresAt - ad!.createdAt).toBeLessThanOrEqual(1800);
-    expect(handle.advertisementId).toBe(ads[0]!.eventId);
-    expect(ads[0]!.event.tags).toContainEqual([
+    expect(must(ad).expiresAt - must(ad).createdAt).toBeLessThanOrEqual(1800);
+    expect(handle.advertisementId).toBe(must(ads[0]).eventId);
+    expect(must(ads[0]).event.tags).toContainEqual([
       'software',
       'rig',
       '9.9.9-test',
@@ -412,8 +435,8 @@ describe('push trigger', () => {
     );
     expect(queued).toMatchObject({ status: 'queued', queue: 1, jobs: [] });
     // A queued standing-service marker MUST omit the service-request quote.
-    expect(queued!.provenance).toBeUndefined();
-    expect(queued!.trigger).toMatchObject({
+    expect(must(queued).provenance).toBeUndefined();
+    expect(must(queued).trigger).toMatchObject({
       repoAddr: ADDR,
       commit: sha,
       workflow: {
@@ -423,18 +446,18 @@ describe('push trigger', () => {
       reason: 'push',
       ref: 'refs/heads/main',
     });
-    expect(queued!.runId).toBe(inProgress!.runId);
+    expect(must(queued).runId).toBe(must(inProgress).runId);
     expect(inProgress).toMatchObject({
       status: 'in_progress',
       inProgress: ['build'],
       provenance: { kind: 'service-request', relayUrl: RELAY, pubkey: MAINT },
     });
-    expect(withJob!.jobs).toHaveLength(1);
-    expect(withJob!.inProgress).toEqual([]);
+    expect(must(withJob).jobs).toHaveLength(1);
+    expect(must(withJob).inProgress).toEqual([]);
     expect(concluded).toMatchObject({
       status: 'concluded',
       conclusion: 'success',
-      runId: queued!.runId,
+      runId: must(queued).runId,
     });
 
     const [job] = jobEvents(world.publisher);
@@ -442,12 +465,14 @@ describe('push trigger', () => {
       jobId: 'build',
       conclusion: 'success',
       exitCode: 0,
-      progressAddress: `39842:${COORD}:${queued!.runId}`,
+      progressAddress: `39842:${COORD}:${must(queued).runId}`,
       logsUrl: `${GATEWAY}/raw/tx-1`,
       logOmittedBytes: 0,
       runsOn: ['ubuntu-latest'],
     });
-    expect(job!.logTail).toContain('fake runner: ran .github/workflows/ci.yml');
+    expect(must(job).logTail).toContain(
+      'fake runner: ran .github/workflows/ci.yml'
+    );
     expect(world.publisher.uploadedBlobs[0]).toMatchObject({
       contentType: 'text/plain; charset=utf-8',
       repoId: REPO,
@@ -455,22 +480,22 @@ describe('push trigger', () => {
 
     const [result] = resultEvents(world.publisher);
     expect(result).toMatchObject({
-      runId: queued!.runId,
+      runId: must(queued).runId,
       conclusion: 'success',
       provenance: { kind: 'service-request', pubkey: MAINT },
       jobs: [
         {
-          eventId: job!.eventId,
+          eventId: must(job).eventId,
           relayUrl: RELAY,
           pubkey: COORD,
           jobId: 'build',
         },
       ],
     });
-    expect(result!.trigger.commit).toBe(sha);
+    expect(must(result).trigger.commit).toBe(sha);
 
     // The runner got a real checkout at the commit, no secrets (none set).
-    const request = world.runner.requests[0]!;
+    const request = must(world.runner.requests[0]);
     expect(request.secrets).toEqual({});
     expect(request.trigger.commit).toBe(sha);
     expect(request.workflow.path).toBe('.github/workflows/ci.yml');
@@ -509,11 +534,11 @@ describe('push trigger', () => {
       serviceStop(STRANGER, 1200),
     ]);
     const handle = await world.start();
-    expect(handle.serving()[0]!.serving).toBe(true);
+    expect(must(handle.serving()[0]).serving).toBe(true);
 
     world.relay.push(serviceStop(MAINT, 1300));
     await handle.idle();
-    expect(handle.serving()[0]!.serving).toBe(false);
+    expect(must(handle.serving()[0]).serving).toBe(false);
 
     push(world, 2000);
     await handle.idle();
@@ -522,7 +547,7 @@ describe('push trigger', () => {
     // A later Request makes service eligible again.
     world.relay.push(serviceRequest(OWNER, 2100));
     await handle.idle();
-    expect(handle.serving()[0]!.serving).toBe(true);
+    expect(must(handle.serving()[0]).serving).toBe(true);
     push(world, 2200, 'again.txt', 'x\n');
     await handle.idle();
     expect(world.runner.requests).toHaveLength(1);
@@ -588,12 +613,12 @@ describe('push trigger', () => {
     await handle.idle();
     const results = resultEvents(world.publisher);
     const broken = results.find((r) =>
-      r!.trigger.workflow.path.endsWith('broken.yml')
+      must(r).trigger.workflow.path.endsWith('broken.yml')
     );
     expect(broken).toMatchObject({ conclusion: 'startup_failure', jobs: [] });
     // ci.yml still ran normally alongside it.
     expect(
-      results.find((r) => r!.trigger.workflow.path.endsWith('ci.yml'))
+      results.find((r) => r.trigger.workflow.path.endsWith('ci.yml'))
     ).toMatchObject({ conclusion: 'success' });
     await handle.stop();
   });
@@ -652,7 +677,7 @@ describe('secrets', () => {
 
     const base = push(world, 2000);
     await handle.idle();
-    expect(world.runner.requests[0]!.secrets).toEqual({
+    expect(must(world.runner.requests[0]).secrets).toEqual({
       DEPLOY_TOKEN: 'hunter2',
     });
 
@@ -685,7 +710,7 @@ describe('secrets', () => {
     world.relay.push(patch);
     await handle.idle();
 
-    const prRequest = world.runner.requests[1]!;
+    const prRequest = must(world.runner.requests[1]);
     expect(prRequest.secrets).toEqual({});
     expect(prRequest.trigger).toMatchObject({
       reason: 'pull_request',
@@ -701,10 +726,10 @@ describe('secrets', () => {
     expect(prRequest.trigger.commit).not.toBe(declaredTip);
     expect(prRequest.trigger.tagObjectIds).toEqual([declaredTip]);
     const prResult = resultEvents(world.publisher).find(
-      (r) => r!.trigger.reason === 'pull_request'
+      (r) => r.trigger.reason === 'pull_request'
     );
-    expect(prResult!.trigger.pr).toMatchObject({ prEventId: patch.id });
-    expect(prResult!.trigger.commit).toBe(prRequest.trigger.commit);
+    expect(must(prResult).trigger.pr).toMatchObject({ prEventId: patch.id });
+    expect(must(prResult).trigger.commit).toBe(prRequest.trigger.commit);
 
     // Remove: the tombstone wins and the value stops being injected.
     world.clock.advance(1000);
@@ -712,7 +737,7 @@ describe('secrets', () => {
     await handle.idle();
     push(world, 3000, 'later.txt', 'l\n');
     await handle.idle();
-    expect(world.runner.requests[2]!.secrets).toEqual({});
+    expect(must(world.runner.requests[2]).secrets).toEqual({});
     await handle.stop();
   });
 
@@ -769,7 +794,7 @@ describe('secrets', () => {
 
     push(world, 2000);
     await handle.idle();
-    expect(world.runner.requests[0]!.secrets).toEqual({});
+    expect(must(world.runner.requests[0]).secrets).toEqual({});
     expect(
       world.logs.filter((l) => /ignored|rejected|stale/.test(l)).length
     ).toBeGreaterThanOrEqual(3);
@@ -795,14 +820,14 @@ describe('run execution bounds', () => {
     push(world, 2000);
     await waitFor(() => blocking.started.length === 1, 'the run to start');
     await flush();
-    expect(progressEvents(world.publisher).map((p) => p!.status)).toEqual([
+    expect(progressEvents(world.publisher).map((p) => p.status)).toEqual([
       'queued',
       'in_progress',
     ]);
 
     world.clock.advance(60_001);
     await handle.idle();
-    expect(blocking.started[0]!.signal?.aborted).toBe(true);
+    expect(must(blocking.started[0]).signal?.aborted).toBe(true);
     expect(resultEvents(world.publisher)[0]).toMatchObject({
       conclusion: 'timed_out',
     });
@@ -841,16 +866,16 @@ describe('run execution bounds', () => {
     world.relay.push(third);
     await waitFor(
       () =>
-        progressEvents(world.publisher).filter((p) => p!.status === 'queued')
+        progressEvents(world.publisher).filter((p) => p.status === 'queued')
           .length === 2,
       'the second run to queue'
     );
 
     expect(blocking.started).toHaveLength(1);
     const queued = progressEvents(world.publisher).filter(
-      (p) => p!.status === 'queued'
+      (p) => p.status === 'queued'
     );
-    expect(queued.map((q) => q!.queue)).toEqual([1, 2]);
+    expect(queued.map((q) => q.queue)).toEqual([1, 2]);
 
     blocking.release();
     await waitFor(
@@ -859,7 +884,7 @@ describe('run execution bounds', () => {
     );
     blocking.release();
     await handle.idle();
-    expect(resultEvents(world.publisher).map((r) => r!.conclusion)).toEqual([
+    expect(resultEvents(world.publisher).map((r) => r.conclusion)).toEqual([
       'success',
       'success',
     ]);
@@ -898,7 +923,7 @@ describe('run execution bounds', () => {
     push(world, 2100, 'd.txt', 'd\n');
     await waitFor(
       () =>
-        progressEvents(world.publisher).filter((p) => p!.status === 'queued')
+        progressEvents(world.publisher).filter((p) => p.status === 'queued')
           .length === 2,
       'the second run to queue'
     );
@@ -906,7 +931,7 @@ describe('run execution bounds', () => {
     await flush();
     blocking.release();
     await handle.idle();
-    expect(resultEvents(world.publisher).map((r) => r!.conclusion)).toEqual([
+    expect(resultEvents(world.publisher).map((r) => r.conclusion)).toEqual([
       'success',
       'cancelled',
     ]);
@@ -999,7 +1024,7 @@ describe('manual trigger (kind:9840)', () => {
       status: 'queued',
       provenance: { kind: 'manual-trigger', eventId: manual.id, pubkey: MAINT },
     });
-    expect(queued!.trigger).toMatchObject({
+    expect(must(queued).trigger).toMatchObject({
       reason: 'manual',
       commit,
       ref: 'refs/heads/main',
@@ -1009,7 +1034,7 @@ describe('manual trigger (kind:9840)', () => {
       provenance: { kind: 'manual-trigger', eventId: manual.id },
     });
     // Secrets would be allowed (maintainer) — none set, so empty.
-    expect(world.runner.requests[0]!.secrets).toEqual({});
+    expect(must(world.runner.requests[0]).secrets).toEqual({});
     await handle.stop();
   });
 

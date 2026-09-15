@@ -71,7 +71,13 @@ describe('deriveTrustLevel', () => {
   });
 
   it('a quoted request that is unknown, or targets another coordinator, does not count as maintainer-directed', () => {
-    const foreign = control('request', MAINTAINER, 100, '01', OTHER_COORDINATOR);
+    const foreign = control(
+      'request',
+      MAINTAINER,
+      100,
+      '01',
+      OTHER_COORDINATOR
+    );
     const level = deriveTrustLevel({
       publisherPubkey: COORDINATOR,
       provenance: {
@@ -191,6 +197,8 @@ describe('trustAtLeast', () => {
     expect(trustAtLeast('maintainer-directed', 'seen-in-network')).toBe(true);
     expect(trustAtLeast('seen-in-network', 'seen-in-network')).toBe(true);
     expect(trustAtLeast('seen-in-network', 'maintainer-directed')).toBe(false);
-    expect(trustAtLeast('no-known-context', 'operationally-associated')).toBe(false);
+    expect(trustAtLeast('no-known-context', 'operationally-associated')).toBe(
+      false
+    );
   });
 });

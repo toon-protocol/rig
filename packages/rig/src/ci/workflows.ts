@@ -22,7 +22,10 @@ import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 
 /** Where workflows live, in scan order (relative to the checkout root). */
-export const WORKFLOW_DIRS = ['.github/workflows', '.ngit/act/workflows'] as const;
+export const WORKFLOW_DIRS = [
+  '.github/workflows',
+  '.ngit/act/workflows',
+] as const;
 
 const WORKFLOW_FILE_RE = /\.ya?ml$/i;
 
@@ -92,7 +95,8 @@ function parseTriggers(on: unknown): WorkflowTriggers {
   const triggers: WorkflowTriggers = {};
   const enable = (name: unknown, options: unknown): void => {
     if (name === 'push') triggers.push = refFilters(options);
-    else if (name === 'pull_request') triggers.pull_request = refFilters(options);
+    else if (name === 'pull_request')
+      triggers.pull_request = refFilters(options);
     else if (name === 'workflow_dispatch') triggers.workflow_dispatch = true;
   };
   if (typeof on === 'string') enable(on, undefined);
@@ -124,8 +128,14 @@ function parseJobs(jobs: unknown): WorkflowJob[] {
  * package (YAML 1.2) keeps it a string, but a file re-saved by such a loader
  * carries a literal `true:` key, so both spellings are honoured.
  */
-export function parseWorkflow(path: string, content: string | Uint8Array): DiscoveredWorkflow {
-  const text = typeof content === 'string' ? content : Buffer.from(content).toString('utf-8');
+export function parseWorkflow(
+  path: string,
+  content: string | Uint8Array
+): DiscoveredWorkflow {
+  const text =
+    typeof content === 'string'
+      ? content
+      : Buffer.from(content).toString('utf-8');
   const base: DiscoveredWorkflow = {
     path,
     sha256: sha256Hex(content),
@@ -136,7 +146,10 @@ export function parseWorkflow(path: string, content: string | Uint8Array): Disco
   try {
     doc = parseYaml(text, { strict: false, uniqueKeys: false });
   } catch (err) {
-    return { ...base, parseError: err instanceof Error ? err.message : String(err) };
+    return {
+      ...base,
+      parseError: err instanceof Error ? err.message : String(err),
+    };
   }
   if (!isRecord(doc)) {
     return { ...base, parseError: 'workflow is not a YAML mapping' };
@@ -145,7 +158,11 @@ export function parseWorkflow(path: string, content: string | Uint8Array): Disco
   if (on === undefined || on === null) {
     return { ...base, parseError: 'workflow has no `on:` trigger clause' };
   }
-  const out = { ...base, triggers: parseTriggers(on), jobs: parseJobs(doc['jobs']) };
+  const out = {
+    ...base,
+    triggers: parseTriggers(on),
+    jobs: parseJobs(doc['jobs']),
+  };
   if (typeof doc['name'] === 'string') out.name = doc['name'];
   return out;
 }
@@ -159,7 +176,9 @@ export function parseWorkflow(path: string, content: string | Uint8Array): Disco
  * stable order (directory order, then filename). Missing directories are
  * simply empty.
  */
-export async function discoverWorkflows(checkoutDir: string): Promise<DiscoveredWorkflow[]> {
+export async function discoverWorkflows(
+  checkoutDir: string
+): Promise<DiscoveredWorkflow[]> {
   const found: DiscoveredWorkflow[] = [];
   for (const dir of WORKFLOW_DIRS) {
     let names: string[];
@@ -213,7 +232,10 @@ function patternToRegExp(pattern: string): RegExp {
  * `!` pattern excludes, and a name is included only if the LAST matching
  * pattern was positive. A negation can never include on its own.
  */
-export function refMatchesPatterns(shortName: string, patterns: string[]): boolean {
+export function refMatchesPatterns(
+  shortName: string,
+  patterns: string[]
+): boolean {
   let included = false;
   for (const pattern of patterns) {
     const negated = pattern.startsWith('!');
@@ -233,10 +255,16 @@ export function matchesPush(wf: DiscoveredWorkflow, ref: string): boolean {
   const { branches, tags } = wf.triggers.push;
   if (!branches && !tags) return true;
   if (ref.startsWith('refs/heads/')) {
-    return branches !== undefined && refMatchesPatterns(ref.slice('refs/heads/'.length), branches);
+    return (
+      branches !== undefined &&
+      refMatchesPatterns(ref.slice('refs/heads/'.length), branches)
+    );
   }
   if (ref.startsWith('refs/tags/')) {
-    return tags !== undefined && refMatchesPatterns(ref.slice('refs/tags/'.length), tags);
+    return (
+      tags !== undefined &&
+      refMatchesPatterns(ref.slice('refs/tags/'.length), tags)
+    );
   }
   return false;
 }
@@ -246,11 +274,16 @@ export function matchesPush(wf: DiscoveredWorkflow, ref: string): boolean {
  * or a bare branch name)? With a `branches` filter and no known base the
  * match cannot be proven, so the workflow does not run.
  */
-export function matchesPullRequest(wf: DiscoveredWorkflow, baseRef?: string): boolean {
+export function matchesPullRequest(
+  wf: DiscoveredWorkflow,
+  baseRef?: string
+): boolean {
   if (wf.parseError !== undefined || !wf.triggers.pull_request) return false;
   const { branches } = wf.triggers.pull_request;
   if (!branches) return true;
   if (baseRef === undefined) return false;
-  const short = baseRef.startsWith('refs/heads/') ? baseRef.slice('refs/heads/'.length) : baseRef;
+  const short = baseRef.startsWith('refs/heads/')
+    ? baseRef.slice('refs/heads/'.length)
+    : baseRef;
   return refMatchesPatterns(short, branches);
 }

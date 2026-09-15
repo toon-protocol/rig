@@ -92,9 +92,7 @@ const TRIGGER_REASONS: ReadonlySet<string> = new Set<CiTriggerReason>([
 ]);
 
 export type CiAdmissionPolicy =
-  | 'operator-selected'
-  | 'maintainer-request'
-  | 'open';
+  'operator-selected' | 'maintainer-request' | 'open';
 export type CiExecutionPolicy = 'automatic' | 'request-required';
 export type CiBillingPolicy = 'not-required' | 'out-of-band';
 
@@ -133,7 +131,10 @@ export function parseRepoAddress(
 ): { ownerPubkey: string; repoId: string } | null {
   const m = REPO_ADDR_RE.exec(a);
   if (!m) return null;
-  return { ownerPubkey: (m[1] as string).toLowerCase(), repoId: m[2] as string };
+  return {
+    ownerPubkey: (m[1] as string).toLowerCase(),
+    repoId: m[2] as string,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -180,8 +181,18 @@ export interface CiTriggerContext {
 
 /** The frozen request-provenance quote a run carries (`q … service-request|manual-trigger`). */
 export type CiProvenance =
-  | { kind: 'service-request'; eventId: string; relayUrl: string; pubkey: string }
-  | { kind: 'manual-trigger'; eventId: string; relayUrl: string; pubkey: string };
+  | {
+      kind: 'service-request';
+      eventId: string;
+      relayUrl: string;
+      pubkey: string;
+    }
+  | {
+      kind: 'manual-trigger';
+      eventId: string;
+      relayUrl: string;
+      pubkey: string;
+    };
 
 const PROVENANCE_MARKERS: ReadonlySet<string> = new Set([
   'service-request',
@@ -235,7 +246,10 @@ function single(tags: string[][], name: string): string[] | null {
   return found.length === 1 ? (found[0] as string[]) : null;
 }
 
-function optionalSingle(tags: string[][], name: string): string[] | null | undefined {
+function optionalSingle(
+  tags: string[][],
+  name: string
+): string[] | null | undefined {
   const found = values(tags, name);
   if (found.length === 0) return undefined;
   return found.length === 1 ? (found[0] as string[]) : null;
@@ -280,7 +294,12 @@ export function parseCiTriggerContext(
   }
 
   const w = single(tags, 'w');
-  if (!w || w.length < 3 || !w[1] || !HEX64.test((w[2] as string).toLowerCase()))
+  if (
+    !w ||
+    w.length < 3 ||
+    !w[1] ||
+    !HEX64.test((w[2] as string).toLowerCase())
+  )
     return null;
 
   const o = optionalSingle(tags, 'o');
@@ -344,7 +363,14 @@ export function parseCiTriggerContext(
       if (author === undefined || !HEX64.test(author)) return null;
       sourceAuthor = author;
     }
-    trigger.pr = { prEventId, prAuthor, prKind, sourceEventId, sourceAuthor, sourceKind };
+    trigger.pr = {
+      prEventId,
+      prAuthor,
+      prKind,
+      sourceEventId,
+      sourceAuthor,
+      sourceKind,
+    };
     if (values(tags, 'r').some((t) => t[1]?.startsWith('refs/'))) return null;
   } else {
     const refs = values(tags, 'r').filter((t) => t[1]?.startsWith('refs/'));
@@ -419,12 +445,18 @@ function now(): number {
   return Math.floor(Date.now() / 1000);
 }
 
-function assertExpiration(createdAt: number, expiresAt: number, maxTtl: number): void {
+function assertExpiration(
+  createdAt: number,
+  expiresAt: number,
+  maxTtl: number
+): void {
   if (!Number.isInteger(expiresAt) || expiresAt <= createdAt) {
     throw new Error('expiration must be later than created_at');
   }
   if (expiresAt - createdAt > maxTtl) {
-    throw new Error(`expiration must be no more than ${maxTtl}s after created_at`);
+    throw new Error(
+      `expiration must be no more than ${maxTtl}s after created_at`
+    );
   }
 }
 
@@ -470,7 +502,12 @@ export function buildCiAdvertisement(
     ]);
   }
   tags.push(['expiration', String(input.expiresAt)]);
-  return { kind: CI_ADVERTISEMENT_KIND, content: '', tags, created_at: createdAt };
+  return {
+    kind: CI_ADVERTISEMENT_KIND,
+    content: '',
+    tags,
+    created_at: createdAt,
+  };
 }
 
 export function parseCiAdvertisement(ev: NostrEvent): CiAdvertisement | null {
@@ -488,10 +525,14 @@ export function parseCiAdvertisement(ev: NostrEvent): CiAdvertisement | null {
   if (!Number.isInteger(expiresAt) || expiresAt <= ev.created_at) return null;
 
   const families = foldUnique(
-    values(tags, 'W').map((t) => t[1] ?? '').filter((v) => v !== '')
+    values(tags, 'W')
+      .map((t) => t[1] ?? '')
+      .filter((v) => v !== '')
   );
   const selectors = foldUnique(
-    values(tags, 'R').map((t) => t[1] ?? '').filter((v) => v !== '')
+    values(tags, 'R')
+      .map((t) => t[1] ?? '')
+      .filter((v) => v !== '')
   );
   if (families.length === 0 || selectors.length === 0) return null;
   // Every R's family must be advertised and every family must have an R.
@@ -611,7 +652,8 @@ export function parseCiServiceControl(ev: NostrEvent): ServiceControl | null {
   if (!a || !p) return null;
   const addr = a[1] === undefined ? null : parseRepoAddress(a[1]);
   const coordinator = p[1]?.toLowerCase();
-  if (!addr || coordinator === undefined || !HEX64.test(coordinator)) return null;
+  if (!addr || coordinator === undefined || !HEX64.test(coordinator))
+    return null;
   const control: ServiceControl = {
     kind: ev.kind === CI_SERVICE_REQUEST_KIND ? 'request' : 'stop',
     eventId: ev.id,
@@ -685,7 +727,10 @@ export function selectServiceRequests(
       ? []
       : open.filter((r) => r.pubkey.toLowerCase() !== author);
   }
-  return { active: open.length > 0 ? (open[open.length - 1] as ServiceControl) : null, open };
+  return {
+    active: open.length > 0 ? (open[open.length - 1] as ServiceControl) : null,
+    open,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -729,7 +774,10 @@ export function parseCiManualTrigger(
   const p = single(ev.tags, 'p');
   const coordinator = p?.[1]?.toLowerCase();
   if (!p || coordinator === undefined || !HEX64.test(coordinator)) return null;
-  if (coordinatorPubkey !== undefined && coordinator !== coordinatorPubkey.toLowerCase())
+  if (
+    coordinatorPubkey !== undefined &&
+    coordinator !== coordinatorPubkey.toLowerCase()
+  )
     return null;
   if (values(ev.tags, 'o').length > 0) return null;
   const rest = ev.tags.filter((t) => t[0] !== 'p');
@@ -782,7 +830,12 @@ export function buildCiSecretUpdate(args: CiSecretUpdateArgs): UnsignedEvent {
     tags: [
       ['a', args.repoAddr],
       ['p', args.coordinatorPubkey.toLowerCase()],
-      ['e', args.advertisementId, args.advertisementRelayHint ?? '', 'secrets-key'],
+      [
+        'e',
+        args.advertisementId,
+        args.advertisementRelayHint ?? '',
+        'secrets-key',
+      ],
       ['sender', args.senderPubkey.toLowerCase()],
       ['recipient', args.recipientPubkey.toLowerCase()],
       ['encryption', 'nip44-v2'],
@@ -909,10 +962,14 @@ export function buildCiJobResult(
   for (const a of input.artifacts ?? []) {
     tags.push(['artifact', a.url, a.filename, a.name]);
   }
-  if (input.queuedAt !== undefined) tags.push(['queued_at', String(input.queuedAt)]);
-  if (input.startedAt !== undefined) tags.push(['started_at', String(input.startedAt)]);
-  if (input.exitCode !== undefined) tags.push(['exit_code', String(input.exitCode)]);
-  if (input.runsOn && input.runsOn.length > 0) tags.push(['runs_on', ...input.runsOn]);
+  if (input.queuedAt !== undefined)
+    tags.push(['queued_at', String(input.queuedAt)]);
+  if (input.startedAt !== undefined)
+    tags.push(['started_at', String(input.startedAt)]);
+  if (input.exitCode !== undefined)
+    tags.push(['exit_code', String(input.exitCode)]);
+  if (input.runsOn && input.runsOn.length > 0)
+    tags.push(['runs_on', ...input.runsOn]);
   if (input.provenance) tags.push(provenanceTag(input.provenance));
   return {
     kind: CI_JOB_RESULT_KIND,
@@ -922,7 +979,10 @@ export function buildCiJobResult(
   };
 }
 
-function optionalInt(tags: string[][], name: string): number | null | undefined {
+function optionalInt(
+  tags: string[][],
+  name: string
+): number | null | undefined {
   const t = optionalSingle(tags, name);
   if (t === null) return null;
   if (t === undefined) return undefined;
@@ -941,7 +1001,8 @@ export function parseCiJobResult(ev: NostrEvent): CiJobResult | null {
   if (progress.length !== 1) return null;
   const job = single(tags, 'job');
   const conclusion = single(tags, 'conclusion');
-  if (!job || !job[1] || !conclusion || !isCiConclusion(conclusion[1] ?? '')) return null;
+  if (!job || !job[1] || !conclusion || !isCiConclusion(conclusion[1] ?? ''))
+    return null;
   const name = optionalSingle(tags, 'name');
   const logs = optionalSingle(tags, 'logs');
   if (name === null || logs === null) return null;
@@ -1056,11 +1117,18 @@ export function buildCiWorkflowResult(
     ['r', input.runId],
     ['conclusion', input.conclusion],
   ];
-  if (input.queuedAt !== undefined) tags.push(['queued_at', String(input.queuedAt)]);
-  if (input.startedAt !== undefined) tags.push(['started_at', String(input.startedAt)]);
+  if (input.queuedAt !== undefined)
+    tags.push(['queued_at', String(input.queuedAt)]);
+  if (input.startedAt !== undefined)
+    tags.push(['started_at', String(input.startedAt)]);
   if (input.provenance) tags.push(provenanceTag(input.provenance));
   for (const j of input.jobs) tags.push(jobQuoteTag(j));
-  return { kind: CI_WORKFLOW_RESULT_KIND, content: '', tags, created_at: createdAt };
+  return {
+    kind: CI_WORKFLOW_RESULT_KIND,
+    content: '',
+    tags,
+    created_at: createdAt,
+  };
 }
 
 export function parseCiWorkflowResult(ev: NostrEvent): CiWorkflowResult | null {
@@ -1070,7 +1138,9 @@ export function parseCiWorkflowResult(ev: NostrEvent): CiWorkflowResult | null {
   if (!trigger) return null;
   // On push results the git ref and the run id share `r`; the run id is the
   // one NOT starting with `refs/`.
-  const runIds = values(tags, 'r').filter((t) => t[1] && !t[1].startsWith('refs/'));
+  const runIds = values(tags, 'r').filter(
+    (t) => t[1] && !t[1].startsWith('refs/')
+  );
   if (runIds.length !== 1) return null;
   const conclusion = single(tags, 'conclusion');
   if (!conclusion || !isCiConclusion(conclusion[1] ?? '')) return null;
@@ -1101,8 +1171,10 @@ export function parseCiWorkflowResult(ev: NostrEvent): CiWorkflowResult | null {
 // kind:39842 — Workflow Progress
 // ---------------------------------------------------------------------------
 
-export interface CiWorkflowProgressInput
-  extends Omit<CiWorkflowResultInput, 'conclusion'> {
+export interface CiWorkflowProgressInput extends Omit<
+  CiWorkflowResultInput,
+  'conclusion'
+> {
   status: CiProgressStatus;
   /** Required iff `status === 'concluded'`. */
   conclusion?: CiConclusion;
@@ -1151,9 +1223,12 @@ export function buildCiWorkflowProgress(
   if (input.inProgress && input.inProgress.length > 0) {
     tags.push(['in-progress', ...input.inProgress]);
   }
-  if (input.conclusion !== undefined) tags.push(['conclusion', input.conclusion]);
-  if (input.queuedAt !== undefined) tags.push(['queued_at', String(input.queuedAt)]);
-  if (input.startedAt !== undefined) tags.push(['started_at', String(input.startedAt)]);
+  if (input.conclusion !== undefined)
+    tags.push(['conclusion', input.conclusion]);
+  if (input.queuedAt !== undefined)
+    tags.push(['queued_at', String(input.queuedAt)]);
+  if (input.startedAt !== undefined)
+    tags.push(['started_at', String(input.startedAt)]);
   tags.push(['expiration', String(input.expiresAt)]);
   // A queued standing-service marker MUST omit the service-request quote:
   // final authorization is only selected at runner handoff.
@@ -1164,10 +1239,17 @@ export function buildCiWorkflowProgress(
     tags.push(provenanceTag(input.provenance));
   }
   for (const j of input.jobs) tags.push(jobQuoteTag(j));
-  return { kind: CI_WORKFLOW_PROGRESS_KIND, content: '', tags, created_at: createdAt };
+  return {
+    kind: CI_WORKFLOW_PROGRESS_KIND,
+    content: '',
+    tags,
+    created_at: createdAt,
+  };
 }
 
-export function parseCiWorkflowProgress(ev: NostrEvent): CiWorkflowProgress | null {
+export function parseCiWorkflowProgress(
+  ev: NostrEvent
+): CiWorkflowProgress | null {
   if (ev.kind !== CI_WORKFLOW_PROGRESS_KIND || ev.content !== '') return null;
   const { tags } = ev;
   const trigger = parseCiTriggerContext(tags);
@@ -1208,7 +1290,8 @@ export function parseCiWorkflowProgress(ev: NostrEvent): CiWorkflowProgress | nu
     expiresAt,
     jobs,
   };
-  if (conclusion?.[1] !== undefined) result.conclusion = conclusion[1] as CiConclusion;
+  if (conclusion?.[1] !== undefined)
+    result.conclusion = conclusion[1] as CiConclusion;
   if (queue !== undefined) result.queue = queue;
   if (queuedAt !== undefined) result.queuedAt = queuedAt;
   if (startedAt !== undefined) result.startedAt = startedAt;

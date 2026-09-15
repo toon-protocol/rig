@@ -36,20 +36,28 @@ describe('NIP-44 v2 round trip', () => {
     expect(recipient.pubkey).toBe(getPublicKey(recipient.secretKey));
     const sender = generateSecretsKey();
 
-    const ciphertext = encryptSecretUpdate(PLAIN, sender.secretKey, recipient.pubkey);
+    const ciphertext = encryptSecretUpdate(
+      PLAIN,
+      sender.secretKey,
+      recipient.pubkey
+    );
     expect(ciphertext).not.toContain('DEPLOY_TOKEN');
     expect(ciphertext).not.toContain('value');
 
-    expect(decryptSecretUpdate(ciphertext, recipient.secretKey, sender.pubkey)).toEqual(
-      PLAIN
-    );
+    expect(
+      decryptSecretUpdate(ciphertext, recipient.secretKey, sender.pubkey)
+    ).toEqual(PLAIN);
   });
 
   it('fails with a mismatched sender pubkey or the wrong recipient key', () => {
     const recipient = generateSecretsKey();
     const sender = generateSecretsKey();
     const other = generateSecretsKey();
-    const ciphertext = encryptSecretUpdate(PLAIN, sender.secretKey, recipient.pubkey);
+    const ciphertext = encryptSecretUpdate(
+      PLAIN,
+      sender.secretKey,
+      recipient.pubkey
+    );
     expect(() =>
       decryptSecretUpdate(ciphertext, recipient.secretKey, other.pubkey)
     ).toThrow();
@@ -61,7 +69,11 @@ describe('NIP-44 v2 round trip', () => {
   it('refuses ciphertext over 100 KiB before attempting to decrypt', () => {
     const recipient = generateSecretsKey();
     expect(() =>
-      decryptSecretUpdate('A'.repeat(100 * 1024 + 1), recipient.secretKey, 'ab'.repeat(32))
+      decryptSecretUpdate(
+        'A'.repeat(100 * 1024 + 1),
+        recipient.secretKey,
+        'ab'.repeat(32)
+      )
     ).toThrow(/100 KiB/);
   });
 
@@ -76,7 +88,9 @@ describe('plaintext validation', () => {
     expect(SECRET_NAME_RE.test('_X1')).toBe(true);
     expect(SECRET_NAME_RE.test('1BAD')).toBe(false);
     expect(SECRET_NAME_RE.test('lower')).toBe(false);
-    expect(RESERVED_SECRET_NAMES).toContain('WORKFLOW_SECRETS_DECRYPTION_BUNKER');
+    expect(RESERVED_SECRET_NAMES).toContain(
+      'WORKFLOW_SECRETS_DECRYPTION_BUNKER'
+    );
   });
 
   function roundTrip(plain: unknown): SecretUpdatePlaintext {
@@ -92,18 +106,24 @@ describe('plaintext validation', () => {
 
   it('rejects extra or missing keys, both set and remove empty, a name in both, bad names, reserved names', () => {
     expect(() => roundTrip({ ...PLAIN, extra: 1 })).toThrow(/exactly/);
-    expect(() => roundTrip({ author: MAINTAINER, created_at: NOW, set: {} })).toThrow(
-      /exactly/
+    expect(() =>
+      roundTrip({ author: MAINTAINER, created_at: NOW, set: {} })
+    ).toThrow(/exactly/);
+    expect(() => roundTrip({ ...PLAIN, set: {}, remove: [] })).toThrow(
+      /non-empty/
     );
-    expect(() => roundTrip({ ...PLAIN, set: {}, remove: [] })).toThrow(/non-empty/);
     expect(() =>
       roundTrip({ ...PLAIN, set: { A: '1' }, remove: ['A'] })
     ).toThrow(/both/);
-    expect(() => roundTrip({ ...PLAIN, set: { bad: '1' }, remove: [] })).toThrow(
-      /name/
-    );
     expect(() =>
-      roundTrip({ ...PLAIN, set: { WORKFLOW_SECRETS_DECRYPTION_BUNKER: 'x' }, remove: [] })
+      roundTrip({ ...PLAIN, set: { bad: '1' }, remove: [] })
+    ).toThrow(/name/);
+    expect(() =>
+      roundTrip({
+        ...PLAIN,
+        set: { WORKFLOW_SECRETS_DECRYPTION_BUNKER: 'x' },
+        remove: [],
+      })
     ).toThrow(/reserved/);
   });
 
@@ -119,7 +139,9 @@ describe('plaintext validation', () => {
     expect(() => roundTrip({ ...PLAIN, set: many, remove: [] })).toThrow(/100/);
     const big: Record<string, string> = {};
     for (let i = 0; i < 5; i++) big[`B${i}`] = 'x'.repeat(16000);
-    expect(() => roundTrip({ ...PLAIN, set: big, remove: [] })).toThrow(/65535/);
+    expect(() => roundTrip({ ...PLAIN, set: big, remove: [] })).toThrow(
+      /65535/
+    );
   });
 
   it('validateSecretUpdate binds author and created_at to the outer event', () => {
@@ -127,7 +149,10 @@ describe('plaintext validation', () => {
       validateSecretUpdate(PLAIN, { pubkey: MAINTAINER, created_at: NOW })
     ).not.toThrow();
     expect(() =>
-      validateSecretUpdate(PLAIN, { pubkey: MAINTAINER.toUpperCase(), created_at: NOW })
+      validateSecretUpdate(PLAIN, {
+        pubkey: MAINTAINER.toUpperCase(),
+        created_at: NOW,
+      })
     ).not.toThrow();
     expect(() =>
       validateSecretUpdate(PLAIN, { pubkey: 'cd'.repeat(32), created_at: NOW })
@@ -148,18 +173,41 @@ describe('inventory ordering', () => {
     const next = applySecretUpdate(inv, PLAIN, ID_A);
     expect(inv).toEqual({});
     expect(next).toEqual({
-      DEPLOY_TOKEN: { value: 'value', createdAt: NOW, eventId: ID_A, origin: MAINTAINER },
-      NPM_TOKEN: { value: 'npm_x', createdAt: NOW, eventId: ID_A, origin: MAINTAINER },
-      OLD_TOKEN: { value: null, createdAt: NOW, eventId: ID_A, origin: MAINTAINER },
+      DEPLOY_TOKEN: {
+        value: 'value',
+        createdAt: NOW,
+        eventId: ID_A,
+        origin: MAINTAINER,
+      },
+      NPM_TOKEN: {
+        value: 'npm_x',
+        createdAt: NOW,
+        eventId: ID_A,
+        origin: MAINTAINER,
+      },
+      OLD_TOKEN: {
+        value: null,
+        createdAt: NOW,
+        eventId: ID_A,
+        origin: MAINTAINER,
+      },
     });
-    expect(effectiveSecrets(next)).toEqual({ DEPLOY_TOKEN: 'value', NPM_TOKEN: 'npm_x' });
+    expect(effectiveSecrets(next)).toEqual({
+      DEPLOY_TOKEN: 'value',
+      NPM_TOKEN: 'npm_x',
+    });
   });
 
   it('an older set cannot resurrect a value removed later (tombstone wins)', () => {
     let inv: SecretInventory = {};
     inv = applySecretUpdate(
       inv,
-      { author: MAINTAINER, created_at: NOW + 10, set: {}, remove: ['DEPLOY_TOKEN'] },
+      {
+        author: MAINTAINER,
+        created_at: NOW + 10,
+        set: {},
+        remove: ['DEPLOY_TOKEN'],
+      },
       ID_B
     );
     inv = applySecretUpdate(inv, PLAIN, ID_A); // created_at NOW < NOW + 10
@@ -171,19 +219,34 @@ describe('inventory ordering', () => {
     let inv: SecretInventory = {};
     inv = applySecretUpdate(
       inv,
-      { author: MAINTAINER, created_at: NOW, set: { A: 'from-ff' }, remove: [] },
+      {
+        author: MAINTAINER,
+        created_at: NOW,
+        set: { A: 'from-ff' },
+        remove: [],
+      },
       'ff'.repeat(32)
     );
     inv = applySecretUpdate(
       inv,
-      { author: MAINTAINER, created_at: NOW, set: { A: 'from-00' }, remove: [] },
+      {
+        author: MAINTAINER,
+        created_at: NOW,
+        set: { A: 'from-00' },
+        remove: [],
+      },
       ID_0
     );
     expect(inv['A']?.value).toBe('from-00');
     // Replaying the ff event again does not clobber the later 00 value.
     inv = applySecretUpdate(
       inv,
-      { author: MAINTAINER, created_at: NOW, set: { A: 'from-ff' }, remove: [] },
+      {
+        author: MAINTAINER,
+        created_at: NOW,
+        set: { A: 'from-ff' },
+        remove: [],
+      },
       'ff'.repeat(32)
     );
     expect(inv['A']?.value).toBe('from-00');

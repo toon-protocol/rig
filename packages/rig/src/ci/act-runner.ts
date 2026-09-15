@@ -32,7 +32,14 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
@@ -87,7 +94,10 @@ function isExecutable(path: string): boolean {
  * PATH. Returns null when neither is present — the coordinator refuses to
  * start and the Docker-gated test skips.
  */
-export function resolveActBinary(env: NodeJS.ProcessEnv, explicit?: string): string | null {
+export function resolveActBinary(
+  env: NodeJS.ProcessEnv,
+  explicit?: string
+): string | null {
   const candidate = explicit ?? env[RIG_ACT_BIN_ENV];
   if (candidate) return isExecutable(candidate) ? candidate : null;
   for (const dir of (env['PATH'] ?? '').split(':')) {
@@ -134,7 +144,8 @@ export function parseActJsonLine(line: string): ActLine | null {
   if (typeof jobId !== 'string' || jobId === '') return null;
   const display = typeof obj['job'] === 'string' ? obj['job'] : jobId;
   const slash = display.indexOf('/');
-  const jobName = (slash >= 0 ? display.slice(slash + 1) : display).trim() || jobId;
+  const jobName =
+    (slash >= 0 ? display.slice(slash + 1) : display).trim() || jobId;
   const msg = typeof obj['msg'] === 'string' ? obj['msg'] : '';
   const out: ActLine = {
     jobId,
@@ -178,7 +189,10 @@ export interface ActRunSummary {
  * not the job's — so once the wall clock expired (or the run was cancelled)
  * only jobs that already finished cleanly keep their own conclusion.
  */
-function mapJobResult(result: string | undefined, outcome: ActRunOutcome): CiConclusion {
+function mapJobResult(
+  result: string | undefined,
+  outcome: ActRunOutcome
+): CiConclusion {
   if (result === 'success') return 'success';
   if (result === 'skipped') return 'skipped';
   if (outcome.timedOut) return 'timed_out';
@@ -200,7 +214,10 @@ function mapJobResult(result: string | undefined, outcome: ActRunOutcome): CiCon
  * all with a non-zero exit is `startup_failure` (act could not even plan
  * the workflow — parse error, missing image, bad `runs-on`).
  */
-export function summarizeActRun(lines: ActLine[], outcome: ActRunOutcome): ActRunSummary {
+export function summarizeActRun(
+  lines: ActLine[],
+  outcome: ActRunOutcome
+): ActRunSummary {
   const byJob = new Map<string, ActLine[]>();
   for (const l of lines) {
     const list = byJob.get(l.jobId);
@@ -213,8 +230,10 @@ export function summarizeActRun(lines: ActLine[], outcome: ActRunOutcome): ActRu
     const exitLine = list.find((l) => l.exitCode !== undefined);
     const conclusion = mapJobResult(terminal?.jobResult, outcome);
     const times = list.map((l) => l.timeMs).filter((t) => t > 0);
-    const startedAt = times.length > 0 ? Math.floor(Math.min(...times) / 1000) : 0;
-    const finishedAt = times.length > 0 ? Math.floor(Math.max(...times) / 1000) : 0;
+    const startedAt =
+      times.length > 0 ? Math.floor(Math.min(...times) / 1000) : 0;
+    const finishedAt =
+      times.length > 0 ? Math.floor(Math.max(...times) / 1000) : 0;
     const log = list
       .filter((l) => l.exitCode === undefined)
       .map((l) => (l.rawOutput || l.msg.endsWith('\n') ? l.msg : `${l.msg}\n`))
@@ -241,9 +260,15 @@ export function summarizeActRun(lines: ActLine[], outcome: ActRunOutcome): ActRu
         : outcome.exitCode === 0
           ? 'success'
           : 'startup_failure';
-  } else if (outcome.timedOut && jobs.some((j) => j.conclusion === 'timed_out')) {
+  } else if (
+    outcome.timedOut &&
+    jobs.some((j) => j.conclusion === 'timed_out')
+  ) {
     conclusion = 'timed_out';
-  } else if (outcome.cancelled && jobs.some((j) => j.conclusion === 'cancelled')) {
+  } else if (
+    outcome.cancelled &&
+    jobs.some((j) => j.conclusion === 'cancelled')
+  ) {
     conclusion = 'cancelled';
   } else if (jobs.some((j) => j.conclusion === 'failure')) {
     conclusion = 'failure';
@@ -266,7 +291,10 @@ export function summarizeActRun(lines: ActLine[], outcome: ActRunOutcome): ActRu
  * workflow that need not declare `workflow_dispatch`, so it borrows the
  * first event the workflow DOES declare — otherwise act would plan no jobs.
  */
-export function actEventName(trigger: CiTriggerContext, triggers: WorkflowTriggers): string {
+export function actEventName(
+  trigger: CiTriggerContext,
+  triggers: WorkflowTriggers
+): string {
   if (trigger.reason === 'push') return 'push';
   if (trigger.reason === 'pull_request') return 'pull_request';
   if (triggers.push) return 'push';
@@ -280,7 +308,9 @@ function shortBranch(ref: string | undefined): string {
 }
 
 /** The `github.event` payload act reads from `-e`. */
-export function buildActEventPayload(trigger: CiTriggerContext): Record<string, unknown> {
+export function buildActEventPayload(
+  trigger: CiTriggerContext
+): Record<string, unknown> {
   if (trigger.reason === 'pull_request' && trigger.pr) {
     const base = shortBranch(trigger.ref);
     return {
@@ -320,7 +350,11 @@ export function extractZip(zipPath: string, destDir: string): string[] {
   const buf = readFileSync(zipPath);
   // Find the End Of Central Directory record (scan back over the comment).
   let eocd = -1;
-  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 22 - 0xffff); i--) {
+  for (
+    let i = buf.length - 22;
+    i >= Math.max(0, buf.length - 22 - 0xffff);
+    i--
+  ) {
     if (buf.readUInt32LE(i) === EOCD_SIG) {
       eocd = i;
       break;
@@ -329,12 +363,14 @@ export function extractZip(zipPath: string, destDir: string): string[] {
   if (eocd < 0) throw new Error(`not a zip file: ${zipPath}`);
   const entryCount = buf.readUInt16LE(eocd + 10);
   let offset = buf.readUInt32LE(eocd + 16);
-  if (offset === 0xffffffff) throw new Error(`zip64 archives are not supported: ${zipPath}`);
+  if (offset === 0xffffffff)
+    throw new Error(`zip64 archives are not supported: ${zipPath}`);
 
   const root = resolve(destDir);
   const names: string[] = [];
   for (let n = 0; n < entryCount; n++) {
-    if (buf.readUInt32LE(offset) !== CDIR_SIG) throw new Error(`corrupt central directory: ${zipPath}`);
+    if (buf.readUInt32LE(offset) !== CDIR_SIG)
+      throw new Error(`corrupt central directory: ${zipPath}`);
     const method = buf.readUInt16LE(offset + 10);
     const compSize = buf.readUInt32LE(offset + 20);
     const nameLen = buf.readUInt16LE(offset + 28);
@@ -347,9 +383,12 @@ export function extractZip(zipPath: string, destDir: string): string[] {
     if (name.endsWith('/')) continue;
     const target = resolve(root, name);
     if (target !== root && !target.startsWith(root + sep)) {
-      throw new Error(`zip entry would escape the destination: ${JSON.stringify(name)}`);
+      throw new Error(
+        `zip entry would escape the destination: ${JSON.stringify(name)}`
+      );
     }
-    if (buf.readUInt32LE(localOffset) !== LOCAL_SIG) throw new Error(`corrupt local header: ${zipPath}`);
+    if (buf.readUInt32LE(localOffset) !== LOCAL_SIG)
+      throw new Error(`corrupt local header: ${zipPath}`);
     const localNameLen = buf.readUInt16LE(localOffset + 26);
     const localExtraLen = buf.readUInt16LE(localOffset + 28);
     const dataStart = localOffset + 30 + localNameLen + localExtraLen;
@@ -357,7 +396,10 @@ export function extractZip(zipPath: string, destDir: string): string[] {
     let bytes: Buffer;
     if (method === 0) bytes = Buffer.from(data);
     else if (method === 8) bytes = inflateRawSync(data);
-    else throw new Error(`unsupported zip compression method ${method} in ${zipPath}`);
+    else
+      throw new Error(
+        `unsupported zip compression method ${method} in ${zipPath}`
+      );
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, bytes);
     names.push(name);
@@ -388,8 +430,8 @@ export function collectArtifacts(artifactDir: string): RunnerArtifact[] {
   for (const run of readdirSync(artifactDir, { withFileTypes: true })) {
     if (!run.isDirectory()) continue;
     const runDir = join(artifactDir, run.name);
-    for (const art of readdirSync(runDir, { withFileTypes: true }).sort((a, b) =>
-      a.name.localeCompare(b.name)
+    for (const art of readdirSync(runDir, { withFileTypes: true }).sort(
+      (a, b) => a.name.localeCompare(b.name)
     )) {
       if (!art.isDirectory()) continue;
       const artDir = join(runDir, art.name);
@@ -398,7 +440,11 @@ export function collectArtifacts(artifactDir: string): RunnerArtifact[] {
         if (file.startsWith(unpackedDir + sep)) continue;
         if (file.toLowerCase().endsWith('.zip')) {
           for (const name of extractZip(file, unpackedDir)) {
-            out.push({ path: join(unpackedDir, name), filename: name, name: art.name });
+            out.push({
+              path: join(unpackedDir, name),
+              filename: name,
+              name: art.name,
+            });
           }
         } else {
           out.push({
@@ -437,20 +483,31 @@ export class ActRunner implements Runner {
     const startedAt = Math.floor(Date.now() / 1000);
     const bin = this.binary();
     if (bin === null) {
-      return startupFailure(startedAt, 'act binary not found (set RIG_ACT_BIN or install act)');
+      return startupFailure(
+        startedAt,
+        'act binary not found (set RIG_ACT_BIN or install act)'
+      );
     }
 
-    const workflowText = readFileSync(join(request.checkoutDir, request.workflow.path));
+    const workflowText = readFileSync(
+      join(request.checkoutDir, request.workflow.path)
+    );
     const parsed = parseWorkflow(request.workflow.path, workflowText);
     if (parsed.parseError !== undefined) {
-      return startupFailure(startedAt, `workflow parse error: ${parsed.parseError}`);
+      return startupFailure(
+        startedAt,
+        `workflow parse error: ${parsed.parseError}`
+      );
     }
 
     const scratch = await mkdtemp(join(tmpdir(), 'rig-act-'));
     const artifactDir = this.options.artifactDir ?? join(scratch, 'artifacts');
     mkdirSync(artifactDir, { recursive: true });
     const eventPath = join(scratch, 'event.json');
-    writeFileSync(eventPath, JSON.stringify(buildActEventPayload(request.trigger)));
+    writeFileSync(
+      eventPath,
+      JSON.stringify(buildActEventPayload(request.trigger))
+    );
 
     const args = [
       actEventName(request.trigger, parsed.triggers),
@@ -562,8 +619,11 @@ export class ActRunner implements Runner {
     }));
     for (const artifact of artifacts) {
       const owner =
-        jobs.find((j) => j.log.includes(`Artifact ${artifact.name} has been successfully uploaded`)) ??
-        jobs[0];
+        jobs.find((j) =>
+          j.log.includes(
+            `Artifact ${artifact.name} has been successfully uploaded`
+          )
+        ) ?? jobs[0];
       owner?.artifacts.push(artifact);
     }
 

@@ -125,7 +125,9 @@ export class FakeRunner implements Runner {
   /** Every request, in call order. */
   readonly requests: RunnerRequest[] = [];
 
-  constructor(private readonly script: FakeRunnerScript = defaultFakeRunResult) {}
+  constructor(
+    private readonly script: FakeRunnerScript = defaultFakeRunResult
+  ) {}
 
   async run(request: RunnerRequest): Promise<RunnerRunResult> {
     this.requests.push(request);

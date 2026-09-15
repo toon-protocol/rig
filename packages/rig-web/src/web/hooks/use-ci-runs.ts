@@ -70,11 +70,15 @@ export function useCiRuns(
     [ownerHex, repoId]
   );
 
-  const { events: runEvents, loading: runsLoading, error: runsError } = useRelaySubscription(
+  const {
+    events: runEvents,
+    loading: runsLoading,
+    error: runsError,
+  } = useRelaySubscription(relayUrl, runsFilter);
+  const { events: controlEvents, loading: controlsLoading } = useRelay(
     relayUrl,
-    runsFilter
+    controlsFilter
   );
-  const { events: controlEvents, loading: controlsLoading } = useRelay(relayUrl, controlsFilter);
 
   const controls = useMemo(() => {
     const out: CiServiceControl[] = [];
@@ -112,8 +116,14 @@ export function useCiRuns(
     return map;
   }, [runs]);
 
-  const runsForCommit = useCallback((sha: string) => byCommit.get(sha) ?? EMPTY, [byCommit]);
-  const runsForPr = useCallback((prEventId: string) => byPr.get(prEventId) ?? EMPTY, [byPr]);
+  const runsForCommit = useCallback(
+    (sha: string) => byCommit.get(sha) ?? EMPTY,
+    [byCommit]
+  );
+  const runsForPr = useCallback(
+    (prEventId: string) => byPr.get(prEventId) ?? EMPTY,
+    [byPr]
+  );
 
   return {
     runs,
@@ -142,15 +152,25 @@ export function useCiRun(
 ): UseCiRunResult {
   const { relayUrl } = useRigConfig();
   const ownerHex = useMemo(() => ownerToHexOrNull(owner), [owner]);
-  const { runs, loading: runsLoading, error } = useCiRuns(owner, repoId, maintainers);
+  const {
+    runs,
+    loading: runsLoading,
+    error,
+  } = useCiRuns(owner, repoId, maintainers);
 
-  const run = useMemo(() => runs.find((r) => r.runId === runId) ?? null, [runs, runId]);
+  const run = useMemo(
+    () => runs.find((r) => r.runId === runId) ?? null,
+    [runs, runId]
+  );
 
   const jobsFilter = useMemo<NostrFilter | null>(
     () => (ownerHex && run ? buildCiJobResultsFilter(ownerHex, repoId) : null),
     [ownerHex, repoId, run]
   );
-  const { events: jobEvents, loading: jobsLoading } = useRelaySubscription(relayUrl, jobsFilter);
+  const { events: jobEvents, loading: jobsLoading } = useRelaySubscription(
+    relayUrl,
+    jobsFilter
+  );
 
   const jobs = useMemo(() => {
     if (!run) return [];
@@ -160,8 +180,15 @@ export function useCiRun(
       const parsed = parseCiJobResult(ev);
       if (parsed && parsed.progressAddress === address) out.push(parsed);
     }
-    return out.sort((a, b) => (a.startedAt ?? a.createdAt) - (b.startedAt ?? b.createdAt));
+    return out.sort(
+      (a, b) => (a.startedAt ?? a.createdAt) - (b.startedAt ?? b.createdAt)
+    );
   }, [jobEvents, run]);
 
-  return { run, jobs, loading: runsLoading || (run !== null && jobsLoading), error };
+  return {
+    run,
+    jobs,
+    loading: runsLoading || (run !== null && jobsLoading),
+    error,
+  };
 }

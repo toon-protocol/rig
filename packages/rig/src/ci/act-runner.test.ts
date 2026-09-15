@@ -8,7 +8,13 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+  existsSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -34,12 +40,28 @@ const T1 = '2026-09-15T16:20:41-04:00';
 const T2 = '2026-09-15T16:20:45-04:00';
 
 function line(fields: Record<string, unknown>): string {
-  return JSON.stringify({ dryrun: false, level: 'info', matrix: {}, time: T0, ...fields });
+  return JSON.stringify({
+    dryrun: false,
+    level: 'info',
+    matrix: {},
+    time: T0,
+    ...fields,
+  });
 }
 
 const LINES = [
-  line({ job: 'probe/Build job', jobID: 'build', step: 'Set up job', msg: '⭐ Run Set up job' }),
-  line({ job: 'probe/failing  ', jobID: 'failing', step: 'Set up job', msg: '⭐ Run Set up job' }),
+  line({
+    job: 'probe/Build job',
+    jobID: 'build',
+    step: 'Set up job',
+    msg: '⭐ Run Set up job',
+  }),
+  line({
+    job: 'probe/failing  ',
+    jobID: 'failing',
+    step: 'Set up job',
+    msg: '⭐ Run Set up job',
+  }),
   line({
     job: 'probe/Build job',
     jobID: 'build',
@@ -67,8 +89,20 @@ const LINES = [
     msg: 'Artifact outputs has been successfully uploaded! Final size is 134 bytes.\n',
     time: T1,
   }),
-  line({ job: 'probe/failing  ', jobID: 'failing', jobResult: 'failure', msg: '🏁  Job failed', time: T2 }),
-  line({ job: 'probe/Build job', jobID: 'build', jobResult: 'success', msg: '🏁  Job succeeded', time: T2 }),
+  line({
+    job: 'probe/failing  ',
+    jobID: 'failing',
+    jobResult: 'failure',
+    msg: '🏁  Job failed',
+    time: T2,
+  }),
+  line({
+    job: 'probe/Build job',
+    jobID: 'build',
+    jobResult: 'success',
+    msg: '🏁  Job succeeded',
+    time: T2,
+  }),
 ];
 
 const TRIGGER: CiTriggerContext = {
@@ -110,16 +144,24 @@ describe('parseActJsonLine', () => {
 
   it('returns null for non-JSON and for lines without a jobID', () => {
     expect(parseActJsonLine('Error: Job failed')).toBeNull();
-    expect(parseActJsonLine('{"level":"info","msg":"Start server"}')).toBeNull();
+    expect(
+      parseActJsonLine('{"level":"info","msg":"Start server"}')
+    ).toBeNull();
     expect(parseActJsonLine('')).toBeNull();
   });
 });
 
 describe('summarizeActRun', () => {
-  const parsed = LINES.map(parseActJsonLine).filter((l): l is ActLine => l !== null);
+  const parsed = LINES.map(parseActJsonLine).filter(
+    (l): l is ActLine => l !== null
+  );
 
   it('groups logs per job, takes jobResult as the conclusion, and records exit codes', () => {
-    const run = summarizeActRun(parsed, { exitCode: 1, timedOut: false, cancelled: false });
+    const run = summarizeActRun(parsed, {
+      exitCode: 1,
+      timedOut: false,
+      cancelled: false,
+    });
     expect(run.conclusion).toBe('failure');
     expect(run.jobs.map((j) => [j.jobId, j.conclusion, j.exitCode])).toEqual([
       ['build', 'success', 0],
@@ -143,7 +185,15 @@ describe('summarizeActRun', () => {
     const skipped = summarizeActRun(
       [
         ...parsed.filter((l) => l.jobId === 'build'),
-        { jobId: 'lint', jobName: 'lint', msg: 'skipped', level: 'info', rawOutput: false, jobResult: 'skipped', timeMs: 0 },
+        {
+          jobId: 'lint',
+          jobName: 'lint',
+          msg: 'skipped',
+          level: 'info',
+          rawOutput: false,
+          jobResult: 'skipped',
+          timeMs: 0,
+        },
       ],
       { exitCode: 0, timedOut: false, cancelled: false }
     );
@@ -153,7 +203,11 @@ describe('summarizeActRun', () => {
 
   it('marks a job with no result as failure when act exited non-zero', () => {
     const noResult = parsed.filter((l) => l.jobResult === undefined);
-    const run = summarizeActRun(noResult, { exitCode: 1, timedOut: false, cancelled: false });
+    const run = summarizeActRun(noResult, {
+      exitCode: 1,
+      timedOut: false,
+      cancelled: false,
+    });
     expect(run.jobs.every((j) => j.conclusion === 'failure')).toBe(true);
     expect(run.conclusion).toBe('failure');
   });
@@ -161,17 +215,29 @@ describe('summarizeActRun', () => {
   it('marks unfinished jobs timed_out / cancelled when the run was', () => {
     const noResult = parsed.filter((l) => l.jobResult === undefined);
     expect(
-      summarizeActRun(noResult, { exitCode: null, timedOut: true, cancelled: false }).conclusion
+      summarizeActRun(noResult, {
+        exitCode: null,
+        timedOut: true,
+        cancelled: false,
+      }).conclusion
     ).toBe('timed_out');
     expect(
-      summarizeActRun(noResult, { exitCode: null, timedOut: false, cancelled: true }).conclusion
+      summarizeActRun(noResult, {
+        exitCode: null,
+        timedOut: false,
+        cancelled: true,
+      }).conclusion
     ).toBe('cancelled');
   });
 
   it('overrides act\'s teardown "failure" with timed_out when WE killed the run', () => {
     // act reports the job it tears down on SIGTERM as failure; a job that
     // finished successfully before the kill keeps its own conclusion.
-    const run = summarizeActRun(parsed, { exitCode: null, timedOut: true, cancelled: false });
+    const run = summarizeActRun(parsed, {
+      exitCode: null,
+      timedOut: true,
+      cancelled: false,
+    });
     expect(run.jobs.map((j) => [j.jobId, j.conclusion])).toEqual([
       ['build', 'success'],
       ['failing', 'timed_out'],
@@ -180,7 +246,11 @@ describe('summarizeActRun', () => {
   });
 
   it('is startup_failure when act produced no job lines and exited non-zero', () => {
-    const run = summarizeActRun([], { exitCode: 1, timedOut: false, cancelled: false });
+    const run = summarizeActRun([], {
+      exitCode: 1,
+      timedOut: false,
+      cancelled: false,
+    });
     expect(run.conclusion).toBe('startup_failure');
     expect(run.jobs).toEqual([]);
   });
@@ -189,14 +259,20 @@ describe('summarizeActRun', () => {
 describe('actEventName / buildActEventPayload', () => {
   it('maps trigger reasons to act event names', () => {
     expect(actEventName({ ...TRIGGER, reason: 'push' }, {})).toBe('push');
-    expect(actEventName({ ...TRIGGER, reason: 'pull_request' }, {})).toBe('pull_request');
-    // A manual replay uses an event the workflow declares, so `on: push`
-    // workflows still run (NIP-C1: replay need not declare `manual`).
-    expect(actEventName({ ...TRIGGER, reason: 'manual' }, { push: {} })).toBe('push');
-    expect(actEventName({ ...TRIGGER, reason: 'manual' }, { pull_request: {} })).toBe(
+    expect(actEventName({ ...TRIGGER, reason: 'pull_request' }, {})).toBe(
       'pull_request'
     );
-    expect(actEventName({ ...TRIGGER, reason: 'manual' }, {})).toBe('workflow_dispatch');
+    // A manual replay uses an event the workflow declares, so `on: push`
+    // workflows still run (NIP-C1: replay need not declare `manual`).
+    expect(actEventName({ ...TRIGGER, reason: 'manual' }, { push: {} })).toBe(
+      'push'
+    );
+    expect(
+      actEventName({ ...TRIGGER, reason: 'manual' }, { pull_request: {} })
+    ).toBe('pull_request');
+    expect(actEventName({ ...TRIGGER, reason: 'manual' }, {})).toBe(
+      'workflow_dispatch'
+    );
   });
 
   it('builds a push payload with ref + after and a PR payload with head/base', () => {
@@ -231,7 +307,8 @@ describe('actEventName / buildActEventPayload', () => {
 
 const cleanups: string[] = [];
 afterEach(() => {
-  for (const dir of cleanups.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of cleanups.splice(0))
+    rmSync(dir, { recursive: true, force: true });
 });
 
 function tmp(prefix: string): string {
@@ -262,7 +339,12 @@ describe('extractZip / collectArtifacts', () => {
   it('extracts deflated + stored entries (central-directory driven)', () => {
     const dir = tmp('rig-zip-');
     const zipPath = join(dir, 'a.zip');
-    if (!pythonZip(zipPath, { 'out.txt': 'x=1\n', 'nested/deep.txt': 'y'.repeat(5000) })) {
+    if (
+      !pythonZip(zipPath, {
+        'out.txt': 'x=1\n',
+        'nested/deep.txt': 'y'.repeat(5000),
+      })
+    ) {
       return; // no python3 on this box — the Docker-gated test covers act's real zips
     }
     const out = join(dir, 'out');
@@ -283,7 +365,12 @@ describe('extractZip / collectArtifacts', () => {
     mkdirSync(join(dir, '1', 'outputs'), { recursive: true });
     mkdirSync(join(dir, '1', 'plain'), { recursive: true });
     writeFileSync(join(dir, '1', 'plain', 'report.txt'), 'r');
-    if (!pythonZip(join(dir, '1', 'outputs', 'outputs.zip'), { 'out.txt': 'x=1\n' })) return;
+    if (
+      !pythonZip(join(dir, '1', 'outputs', 'outputs.zip'), {
+        'out.txt': 'x=1\n',
+      })
+    )
+      return;
     const artifacts = collectArtifacts(dir);
     expect(artifacts.map((a) => [a.name, a.filename]).sort()).toEqual([
       ['outputs', 'out.txt'],
@@ -373,12 +460,19 @@ describe.skipIf(!CAN_RUN)('ActRunner against real act + Docker', () => {
       expect(result.conclusion).toBe('success');
       expect(result.jobs).toHaveLength(1);
       const job = result.jobs[0];
-      expect(job).toMatchObject({ jobId: 'build', name: 'Build it', conclusion: 'success', exitCode: 0 });
+      expect(job).toMatchObject({
+        jobId: 'build',
+        name: 'Build it',
+        conclusion: 'success',
+        exitCode: 0,
+      });
       expect(job?.log).toContain('hello from rig');
       expect(job?.log).toContain('TOKEN_LEN=6');
       expect(job?.log).not.toContain('abcdef');
       expect(chunks.join('')).toContain('hello from rig');
-      expect(job?.artifacts.map((a) => [a.name, a.filename])).toEqual([['outputs', 'out.txt']]);
+      expect(job?.artifacts.map((a) => [a.name, a.filename])).toEqual([
+        ['outputs', 'out.txt'],
+      ]);
       expect(existsSync(job?.artifacts[0]?.path ?? '')).toBe(true);
     },
     5 * 60_000

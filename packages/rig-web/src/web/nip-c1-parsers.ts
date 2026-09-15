@@ -81,7 +81,10 @@ export const CI_TRUST_ORDER: readonly CiTrustLevel[] = [
 ];
 
 /** True when `level` is at least as strong as `required`. */
-export function trustAtLeast(level: CiTrustLevel, required: CiTrustLevel): boolean {
+export function trustAtLeast(
+  level: CiTrustLevel,
+  required: CiTrustLevel
+): boolean {
   return CI_TRUST_ORDER.indexOf(level) <= CI_TRUST_ORDER.indexOf(required);
 }
 
@@ -107,7 +110,8 @@ export function parseRepoAddress(
   const kind = addr.slice(0, first);
   const ownerPubkey = addr.slice(first + 1, second).toLowerCase();
   const repoId = addr.slice(second + 1);
-  if (kind !== '30617' || !HEX64_RE.test(ownerPubkey) || repoId === '') return null;
+  if (kind !== '30617' || !HEX64_RE.test(ownerPubkey) || repoId === '')
+    return null;
   return { ownerPubkey, repoId };
 }
 
@@ -152,7 +156,9 @@ function asPrKind(value: string | undefined): 1617 | 1618 | undefined {
   return undefined;
 }
 
-function asSourceKind(value: string | undefined): 1617 | 1618 | 1619 | undefined {
+function asSourceKind(
+  value: string | undefined
+): 1617 | 1618 | 1619 | undefined {
   if (value === '1619') return 1619;
   return asPrKind(value);
 }
@@ -199,7 +205,14 @@ export function parseCiTriggerContext(
     const sourceKind = asSourceKind(getTagValue(tags, 'k')) ?? prKind;
     const sourceAuthor = getTagValue(tags, 'p') ?? prAuthor;
     if (prKind && prAuthor && sourceKind && sourceAuthor) {
-      ctx.pr = { prEventId, prAuthor, prKind, sourceEventId, sourceAuthor, sourceKind };
+      ctx.pr = {
+        prEventId,
+        prAuthor,
+        prKind,
+        sourceEventId,
+        sourceAuthor,
+        sourceKind,
+      };
     }
   }
   return ctx;
@@ -210,8 +223,18 @@ export function parseCiTriggerContext(
 // ---------------------------------------------------------------------------
 
 export type CiProvenance =
-  | { kind: 'service-request'; eventId: string; relayUrl: string; pubkey: string }
-  | { kind: 'manual-trigger'; eventId: string; relayUrl: string; pubkey: string };
+  | {
+      kind: 'service-request';
+      eventId: string;
+      relayUrl: string;
+      pubkey: string;
+    }
+  | {
+      kind: 'manual-trigger';
+      eventId: string;
+      relayUrl: string;
+      pubkey: string;
+    };
 
 export interface CiJobQuote {
   eventId: string;
@@ -220,7 +243,10 @@ export interface CiJobQuote {
   jobId: string;
 }
 
-function parseQuotes(tags: string[][]): { provenance?: CiProvenance; jobs: CiJobQuote[] } {
+function parseQuotes(tags: string[][]): {
+  provenance?: CiProvenance;
+  jobs: CiJobQuote[];
+} {
   let provenance: CiProvenance | undefined;
   const jobs: CiJobQuote[] = [];
   for (const tag of tags) {
@@ -258,8 +284,14 @@ export interface CiServiceControl {
 }
 
 /** Parse a 9843/9844; exactly one `a` and one `p` are required by the NIP. */
-export function parseCiServiceControl(event: NostrEvent): CiServiceControl | null {
-  if (event.kind !== CI_SERVICE_REQUEST_KIND && event.kind !== CI_SERVICE_STOP_KIND) return null;
+export function parseCiServiceControl(
+  event: NostrEvent
+): CiServiceControl | null {
+  if (
+    event.kind !== CI_SERVICE_REQUEST_KIND &&
+    event.kind !== CI_SERVICE_STOP_KIND
+  )
+    return null;
   const aTags = event.tags.filter((t) => t[0] === 'a');
   const pTags = event.tags.filter((t) => t[0] === 'p');
   if (aTags.length !== 1 || pTags.length !== 1) return null;
@@ -332,7 +364,8 @@ export function selectServiceRequests(
     }
   }
   const accepted = open.filter((r) => opts.authorized.has(r.pubkey));
-  const active = accepted.length > 0 ? (accepted[accepted.length - 1] ?? null) : null;
+  const active =
+    accepted.length > 0 ? (accepted[accepted.length - 1] ?? null) : null;
   return { active, open };
 }
 
@@ -353,11 +386,15 @@ export interface CiWorkflowResult {
   jobs: CiJobQuote[];
 }
 
-export function parseCiWorkflowResult(event: NostrEvent): CiWorkflowResult | null {
+export function parseCiWorkflowResult(
+  event: NostrEvent
+): CiWorkflowResult | null {
   if (event.kind !== CI_WORKFLOW_RESULT_KIND) return null;
   const trigger = parseCiTriggerContext(event.tags);
   if (!trigger) return null;
-  const runId = getTagValues(event.tags, 'r').find((v) => !v.startsWith('refs/'));
+  const runId = getTagValues(event.tags, 'r').find(
+    (v) => !v.startsWith('refs/')
+  );
   const conclusion = getTagValue(event.tags, 'conclusion');
   if (!runId || !conclusion || !CONCLUSIONS.has(conclusion)) return null;
   const { provenance, jobs } = parseQuotes(event.tags);
@@ -398,7 +435,9 @@ export interface CiWorkflowProgress {
   jobs: CiJobQuote[];
 }
 
-export function parseCiWorkflowProgress(event: NostrEvent): CiWorkflowProgress | null {
+export function parseCiWorkflowProgress(
+  event: NostrEvent
+): CiWorkflowProgress | null {
   if (event.kind !== CI_WORKFLOW_PROGRESS_KIND) return null;
   const runId = getTagValue(event.tags, 'd');
   const status = getTagValue(event.tags, 'status');
@@ -407,9 +446,13 @@ export function parseCiWorkflowProgress(event: NostrEvent): CiWorkflowProgress |
   if (!trigger) return null;
   const conclusionRaw = getTagValue(event.tags, 'conclusion');
   const conclusion =
-    conclusionRaw && CONCLUSIONS.has(conclusionRaw) ? (conclusionRaw as CiConclusion) : undefined;
+    conclusionRaw && CONCLUSIONS.has(conclusionRaw)
+      ? (conclusionRaw as CiConclusion)
+      : undefined;
   const inProgressTag = event.tags.find((t) => t[0] === 'in-progress');
-  const inProgress = inProgressTag ? inProgressTag.slice(1).filter((v) => v !== '') : [];
+  const inProgress = inProgressTag
+    ? inProgressTag.slice(1).filter((v) => v !== '')
+    : [];
   const queue = parseTimestamp(event.tags, 'queue');
   const expiresAt = parseTimestamp(event.tags, 'expiration');
   const queuedAt = parseTimestamp(event.tags, 'queued_at');
@@ -471,7 +514,8 @@ export function parseProgressAddress(
   const first = address.indexOf(':');
   const second = first === -1 ? -1 : address.indexOf(':', first + 1);
   if (first === -1 || second === -1) return null;
-  if (address.slice(0, first) !== String(CI_WORKFLOW_PROGRESS_KIND)) return null;
+  if (address.slice(0, first) !== String(CI_WORKFLOW_PROGRESS_KIND))
+    return null;
   const coordinator = address.slice(first + 1, second).toLowerCase();
   const runId = address.slice(second + 1);
   if (!HEX64_RE.test(coordinator) || runId === '') return null;
@@ -489,7 +533,9 @@ export function parseCiJobResult(event: NostrEvent): CiJobResult | null {
     (t) => t[0] === 'q' && t[1]?.startsWith(`${CI_WORKFLOW_PROGRESS_KIND}:`)
   );
   const progressAddress = quote?.[1];
-  const parsedAddress = progressAddress ? parseProgressAddress(progressAddress) : null;
+  const parsedAddress = progressAddress
+    ? parseProgressAddress(progressAddress)
+    : null;
   if (!progressAddress || !parsedAddress) return null;
 
   const name = getTagValue(event.tags, 'name');
@@ -558,7 +604,9 @@ export interface DeriveTrustArgs {
 export function deriveTrustLevel(args: DeriveTrustArgs): CiTrustLevel {
   const publisher = args.publisherPubkey.toLowerCase();
   const { provenance, authorized } = args;
-  const forCoordinator = args.controls.filter((c) => c.coordinatorPubkey === publisher);
+  const forCoordinator = args.controls.filter(
+    (c) => c.coordinatorPubkey === publisher
+  );
   const repoAddr = forCoordinator[0]?.repoAddr;
 
   if (provenance && authorized.has(provenance.pubkey.toLowerCase())) {
@@ -580,7 +628,8 @@ export function deriveTrustLevel(args: DeriveTrustArgs): CiTrustLevel {
   }
 
   if (authorized.has(publisher)) return 'seen-in-network';
-  if (forCoordinator.some((c) => c.kind === 'request')) return 'seen-in-network';
+  if (forCoordinator.some((c) => c.kind === 'request'))
+    return 'seen-in-network';
   return 'no-known-context';
 }
 
@@ -621,7 +670,10 @@ export interface BuildCiRunsOptions {
  * address only the newest is honoured (the relay may hand back stale
  * replacements).
  */
-export function buildCiRuns(events: NostrEvent[], opts: BuildCiRunsOptions): CiRun[] {
+export function buildCiRuns(
+  events: NostrEvent[],
+  opts: BuildCiRunsOptions
+): CiRun[] {
   const byKey = new Map<string, CiRun>();
   const progressSeen = new Map<string, number>();
 
@@ -652,11 +704,21 @@ export function buildCiRuns(events: NostrEvent[], opts: BuildCiRunsOptions): CiR
         createdAt: Math.max(base.createdAt, progress.createdAt),
         inProgress: hasResult ? [] : progress.inProgress,
         ...(hasResult ? {} : { status: progress.status }),
-        ...(hasResult || progress.queue === undefined ? {} : { queue: progress.queue }),
-        ...(!hasResult && progress.conclusion ? { conclusion: progress.conclusion } : {}),
-        ...(progress.queuedAt !== undefined && base.queuedAt === undefined ? { queuedAt: progress.queuedAt } : {}),
-        ...(progress.startedAt !== undefined && base.startedAt === undefined ? { startedAt: progress.startedAt } : {}),
-        ...(progress.provenance && !base.provenance ? { provenance: progress.provenance } : {}),
+        ...(hasResult || progress.queue === undefined
+          ? {}
+          : { queue: progress.queue }),
+        ...(!hasResult && progress.conclusion
+          ? { conclusion: progress.conclusion }
+          : {}),
+        ...(progress.queuedAt !== undefined && base.queuedAt === undefined
+          ? { queuedAt: progress.queuedAt }
+          : {}),
+        ...(progress.startedAt !== undefined && base.startedAt === undefined
+          ? { startedAt: progress.startedAt }
+          : {}),
+        ...(progress.provenance && !base.provenance
+          ? { provenance: progress.provenance }
+          : {}),
         jobs: hasResult ? base.jobs : progress.jobs,
       };
       byKey.set(key, merged);
@@ -679,7 +741,9 @@ export function buildCiRuns(events: NostrEvent[], opts: BuildCiRunsOptions): CiR
         inProgress: [],
         createdAt: Math.max(existing?.createdAt ?? 0, result.createdAt),
         ...(result.queuedAt !== undefined ? { queuedAt: result.queuedAt } : {}),
-        ...(result.startedAt !== undefined ? { startedAt: result.startedAt } : {}),
+        ...(result.startedAt !== undefined
+          ? { startedAt: result.startedAt }
+          : {}),
         ...(result.provenance ? { provenance: result.provenance } : {}),
         jobs: result.jobs,
         resultEventId: result.eventId,
@@ -726,7 +790,8 @@ export function aggregateRunStatus(
 ): CiAggregateStatus | null {
   if (runs.length === 0) return null;
   if (runs.some((r) => r.status !== 'concluded')) return 'pending';
-  if (runs.some((r) => r.conclusion !== undefined && RED.has(r.conclusion))) return 'failure';
+  if (runs.some((r) => r.conclusion !== undefined && RED.has(r.conclusion)))
+    return 'failure';
   if (runs.some((r) => r.conclusion === 'success')) return 'success';
   return 'neutral';
 }

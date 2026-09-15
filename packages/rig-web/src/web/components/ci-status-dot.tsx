@@ -24,8 +24,11 @@ const STATUS_LABEL: Record<CiAggregateStatus, string> = {
 };
 
 /** Human label for one run's state (used by the tooltip and the pages). */
-export function describeRunState(run: Pick<CiRun, 'status' | 'conclusion'>): string {
-  if (run.status !== 'concluded') return run.status === 'queued' ? 'queued' : 'in progress';
+export function describeRunState(
+  run: Pick<CiRun, 'status' | 'conclusion'>
+): string {
+  if (run.status !== 'concluded')
+    return run.status === 'queued' ? 'queued' : 'in progress';
   return (run.conclusion ?? 'concluded').replace(/_/g, ' ');
 }
 
@@ -37,7 +40,8 @@ export function conclusionBadgeClass(
   status: CiProgressStatus,
   conclusion: CiConclusion | undefined
 ): string {
-  if (status !== 'concluded') return 'bg-yellow-500/15 text-yellow-700 dark:text-yellow-300';
+  if (status !== 'concluded')
+    return 'bg-yellow-500/15 text-yellow-700 dark:text-yellow-300';
   switch (conclusion) {
     case 'success':
       return 'bg-success/15 text-success-emphasis';
@@ -66,7 +70,12 @@ interface CiStatusDotProps {
  * repos with no coordinator look exactly as they did before. Links to the run
  * page when there is exactly one run, else to the Actions tab.
  */
-export function CiStatusDot({ runs, owner, repo, className }: CiStatusDotProps) {
+export function CiStatusDot({
+  runs,
+  owner,
+  repo,
+  className,
+}: CiStatusDotProps) {
   const status = aggregateRunStatus(runs);
   if (status === null) return null;
 
@@ -89,7 +98,10 @@ export function CiStatusDot({ runs, owner, repo, className }: CiStatusDotProps) 
       data-ci-status={status}
       className={cn('inline-flex shrink-0 items-center', className)}
     >
-      <span aria-hidden="true" className={cn('block h-2.5 w-2.5 rounded-full', DOT_CLASS[status])} />
+      <span
+        aria-hidden="true"
+        className={cn('block h-2.5 w-2.5 rounded-full', DOT_CLASS[status])}
+      />
     </Link>
   );
 }
