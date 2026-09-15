@@ -95,6 +95,26 @@ export function buildIssueCloseFilter(eventIds: string[]): NostrFilter {
   return { kinds: [1632], '#e': eventIds, limit: 500 };
 }
 
+// ---------------------------------------------------------------------------
+// NIP-C1 (Nostr CI) filters — rig#125. Every CI event carries the repo's
+// `a` coordinate, so one `#a` filter scopes a whole repo's CI history.
+// ---------------------------------------------------------------------------
+
+/** Workflow Results (9842) + Workflow Progress (39842) for a repository. */
+export function buildCiRunsFilter(ownerPubkey: string, repoId: string): NostrFilter {
+  return { kinds: [9842, 39842], '#a': [`30617:${ownerPubkey}:${repoId}`], limit: 500 };
+}
+
+/** Service Requests (9843) + Stops (9844) for a repository — trust evidence. */
+export function buildCiControlsFilter(ownerPubkey: string, repoId: string): NostrFilter {
+  return { kinds: [9843, 9844], '#a': [`30617:${ownerPubkey}:${repoId}`], limit: 500 };
+}
+
+/** Job Results (9841) for a repository; callers narrow by progress address. */
+export function buildCiJobResultsFilter(ownerPubkey: string, repoId: string): NostrFilter {
+  return { kinds: [9841], '#a': [`30617:${ownerPubkey}:${repoId}`], limit: 500 };
+}
+
 /**
  * An EVENT frame whose payload could not be decoded into a NostrEvent.
  *
@@ -433,4 +453,137 @@ export function queryRelay(
       settle('resolve', events);
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Persistent subscription (rig#125: live Workflow Progress)
+// ---------------------------------------------------------------------------
+
+/** Handle on a live subscription opened by {@link subscribeRelay}. */
+export interface RelaySubscription {
+  /** Send CLOSE, close the socket, and stop reconnecting. Idempotent. */
+  close(): void;
+}
+
+export interface SubscribeRelayOptions {
+  /** Delay before the single reconnect attempt after an unexpected close. */
+  reconnectDelayMs?: number;
+  /** Called for each EVENT frame whose payload fails to decode. */
+  onUnparseable?: (unparseable: UnparseableEvent) => void;
+  /** Called when the relay errors (the subscription keeps trying once). */
+  onError?: (error: Error) => void;
+}
+
+/**
+ * Open a NIP-01 REQ and KEEP it open after EOSE, so replaceable events the
+ * relay pushes later (a coordinator renewing its kind:39842 progress marker
+ * as jobs finish) reach the page without polling. Mirrors {@link queryRelay}'s
+ * decode + never-drop posture; differs only in lifetime: EOSE is reported
+ * through `onEose` instead of resolving, and an unexpected socket close is
+ * retried ONCE with a fresh REQ (a relay restart), after which the caller's
+ * `close()` is the only way out.
+ */
+export function subscribeRelay(
+  relayUrl: string,
+  filter: NostrFilter,
+  onEvent: (event: NostrEvent) => void,
+  onEose?: () => void,
+  options: SubscribeRelayOptions = {}
+): RelaySubscription {
+  const reconnectDelayMs = options.reconnectDelayMs ?? 1000;
+  let closed = false;
+  let reconnected = false;
+  let ws: WebSocket | null = null;
+  let subId = '';
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  if (!isValidRelayUrl(relayUrl)) {
+    options.onError?.(
+      // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+      new Error(`Invalid relay URL protocol (must be ws:// or wss://): ${relayUrl}`)
+    );
+    return { close: () => undefined };
+  }
+
+  const connect = (): void => {
+    if (closed) return;
+    subId = `rig-live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    let socket: WebSocket;
+    try {
+      // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+      socket = new WebSocket(relayUrl);
+    } catch (err) {
+      options.onError?.(new Error(`Failed to connect to relay: ${String(err)}`));
+      return;
+    }
+    ws = socket;
+    const mySubId = subId;
+
+    socket.onopen = () => {
+      if (closed) return;
+      socket.send(JSON.stringify(['REQ', mySubId, filter]));
+    };
+
+    socket.onmessage = (msgEvent: MessageEvent) => {
+      if (closed) return;
+      try {
+        const msg = JSON.parse(String(msgEvent.data)) as unknown[];
+        if (!Array.isArray(msg) || msg.length < 2) return;
+        const msgType = msg[0];
+        if (msgType === 'EVENT' && msg[1] === mySubId && msg[2] !== undefined) {
+          const payload = msg[2] as string | NostrEvent;
+          try {
+            onEvent(decodeToonMessage(payload));
+          } catch (decodeErr) {
+            const raw = typeof payload === 'string' ? payload : JSON.stringify(payload);
+            const message = decodeErr instanceof Error ? decodeErr.message : String(decodeErr);
+            console.warn(
+              '[rig-web] live relay EVENT payload failed to decode; surfacing as unparseable:',
+              message,
+              raw
+            );
+            options.onUnparseable?.({ id: salvageEventId(raw), raw, error: message });
+          }
+        } else if (msgType === 'EOSE' && msg[1] === mySubId) {
+          onEose?.();
+        }
+      } catch {
+        // Ignore frames that are not valid relay messages at all
+      }
+    };
+
+    socket.onerror = (event: Event) => {
+      const detail = 'message' in event ? String((event as ErrorEvent).message) : 'unknown';
+      options.onError?.(new Error(`WebSocket error on ${relayUrl}: ${detail}`));
+    };
+
+    socket.onclose = () => {
+      if (closed || ws !== socket) return;
+      ws = null;
+      if (reconnected) return;
+      reconnected = true;
+      reconnectTimer = setTimeout(connect, reconnectDelayMs);
+    };
+  };
+
+  connect();
+
+  return {
+    close: () => {
+      if (closed) return;
+      closed = true;
+      if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+      const socket = ws;
+      ws = null;
+      if (!socket) return;
+      try {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify(['CLOSE', subId]));
+        }
+        socket.close();
+      } catch {
+        // Ignore close errors
+      }
+    },
+  };
 }

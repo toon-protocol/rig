@@ -315,3 +315,94 @@ describe('queryRelay - unparseable events are surfaced, never dropped', () => {
     }
   });
 });
+
+// ============================================================================
+// rig#125: NIP-C1 filters + the persistent subscription used for live runs
+// ============================================================================
+
+import {
+  buildCiControlsFilter,
+  buildCiJobResultsFilter,
+  buildCiRunsFilter,
+  subscribeRelay,
+} from './relay-client.js';
+
+describe('NIP-C1 filter builders', () => {
+  const owner = 'ab'.repeat(32);
+  it('scope runs, controls and job results to the repo coordinate', () => {
+    const a = `30617:${owner}:demo`;
+    expect(buildCiRunsFilter(owner, 'demo')).toEqual({ kinds: [9842, 39842], '#a': [a], limit: 500 });
+    expect(buildCiControlsFilter(owner, 'demo')).toEqual({ kinds: [9843, 9844], '#a': [a], limit: 500 });
+    expect(buildCiJobResultsFilter(owner, 'demo')).toEqual({ kinds: [9841], '#a': [a], limit: 500 });
+  });
+});
+
+describe('subscribeRelay - keeps the REQ open after EOSE', () => {
+  it('[P1] delivers events before and after EOSE, reports EOSE once, and CLOSEs on close()', async () => {
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    MockWebSocket.instances = [];
+    try {
+      const received: string[] = [];
+      let eoseCount = 0;
+      const sub = subscribeRelay(
+        'wss://mock.example',
+        { kinds: [39842] },
+        (ev) => received.push(ev.id),
+        () => {
+          eoseCount += 1;
+        }
+      );
+      await new Promise((r) => setTimeout(r, 0));
+      const ws = MockWebSocket.instances[0];
+      if (!ws) throw new Error('no socket opened');
+      const req = JSON.parse(ws.sent[0] ?? '[]') as [string, string, unknown];
+      expect(req[0]).toBe('REQ');
+      const subId = req[1];
+      const mk = (id: string) => ({
+        id: id.repeat(64),
+        pubkey: 'b'.repeat(64),
+        created_at: 1700000000,
+        kind: 39842,
+        tags: [['d', 'run']],
+        content: '',
+        sig: 'c'.repeat(128),
+      });
+      ws.onmessage?.({ data: JSON.stringify(['EVENT', subId, mk('1')]) });
+      ws.onmessage?.({ data: JSON.stringify(['EOSE', subId]) });
+      ws.onmessage?.({ data: JSON.stringify(['EVENT', subId, mk('2')]) });
+      expect(received).toEqual(['1'.repeat(64), '2'.repeat(64)]);
+      expect(eoseCount).toBe(1);
+      expect(ws.sent.some((frame) => frame.startsWith('["CLOSE"'))).toBe(false);
+
+      sub.close();
+      expect(ws.sent.some((frame) => frame.startsWith('["CLOSE"'))).toBe(true);
+      // Frames after close() are ignored, and no reconnect is attempted.
+      ws.onmessage?.({ data: JSON.stringify(['EVENT', subId, mk('3')]) });
+      await new Promise((r) => setTimeout(r, 5));
+      expect(received).toHaveLength(2);
+      expect(MockWebSocket.instances).toHaveLength(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('[P2] reconnects once with a fresh REQ when the relay drops the socket', async () => {
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    MockWebSocket.instances = [];
+    try {
+      const sub = subscribeRelay('wss://mock.example', { kinds: [39842] }, () => {}, undefined, {
+        reconnectDelayMs: 1,
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      const first = MockWebSocket.instances[0];
+      first?.onclose?.(); // relay dropped us
+      await new Promise((r) => setTimeout(r, 10));
+      expect(MockWebSocket.instances).toHaveLength(2);
+      const second = MockWebSocket.instances[1];
+      expect((JSON.parse(second?.sent[0] ?? '[]') as unknown[])[0]).toBe('REQ');
+      sub.close();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});

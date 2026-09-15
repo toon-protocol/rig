@@ -3,6 +3,8 @@ import { useOutletContext, Link } from 'react-router';
 import { Search, Plus } from 'lucide-react';
 import type { RepoContext } from '@/app/repo-layout';
 import { usePRs } from '@/hooks/use-prs';
+import { useCiRuns } from '@/hooks/use-ci-runs';
+import { CiStatusDot } from '@/components/ci-status-dot';
 import { useProfileCache } from '@/hooks/use-profile-cache';
 import { formatRelativeDate } from '../../date-utils.js';
 import { OpenCloseToggle } from '@/components/open-close-toggle';
@@ -20,6 +22,8 @@ import {
   TableCell,
   TableRow,
 } from '@/components/ui/table';
+import type { PRMetadata } from '../../nip34-parsers.js';
+import type { CiRun } from '../../nip-c1-parsers.js';
 
 const STATUS_BADGE: Record<string, { variant: 'default' | 'secondary' | 'destructive' | 'outline'; label: string }> = {
   open: { variant: 'default', label: 'Open' },
@@ -80,11 +84,29 @@ function NewPRPopover() {
   );
 }
 
+/**
+ * The CI runs to show for a PR: those whose NIP-22 context roots at the PR
+ * event, else those for its tip commit (a kind:1618 `c` tip, or the last
+ * commit of a kind:1617 series).
+ */
+export function prCiRuns(
+  pr: Pick<PRMetadata, 'eventId' | 'tipCommit' | 'commitShas'>,
+  runsForPr: (prEventId: string) => CiRun[],
+  runsForCommit: (sha: string) => CiRun[]
+): CiRun[] {
+  const byPr = runsForPr(pr.eventId);
+  if (byPr.length > 0) return byPr;
+  const tip = pr.tipCommit ?? pr.commitShas[pr.commitShas.length - 1];
+  return tip ? runsForCommit(tip) : [];
+}
+
 export function PRListPage() {
   const { metadata, owner, repo } = useOutletContext<RepoContext>();
   const { prs, loading, error } = usePRs(owner, metadata.repoId, metadata.maintainers);
   const { getDisplayName, requestProfiles } = useProfileCache();
   const [filter, setFilter] = useState<'open' | 'closed'>('open');
+  // CI status per PR (rig#125): runs rooted at the PR event, else at its tip.
+  const { runsForPr, runsForCommit } = useCiRuns(owner, metadata.repoId, metadata.maintainers);
 
   useEffect(() => {
     if (prs.length > 0) {
@@ -176,6 +198,11 @@ export function PRListPage() {
                         <Badge variant={badge.variant} className="text-[10px]">
                           {badge.label}
                         </Badge>
+                        <CiStatusDot
+                          runs={prCiRuns(pr, runsForPr, runsForCommit)}
+                          owner={owner}
+                          repo={repo}
+                        />
                         <span className="text-xs text-muted-foreground">
                           → {pr.baseBranch}
                         </span>
