@@ -829,6 +829,44 @@ describe('strict --json stdout: the #278 read commands', () => {
 // Git passthrough exemption (`--json` is not a rig global flag)
 // ---------------------------------------------------------------------------
 
+describe('strict --json stdout: the #125 rig ci verbs', () => {
+  const RELAY = 'wss://relay.test.example';
+
+  it('ci status --json emits exactly one envelope even when the gate is red (no runs)', async () => {
+    const result = await run(
+      ['ci', 'status', 'ab'.repeat(20), '--repo-id', 'demo', '--owner', OWNER, '--relay', RELAY, '--json'],
+      {
+        seams: {
+          webSocketFactory: makeMockRelayFactory((filter) => filterEvents([], filter)),
+        },
+      }
+    );
+    expect(result.code).toBe(1);
+    expect(parseSingleJsonDoc(result)).toMatchObject({
+      command: 'ci status',
+      ok: false,
+      reason: 'no CI runs found for this commit',
+    });
+  });
+
+  it('ci request --json estimate: noisy loader chatter lands on stderr, one document on stdout', async () => {
+    const repo = makeRepo();
+    await writeToonConfig(repo, { repoId: 'demo', owner: OWNER });
+    git(['remote', 'add', 'origin', RELAY], repo);
+    const result = await run(['ci', 'request', HEX64, '--json'], {
+      cwd: repo,
+      loadStandalone: makeNoisyStandalone().load,
+    });
+    expect(result.code).toBe(0);
+    expect(parseSingleJsonDoc(result)).toMatchObject({
+      command: 'ci request',
+      kind: 9843,
+      executed: false,
+    });
+    expect(result.stderr).toContain('[Bootstrap]');
+  });
+});
+
 describe('git passthrough is exempt from the --json contract', () => {
   it('rig --json status passes the WHOLE argv to git verbatim (no guard, no envelope)', async () => {
     const gitCalls: string[][] = [];
