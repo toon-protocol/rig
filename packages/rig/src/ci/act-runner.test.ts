@@ -19,12 +19,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ActRunner,
+  actContainerNamePrefix,
   actEventName,
   buildActEventPayload,
   collectArtifacts,
   extractZip,
   parseActJsonLine,
   resolveActBinary,
+  sanitizeActContainerName,
   summarizeActRun,
   type ActLine,
 } from './act-runner.js';
@@ -253,6 +255,37 @@ describe('summarizeActRun', () => {
     });
     expect(run.conclusion).toBe('startup_failure');
     expect(run.jobs).toEqual([]);
+  });
+});
+
+describe('sanitizeActContainerName / actContainerNamePrefix', () => {
+  // Observed with act 0.2.89: `.github/workflows/hang.yml` (no `name:`),
+  // job `hang` → this container name.
+  const OBSERVED =
+    'act-hang-yml-hang-1296543966e1f3d735d80c8622483e916239a677c40863504f9ca8aa694072c6';
+
+  it('mirrors act: non-alphanumerics → "-", one pass of "--" → "-", cut to 63, trailing "-" trimmed', () => {
+    expect(sanitizeActContainerName('act-hang.yml/hang')).toBe(
+      'act-hang-yml-hang'
+    );
+    expect(sanitizeActContainerName('a---b')).toBe('a--b');
+    expect(sanitizeActContainerName('x'.repeat(70) + '-')).toBe('x'.repeat(63));
+    expect(sanitizeActContainerName('a' + '-'.repeat(70))).toBe('a');
+  });
+
+  it('derives the per-workflow prefix that the observed container name starts with', () => {
+    const prefix = actContainerNamePrefix('hang.yml');
+    expect(prefix).toBe('act-hang-yml-');
+    expect(OBSERVED.startsWith(prefix)).toBe(true);
+    // act's single "--" → "-" pass turns " / " into "--", not "-".
+    expect(actContainerNamePrefix('My CI / Build')).toBe('act-My-CI--Build-');
+    expect(actContainerNamePrefix('ci-')).toBe('act-ci-');
+  });
+
+  it('cuts an over-long prefix at 63 characters like the real name', () => {
+    const prefix = actContainerNamePrefix('w'.repeat(80));
+    expect(prefix).toHaveLength(63);
+    expect(prefix).toBe(`act-${'w'.repeat(59)}`);
   });
 });
 
@@ -485,20 +518,37 @@ describe.skipIf(!CAN_RUN)('ActRunner against real act + Docker', () => {
       mkdirSync(join(repo, '.github', 'workflows'), { recursive: true });
       writeFileSync(
         join(repo, '.github', 'workflows', 'ci.yml'),
-        'on: push\njobs:\n  slow:\n    runs-on: ubuntu-latest\n    steps:\n      - run: sleep 120\n'
+        'on: push\njobs:\n  slow:\n    runs-on: ubuntu-latest\n    steps:\n      - run: sleep 300\n'
       );
       git(repo, ['init', '-q']);
       git(repo, ['add', '-A']);
       git(repo, ['commit', '-qm', 'init']);
-      const runner = new ActRunner({ actBin: ACT_BIN as string });
+      const notes: string[] = [];
+      const runner = new ActRunner({
+        actBin: ACT_BIN as string,
+        warn: (line) => notes.push(line),
+      });
       const result = await runner.run({
         checkoutDir: repo,
         workflow: { path: '.github/workflows/ci.yml', sha256: '0'.repeat(64) },
         trigger: { ...TRIGGER, commit: git(repo, ['rev-parse', 'HEAD']) },
         secrets: {},
-        timeoutMs: 25_000,
+        // act takes ~20-25 s to create the job container on a warm image;
+        // the wall clock must expire AFTER that, or there is nothing to leak.
+        timeoutMs: 60_000,
       });
       expect(result.conclusion).toBe('timed_out');
+      // act 0.2.89 leaves the job container running after SIGTERM; the
+      // runner must have removed it (the sleep would otherwise outlive us).
+      const leftover = execFileSync(
+        'docker',
+        ['ps', '-aq', '--filter', `name=^${actContainerNamePrefix('ci.yml')}`],
+        { encoding: 'utf-8' }
+      ).trim();
+      expect(leftover).toBe('');
+      expect(notes.some((n) => n.includes('removed 1 job container'))).toBe(
+        true
+      );
     },
     3 * 60_000
   );

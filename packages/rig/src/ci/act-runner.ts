@@ -27,11 +27,24 @@
  *     `<dir>/<run>/<name>/<name>.zip`, which is unpacked here so every file
  *     becomes its own `artifact` tag (NIP-C1 forbids archives).
  *
+ *   - Timeout/cancel: act is sent SIGTERM (then SIGKILL after a grace
+ *     period). act exits, but with act 0.2.89 the JOB CONTAINER it started
+ *     keeps running — verified with and without act's `--rm` — so a hung job
+ *     would spend forever on the host, exactly what the wall clock exists to
+ *     stop. After a run this runner killed, it therefore removes the leftover
+ *     containers itself: act names them deterministically
+ *     (`act-<workflow name>-<job name>-<sha256>`, see
+ *     {@link actContainerNamePrefix}), so `docker ps` by name prefix, filtered
+ *     to containers created after the run started, finds exactly this run's.
+ *     That naming also means two concurrent runs of the same workflow + job
+ *     on one host collide on the container name — an act limitation the
+ *     coordinator's concurrency setting has to respect; not solved here.
+ *
  * All child-process arguments are ARRAYS (never a shell), matching the rest
  * of the package.
  */
 
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -42,7 +55,8 @@ import {
 } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { promisify } from 'node:util';
 import { inflateRawSync } from 'node:zlib';
 import { accessSync, constants } from 'node:fs';
 import type { CiConclusion, CiTriggerContext } from './nip-c1-events.js';
@@ -74,7 +88,48 @@ export interface ActRunnerOptions {
   pull?: boolean;
   /** Grace period between SIGTERM and SIGKILL on timeout/cancel (ms). */
   killGraceMs?: number;
+  /** Docker CLI used to remove the job containers a killed act leaves behind; default `docker`. */
+  dockerBin?: string;
+  /** Sink for runner-level notes (containers removed, cleanup failures). */
+  warn?: (line: string) => void;
 }
+
+const execFileAsync = promisify(execFile);
+
+// ---------------------------------------------------------------------------
+// act container naming (pure)
+// ---------------------------------------------------------------------------
+
+/**
+ * act's `createContainerName` sanitizer, mirrored exactly: every
+ * non-alphanumeric byte becomes `-`, then ONE pass replaces `--` with `-`
+ * (so `---` becomes `--`), and the result is cut to 63 characters with
+ * trailing dashes trimmed (act appends `-<sha256 hex>` of the untrimmed
+ * name, which this deliberately omits).
+ */
+export function sanitizeActContainerName(raw: string): string {
+  const dashed = raw.replace(/[^a-zA-Z0-9]/g, '-').replaceAll('--', '-');
+  return dashed.slice(0, 63).replace(/-+$/, '');
+}
+
+/**
+ * The name prefix shared by every job container act starts for a workflow:
+ * `act-<workflow name>-` sanitized as act does. The workflow name is the
+ * file's `name:` key, else its basename (act's own fallback), so
+ * `.github/workflows/hang.yml` with no `name:` yields `act-hang-yml-` and its
+ * `hang` job runs in `act-hang-yml-hang-<sha256>`.
+ */
+export function actContainerNamePrefix(workflowName: string): string {
+  const prefix = `act-${workflowName}-`
+    .replace(/[^a-zA-Z0-9]/g, '-')
+    .replaceAll('--', '-');
+  // The full name is cut at 63 before the hash; a longer prefix can never
+  // match a real container, so cut it the same way (keeping the dash).
+  return prefix.length > 63 ? prefix.slice(0, 63) : prefix;
+}
+
+/** Slack allowed between our clock and Docker's `Created` stamp (ms). */
+const CONTAINER_CREATED_SLACK_MS = 5_000;
 
 // ---------------------------------------------------------------------------
 // Binary resolution
@@ -537,6 +592,7 @@ export class ActRunner implements Runner {
     const lines: ActLine[] = [];
     let timedOut = false;
     let cancelled = false;
+    const startedAtMs = Date.now();
     const grace = this.options.killGraceMs ?? 10_000;
 
     const exitCode = await new Promise<number | null>((resolveExit) => {
@@ -600,6 +656,17 @@ export class ActRunner implements Runner {
       });
     });
 
+    if (timedOut || cancelled) {
+      await this.removeOrphanedContainers(
+        actContainerNamePrefix(parsed.name ?? basename(request.workflow.path)),
+        startedAtMs,
+        (note) => {
+          this.options.warn?.(note);
+          request.onLog?.('runner', `${note}\n`);
+        }
+      );
+    }
+
     const summary = summarizeActRun(lines, { exitCode, timedOut, cancelled });
     const artifacts = collectArtifacts(artifactDir);
     const finishedAt = Math.floor(Date.now() / 1000);
@@ -633,6 +700,56 @@ export class ActRunner implements Runner {
     }
 
     return { conclusion: summary.conclusion, jobs, startedAt, finishedAt };
+  }
+
+  /**
+   * Remove the job containers a killed act left running (see the module
+   * header): every container whose name starts with `prefix` and whose
+   * Docker `Created` stamp is at or after this run's start (minus a little
+   * slack). Never throws — a failed cleanup is reported through `note` and
+   * the run result is still returned.
+   */
+  private async removeOrphanedContainers(
+    prefix: string,
+    startedAtMs: number,
+    note: (line: string) => void
+  ): Promise<void> {
+    const docker = this.options.dockerBin ?? 'docker';
+    const run = async (args: string[]): Promise<string> => {
+      const { stdout } = await execFileAsync(docker, args, {
+        encoding: 'utf-8',
+        timeout: 30_000,
+      });
+      return stdout;
+    };
+    try {
+      const ids = (await run(['ps', '-aq', '--filter', `name=^${prefix}`]))
+        .split('\n')
+        .map((id) => id.trim())
+        .filter((id) => id !== '');
+      const ours: string[] = [];
+      for (const id of ids) {
+        const created = Date.parse(
+          (await run(['inspect', '-f', '{{.Created}}', id])).trim()
+        );
+        if (
+          Number.isNaN(created) ||
+          created >= startedAtMs - CONTAINER_CREATED_SLACK_MS
+        ) {
+          ours.push(id);
+        }
+      }
+      if (ours.length === 0) return;
+      await run(['rm', '-f', ...ours]);
+      note(
+        `removed ${ours.length} job container(s) act left running after the kill (${prefix}*)`
+      );
+    } catch (err) {
+      note(
+        `could not remove act's leftover job containers (${prefix}*): ` +
+          `${err instanceof Error ? err.message : String(err)} — remove them by hand`
+      );
+    }
   }
 }
 
