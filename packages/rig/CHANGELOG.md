@@ -1,5 +1,58 @@
 # @toon-protocol/rig
 
+## 4.5.0
+
+### Minor Changes
+
+- b848b7d: `rig ci serve` reads through the gateway it links to (#134).
+
+  The coordinator's `--gateway` only named where log and artifact links point; a
+  commit's objects were always read through the shared public gateway list. A
+  coordinator pointed at a private or local gateway — the packaged image against
+  the TOON sandbox, whose gateway serves bytes at `/raw/<txId>` only — could
+  therefore never materialize a commit. Now `--gateway` (or `RIG_ARWEAVE_GATEWAY`
+  when the flag is absent, the variable `rig push` and `rig site` already honour)
+  is also the first place the coordinator reads objects from, on the store's
+  raw-bytes route `<gateway>/raw/<txId>`, before falling back to the shared list.
+  The sandbox integration test gives the coordinator no fetch seam any more, so
+  it proves the same read path the Docker image uses.
+
+### Patch Changes
+
+- 8437f6c: CI secrets: injected values are scrubbed from job logs, artifacts and the coordinator's log, and `rig ci secret set` checks every NIP-C1 limit before opening the paid session (#131).
+
+  The coordinator now replaces every secret value it injected into a run — each
+  line of a multi-line value, and its URL-encoded and JSON-escaped forms — with
+  `***` in that run's job logs before the log is uploaded to the store and before
+  the log tail is published in the Job Result (kind:9841); an artifact whose bytes
+  contain a value is not uploaded, and a Runner failure message is scrubbed
+  before it reaches the coordinator's log. act masks secrets in its own output,
+  but the coordinator no longer relies on the Runner for that. Values shorter
+  than 4 bytes are not redacted.
+
+  `rig ci secret set|remove` now runs the full NIP-C1 plaintext check — empty or
+  oversized values (16,384 bytes), more than 100 names, a plaintext over 65,535
+  bytes — while parsing its arguments and the value read from stdin, so any
+  violation is a usage error (exit 2) before any relay or wallet is touched,
+  instead of a failed publish. Usage errors no longer echo the offending
+  argument, so a value typed where a NAME belongs stays off stderr.
+
+- d7650ba: CI 8 (#133): close the evidence gaps in the coordinator's operations tests.
+  Three pushes under `--concurrency 1` are now shown to run one at a time in
+  push order with `queue` rounds 1, 2, 3 on their waiting markers (and
+  concurrency 2 to run two at once, queuing the third in round 2); a run that
+  hits the wall clock is shown to have its Runner stopped, the job it cut short
+  published as `timed_out` while a job that finished successfully keeps its
+  verdict, and the Workflow Result and final progress marker concluded
+  `timed_out`; a publisher that cannot pay is shown to refuse each new run with
+  one log line and nothing published, then resume once funded; and a push that
+  lands at the relay while the socket is down is shown to run exactly once after
+  the backoff reconnect and never again on a later reconnect. `rig ci serve
+--help` now quotes the coordinator's own `DEFAULT_CONCURRENCY` (1) and
+  `DEFAULT_RUN_TIMEOUT_MS` (1800 s) instead of hard-coded numbers, and a test
+  pins the help to those constants; no behaviour change. The shared coordinator
+  "world" fixture lives in `src/ci/coordinator-testkit.ts`.
+
 ## 4.4.0
 
 ### Minor Changes
