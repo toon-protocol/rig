@@ -471,6 +471,11 @@ the decrypted secret inventory — lives under
 `$TOON_CLIENT_HOME/rig-ci/<coordinator-pubkey>/`, so a restart resumes where it
 left off and a relay blip loses no runs. The secrets key itself is never
 persisted and rotates every start (NIP-C1), so re-send secrets after a restart.
+Every value injected into a run — each line of a multi-line value, and its
+URL-encoded and JSON-escaped forms — is redacted (`***`) from that run's job
+logs before they are uploaded to the store and before the log tail goes into
+the Job Result (9841); an artifact whose bytes contain a value is not uploaded
+at all. Values shorter than 4 bytes are not redacted.
 When the wallet cannot pay for the writes a run needs, the coordinator says so on
 stderr and starts no run rather than half-publishing one.
 
