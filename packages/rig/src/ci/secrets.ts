@@ -136,19 +136,29 @@ export function validateSecretUpdate(
   }
 }
 
+/**
+ * The canonical plaintext JSON — shape, per-name and per-value limits, and
+ * the whole-plaintext bound all enforced. This is the one place every
+ * NIP-C1 secret-update limit lives: the CLI runs it before touching a relay
+ * or wallet, and {@link encryptSecretUpdate} runs it on what it encrypts.
+ */
+export function serializeSecretUpdate(plain: SecretUpdatePlaintext): string {
+  const json = JSON.stringify(assertSecretUpdateShape(plain));
+  if (utf8Bytes(json) > MAX_SECRET_PLAINTEXT_BYTES) {
+    throw new Error(
+      `secret update plaintext exceeds ${MAX_SECRET_PLAINTEXT_BYTES} bytes`
+    );
+  }
+  return json;
+}
+
 /** Encrypt one update (NIP-44 v2) from a fresh sender key to the advertised recipient. */
 export function encryptSecretUpdate(
   plain: SecretUpdatePlaintext,
   senderSecretKey: Uint8Array,
   recipientPubkey: string
 ): string {
-  const checked = assertSecretUpdateShape(plain);
-  const json = JSON.stringify(checked);
-  if (utf8Bytes(json) > MAX_SECRET_PLAINTEXT_BYTES) {
-    throw new Error(
-      `secret update plaintext exceeds ${MAX_SECRET_PLAINTEXT_BYTES} bytes`
-    );
-  }
+  const json = serializeSecretUpdate(plain);
   const key = nip44.utils.getConversationKey(senderSecretKey, recipientPubkey);
   return nip44.encrypt(json, key);
 }
@@ -239,23 +249,71 @@ export function effectiveSecrets(
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Redaction
+// ---------------------------------------------------------------------------
+
 /**
- * Replace every occurrence of every secret value in `text` with `***`,
- * longest value first so a value that contains another is never left half
- * visible. The coordinator runs job logs through this before they reach the
- * store or the relay: act masks secrets in its own output, but no Runner is
- * trusted to, and the 9841 log tail is a public event.
+ * Strings shorter than this are never redacted: nothing that short is a
+ * secret, and masking `1` or `us` would rewrite every timestamp and exit
+ * code in a log. Applies to whole values and to the lines of a multi-line
+ * value alike.
+ */
+export const MIN_REDACTED_BYTES = 4;
+
+/**
+ * Everything to mask for a set of injected values: each value; each line of
+ * a multi-line value (a PEM key or JSON blob is printed line by line, often
+ * indented); and the URL-encoded and JSON-escaped forms tools print in error
+ * messages (`git clone https://user:p%40ss@…`, `console.log(JSON.stringify(
+ * env))`). Longest first, so a target that contains another is never left
+ * half visible.
+ */
+export function redactionTargets(values: Iterable<string>): string[] {
+  const targets = new Set<string>();
+  const add = (s: string): void => {
+    if (utf8Bytes(s) >= MIN_REDACTED_BYTES) targets.add(s);
+  };
+  for (const value of values) {
+    const pieces = [value, ...value.split(/\r?\n/).map((line) => line.trim())];
+    for (const piece of pieces) {
+      if (piece === '') continue;
+      add(piece);
+      add(encodeURIComponent(piece));
+      add(JSON.stringify(piece).slice(1, -1));
+    }
+  }
+  return [...targets].sort((a, b) => b.length - a.length);
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Replace every occurrence of every {@link redactionTargets redaction target}
+ * in `text` with `***`, in one pass. The coordinator runs job logs and its
+ * own log lines through this before they reach the store, the relay, or the
+ * operator: act masks secrets in its own output, but no Runner is trusted
+ * to, and the 9841 log tail is a public event.
  */
 export function redactSecretValues(
   text: string,
   values: Iterable<string>
 ): string {
-  const ordered = [...new Set(values)]
-    .filter((v) => v !== '')
-    .sort((a, b) => b.length - a.length);
-  let out = text;
-  for (const value of ordered) out = out.split(value).join('***');
-  return out;
+  const targets = redactionTargets(values);
+  if (targets.length === 0) return text;
+  const pattern = new RegExp(targets.map(escapeRegExp).join('|'), 'g');
+  return text.replace(pattern, '***');
+}
+
+/** Whether `bytes` (a file about to be uploaded) contain any redaction target. */
+export function containsSecretValue(
+  bytes: Uint8Array,
+  values: Iterable<string>
+): boolean {
+  const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return redactionTargets(values).some((t) => buf.includes(t, 0, 'utf-8'));
 }
 
 /** A fresh NIP-44 recipient (secrets-key) or sender keypair. */

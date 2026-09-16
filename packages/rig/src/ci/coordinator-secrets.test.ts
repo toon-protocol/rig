@@ -5,12 +5,13 @@
  * inventory while a stranger's 1618 gets an empty set; a 29846 for a repo
  * the coordinator does not serve is ignored; a remove survives a restart
  * (the tombstone is what is persisted); and an injected value is redacted
- * from the uploaded job log and the 9841 log tail — it never reaches a
- * published event, the store, or the coordinator's own log.
+ * from the uploaded job log and the 9841 log tail, keeps an artifact that
+ * contains it off the store, and is scrubbed from a Runner failure before it
+ * reaches the coordinator's own log — it never leaves the process in the clear.
  */
 
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { NostrEvent } from '../remote-state.js';
 import type { CoordinatorHandle } from './coordinator.js';
@@ -32,6 +33,7 @@ import {
   resetEventIds,
   serviceRequest,
   signed,
+  tempDir,
   type World,
 } from './coordinator-testkit.js';
 import {
@@ -257,15 +259,26 @@ describe('restart', () => {
 });
 
 describe('log redaction', () => {
-  it('redacts injected values from the uploaded job log and the 9841 log tail', async () => {
+  it('redacts injected values from the uploaded job log and the 9841 log tail, refuses an artifact that contains one, and scrubs its own log', async () => {
     const world = makeWorld();
     const { announce, refsEvent } = world.snapshot(1000);
     world.relay.serve([announce, refsEvent, serviceRequest(MAINT, 1100)]);
-    // A workflow that prints its secrets — twice, once inside a longer token.
+    const artifactDir = tempDir('rig-ci-coord-artifacts-');
+    // A workflow that prints its secrets — past the 4 KiB tail cut, inside a
+    // URL, URL-encoded, one value a substring of another — and uploads two
+    // artifacts, one of which holds a value. The second run's Runner throws
+    // with a value in the message.
     const runner = new FakeRunner((request) => {
+      const token = request.secrets['DEPLOY_TOKEN'] ?? '';
+      const npm = request.secrets['NPM_TOKEN'] ?? '';
+      if (runner.requests.length === 2) {
+        throw new Error(`zip entry would escape: ${token}`);
+      }
       const base = defaultFakeRunResult(request);
       const job = must(base.jobs[0]);
-      const padding = 'x'.repeat(5000); // push the leak past the 4 KiB tail cut
+      const padding = 'x'.repeat(5000);
+      writeFileSync(join(artifactDir, 'leak.txt'), `token=${token}\n`);
+      writeFileSync(join(artifactDir, 'clean.txt'), 'nothing to see\n');
       return {
         ...base,
         jobs: [
@@ -273,9 +286,22 @@ describe('log redaction', () => {
             ...job,
             log:
               `${padding}\n` +
-              `token=${request.secrets['DEPLOY_TOKEN']}\n` +
-              `url=https://${request.secrets['DEPLOY_TOKEN']}@example/${request.secrets['NPM_TOKEN']}\n` +
+              `token=${token}\n` +
+              `url=https://${token}@example/${npm}\n` +
+              `encoded=${encodeURIComponent(npm)}\n` +
               'done\n',
+            artifacts: [
+              {
+                path: join(artifactDir, 'leak.txt'),
+                filename: 'leak.txt',
+                name: 'out',
+              },
+              {
+                path: join(artifactDir, 'clean.txt'),
+                filename: 'clean.txt',
+                name: 'out',
+              },
+            ],
           },
         ],
       };
@@ -285,7 +311,7 @@ describe('log redaction', () => {
     world.relay.push(
       secretUpdate(world, handle, MAINT, {
         DEPLOY_TOKEN: 'hunter2',
-        NPM_TOKEN: 'npm_hunter2_long',
+        NPM_TOKEN: 'npm/hunter2+long',
       })
     );
     await handle.idle();
@@ -296,11 +322,33 @@ describe('log redaction', () => {
     const [job] = jobEvents(world.publisher);
     expect(must(job).logTail).toContain('token=***\n');
     expect(must(job).logTail).toContain('url=https://***@example/***\n');
+    expect(must(job).logTail).toContain('encoded=***\n');
     expect(must(job).logTail).not.toContain('hunter2');
-    const uploaded = must(world.publisher.uploadedBlobs[0], 'the log upload');
-    const uploadedText = Buffer.from(uploaded.body).toString('utf-8');
-    expect(uploadedText).toContain('token=***\n');
-    expect(uploadedText).not.toContain('hunter2');
+    // Uploaded: the redacted log and the clean artifact — never the leaky one.
+    const uploads = world.publisher.uploadedBlobs.map((b) =>
+      Buffer.from(b.body).toString('utf-8')
+    );
+    expect(uploads).toHaveLength(2);
+    expect(must(uploads[0])).toContain('token=***\n');
+    expect(must(uploads[1])).toBe('nothing to see\n');
+    expect(must(job).artifacts.map((a) => a.filename)).toEqual(['clean.txt']);
+    expect(
+      world.logs.some((l) =>
+        l.includes(
+          'artifact leak.txt not uploaded — it contains an injected secret'
+        )
+      )
+    ).toBe(true);
+
+    // A Runner failure whose message carries a value reaches the log scrubbed.
+    push(world, 3000, 'later.txt', 'l\n');
+    await handle.idle();
+    expect(runner.requests).toHaveLength(2);
+    expect(
+      world.logs.some((l) =>
+        l.includes('runner failed: zip entry would escape: ***')
+      )
+    ).toBe(true);
     expect(everythingPublished(world)).not.toContain('hunter2');
     await handle.stop();
   });

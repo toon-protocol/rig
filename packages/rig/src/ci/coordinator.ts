@@ -117,6 +117,7 @@ import {
 import type { Runner, RunnerRunResult } from './runner.js';
 import {
   applySecretUpdate,
+  containsSecretValue,
   decryptSecretUpdate,
   effectiveSecrets,
   generateSecretsKey,
@@ -730,7 +731,7 @@ export async function startCoordinator(
       ]);
     } catch (err) {
       log(
-        `[ci] ${label}: runner failed: ${err instanceof Error ? err.message : String(err)}`
+        `[ci] ${label}: runner failed: ${redactSecretValues(err instanceof Error ? err.message : String(err), Object.values(run.secrets))}`
       );
       result = {
         conclusion: 'startup_failure',
@@ -748,11 +749,13 @@ export async function startCoordinator(
     else if (stopping && abort.signal.aborted) conclusion = 'cancelled';
 
     // Per job: upload the log (+ artifacts), publish 9841, renew 39842.
+    // An injected value never leaves this process in the clear: not in the
+    // uploaded log, not in the 9841 tail, not in an artifact, not in this
+    // coordinator's own log (act masks its own output, but no Runner is
+    // trusted to).
+    const secretValues = Object.values(run.secrets);
     for (const job of result.jobs) {
-      // An injected value never leaves this process in the clear: not in the
-      // uploaded log, not in the 9841 tail (act masks its own output, but no
-      // Runner is trusted to).
-      const jobLog = redactSecretValues(job.log, Object.values(run.secrets));
+      const jobLog = redactSecretValues(job.log, secretValues);
       const { tail, omitted } = logTail(jobLog);
       const logReceipt = await serial.run(() =>
         uploadBlob({
@@ -765,6 +768,12 @@ export async function startCoordinator(
       for (const artifact of job.artifacts) {
         try {
           const body = await readFile(artifact.path);
+          if (containsSecretValue(body, secretValues)) {
+            log(
+              `[ci] ${label}: artifact ${redactSecretValues(artifact.filename, secretValues)} not uploaded — it contains an injected secret`
+            );
+            continue;
+          }
           const receipt = await serial.run(() =>
             uploadBlob({
               body,
@@ -779,7 +788,7 @@ export async function startCoordinator(
           });
         } catch (err) {
           log(
-            `[ci] ${label}: artifact ${artifact.filename} skipped: ${err instanceof Error ? err.message : String(err)}`
+            `[ci] ${label}: artifact ${redactSecretValues(`${artifact.filename} skipped: ${err instanceof Error ? err.message : String(err)}`, secretValues)}`
           );
         }
       }

@@ -789,6 +789,62 @@ describe('rig ci secret', () => {
     ).toBe(0);
     expect(fake.published).toHaveLength(1);
   });
+
+  it('rejects more than 100 names or a plaintext over 65535 bytes before opening the paid session (exit 2)', async () => {
+    const h = makeHarness(repoDir, fake, {
+      remoteEvents: [advertisement(generateSecretsKey().pubkey)],
+    });
+    const many = Array.from({ length: 101 }, (_, i) => `N${i}=v`);
+    expect(
+      await dispatch(
+        ['ci', 'secret', 'set', COORDINATOR, ...many, '--yes'],
+        h.deps
+      )
+    ).toBe(2);
+    expect(h.err.join('\n')).toContain('at most 100');
+    const big = Array.from(
+      { length: 5 },
+      (_, i) => `B${i}=${'x'.repeat(16000)}`
+    );
+    expect(
+      await dispatch(
+        ['ci', 'secret', 'set', COORDINATOR, ...big, '--yes'],
+        h.deps
+      )
+    ).toBe(2);
+    expect(h.err.join('\n')).toContain('exceeds 65535 bytes');
+    expect(fake.published).toHaveLength(0);
+    expect(fake.stopped).toBe(false); // the standalone session was never opened
+  });
+
+  it('never echoes an argument in a usage error — a value typed where a NAME belongs stays off stderr', async () => {
+    const h = makeHarness(repoDir, fake, {
+      remoteEvents: [advertisement(generateSecretsKey().pubkey)],
+    });
+    expect(
+      await dispatch(
+        ['ci', 'secret', 'set', COORDINATOR, 'hunter2', '--yes'],
+        h.deps
+      )
+    ).toBe(2);
+    expect(
+      await dispatch(
+        ['ci', 'secret', 'remove', COORDINATOR, 'TOKEN=hunter2', '--yes'],
+        h.deps
+      )
+    ).toBe(2);
+    expect(
+      await dispatch(
+        ['ci', 'secret', 'set', COORDINATOR, 'TOKEN:hunter2', '--yes'],
+        h.deps
+      )
+    ).toBe(2);
+    const err = h.err.join('\n');
+    expect(err).not.toContain('hunter2');
+    expect(err).toContain('invalid secret name in argument 1');
+    expect(err).toContain('argument 1 is NAME=value');
+    expect(fake.published).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
