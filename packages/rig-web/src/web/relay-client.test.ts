@@ -321,6 +321,7 @@ describe('queryRelay - unparseable events are surfaced, never dropped', () => {
 // ============================================================================
 
 import {
+  buildCiAdvertisementsFilter,
   buildCiControlsFilter,
   buildCiJobResultsFilter,
   buildCiRunsFilter,
@@ -334,6 +335,16 @@ describe('NIP-C1 filter builders', () => {
     expect(buildCiRunsFilter(owner, 'demo')).toEqual({ kinds: [9842, 39842], '#a': [a], limit: 500 });
     expect(buildCiControlsFilter(owner, 'demo')).toEqual({ kinds: [9843, 9844], '#a': [a], limit: 500 });
     expect(buildCiJobResultsFilter(owner, 'demo')).toEqual({ kinds: [9841], '#a': [a], limit: 500 });
+  });
+
+  it('scope advertisements to the given coordinators, or to every coordinator', () => {
+    const coordinator = '12'.repeat(32);
+    expect(buildCiAdvertisementsFilter()).toEqual({ kinds: [19843], limit: 100 });
+    expect(buildCiAdvertisementsFilter([coordinator])).toEqual({
+      kinds: [19843],
+      authors: [coordinator],
+      limit: 100,
+    });
   });
 });
 

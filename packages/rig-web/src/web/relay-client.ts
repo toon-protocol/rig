@@ -116,6 +116,18 @@ export function buildCiJobResultsFilter(ownerPubkey: string, repoId: string): No
 }
 
 /**
+ * Coordinator Advertisements (19843): every coordinator's standing offer, or
+ * only the given coordinators' (e.g. the one that published a run).
+ */
+export function buildCiAdvertisementsFilter(coordinatorPubkeys: string[] = []): NostrFilter {
+  return {
+    kinds: [19843],
+    ...(coordinatorPubkeys.length > 0 ? { authors: coordinatorPubkeys } : {}),
+    limit: 100,
+  };
+}
+
+/**
  * An EVENT frame whose payload could not be decoded into a NostrEvent.
  *
  * Instead of silently dropping such frames, the relay client surfaces them
