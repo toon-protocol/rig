@@ -10,14 +10,14 @@
     "build"
   ],
   "speed": {
-    "gateWallClockSeconds": 103,
-    "method": "CI job wall-clock (startedAt->completedAt) for the `build` job in .github/workflows/ci.yml, run 29951187589 (push to main, same commit as capturedFromCommit). startedAt 2026-07-22T19:29:41Z, completedAt 2026-07-22T19:31:24Z."
+    "gateWallClockSeconds": 128,
+    "method": "CI job wall-clock (startedAt->completedAt) for the `build` job in .github/workflows/ci.yml, run 29951187589 (push to main, same commit as capturedFromCommit). startedAt 2026-07-22T19:29:41Z, completedAt 2026-07-22T19:31:24Z. Re-frozen 2026-09-16 (after the relay-native CI slice, rig#125/#137, and its ticket sweep #139-#148): CI job wall-clock (startedAt->completedAt) for the `build` job in run 35127134512 (push to main, commit b848b7d, startedAt 2026-09-16T17:16:22Z, completedAt 2026-09-16T17:18:30Z) = 128s. The guard measures from gate_start, which read 123s on the same run. NOTE ON THE NUMBERS: the 103s figure was captured at 45d0c64 when packages/rig had a fraction of today's suite; #137 alone took main from 100s (279a73a) to 119s (9ce96bc), and the sweep's ten merges moved it to 110-125s (main run at 8437f6c failed the guard at 125s; the Version Packages PR #150 read 138s). The +20% band around 103s (123.6s) therefore rejected commits that changed no gate-relevant code. Re-frozen to the measured main value so the guard again tracks a real regression rather than the suite's size. rig vitest on that run: 62 files, 49.3s wall (94.2s of test time across workers); rig-web: 37 files, 17.2s."
   },
   "performance": {
-    "runnerMinutes": 2,
+    "runnerMinutes": 3,
     "dockerImageSizeBytes": null,
     "cacheHitRatePercent": null,
-    "method": "runnerMinutes = ceil(103s / 60) billable minutes on a single ubuntu-latest 1x job (GitHub Actions billing granularity). dockerImageSizeBytes/cacheHitRatePercent are N/A: the actual PR/push gate (ci.yml `build` job) does not build a Docker image or use a remote build cache -- that only happens in the separate agent-image.yml smoke-test workflow, which is not part of this repo's PR gate."
+    "method": "runnerMinutes = ceil(103s / 60) billable minutes on a single ubuntu-latest 1x job (GitHub Actions billing granularity). dockerImageSizeBytes/cacheHitRatePercent are N/A: the actual PR/push gate (ci.yml `build` job) does not build a Docker image or use a remote build cache -- that only happens in the separate agent-image.yml smoke-test workflow, which is not part of this repo's PR gate. Re-frozen 2026-09-16 with the speed baseline: runnerMinutes = ceil(128s / 60) = 3 (run 35127134512)."
   },
   "correctness": {
     "eslintErrors": 0,
@@ -30,6 +30,6 @@
     "pnpm install --frozen-lockfile",
     "eslint .                 # -> 4 errors, 356 warnings (pre-rig#30; now 0 errors, 358 warnings on main)",
     "pnpm run typecheck       # -> 1 error on this commit (packages/rig only; pnpm -r bails before packages/rig-web runs -- see correctness.method above)",
-    "gh run view 29951187589 --json jobs   # -> build job wall-clock / runner-minutes"
+    "gh run view 35127134512 --json jobs   # -> build job wall-clock 128s / runner-minutes 3 (2026-09-16 re-freeze, main@b848b7d)"
   ]
 }
