@@ -9,7 +9,7 @@ lives in NIP-34 Nostr events and the objects live on Arweave.
 - **Writes are paid** — pushing objects and publishing events spends from a
   payment channel funded by your wallet. Writes are permanent and non-refundable.
 - **One node URL is the whole network configuration** — `rig` embeds its own
-  payment client (`@toon-protocol/client` 2.x) built from your seed phrase and
+  payment client (`@toon-protocol/client` 3.x) built from your seed phrase and
   pays the TOON connector you name with `rig entry <url>`. The node describes
   itself on `GET /ilp`; there is nothing to discover (see
   [Pointing at a node](#pointing-at-a-node)).
@@ -415,13 +415,15 @@ triggers) and gives a third-party pull request an **empty** secret set, so a
 contributor cannot exfiltrate them. Values are never echoed by rig, in any mode.
 
 `rig ci status <commit>` is the merge gate: one line per run (conclusion,
-workflow, trigger reason, coordinator, trust level) and a summary; with `--json`
-exactly one document (`ok`, `runs[]` with per-job conclusions, log and artifact
-URLs, `summary`). It exits **0** only when at least one run counted and every
-counted run concluded green (`success`/`neutral`/`skipped`); **1** when a run is
-red, still queued/in progress, or nothing was found. `--require-ci-trust <level>`
-drops runs below that level before counting, so a passing run from an unknown
-coordinator does not count as green.
+workflow, trigger reason, coordinator, trust level, wall-clock time once
+concluded), one indented line per job (conclusion, exit code, duration) and a
+summary; with `--json` exactly one document (`ok`, `runs[]` with each run's and
+job's event id, conclusion, timings — `queuedAt`/`startedAt`/`concludedAt` —
+log and artifact URLs, `summary`). It exits **0** only when at least one run
+counted and every counted run concluded green (`success`/`neutral`/`skipped`);
+**1** when a run is red, still queued/in progress, or nothing was found.
+`--require-ci-trust <level>` drops runs below that level before counting, so a
+passing run from an unknown coordinator does not count as green.
 
 **Trust levels** are derived client-side from Service Requests and the repo's
 declared maintainers, strongest first:
@@ -458,6 +460,7 @@ rig ci serve --relay wss://<relay> --repo <owner-npub>/<repo-id> [--repo …]
 | `--act-bin <path>` | `act` on PATH (or `RIG_ACT_BIN`) | the act binary |
 | `--platform <label>=<image>` | `ubuntu-latest=catthehacker/ubuntu:act-latest` | `runs-on` label → Docker image (repeatable) |
 | `--workdir <dir>` | `<state-dir>/work` | where commits are materialized |
+| `--once` | | stop after the first run concludes (its 9842 and final 39842 are on the relay) — one `rig ci trigger` answered by one bounded serve; ignored or refused triggers do not count |
 | `--json` | | one JSON document with the coordinator, relay, repos and state dir on start |
 
 On start the coordinator publishes an **Advertisement** (19843: runner family
@@ -770,7 +773,7 @@ it — that stays behind the `Publisher` seam:
   split, and `JobDeliveryPort` is the injected seam for the per-increment
   encrypt/pay leg. The concrete port and the buyer-side payment helpers that
   rode the 0.x client's serve-side job API were removed with the move to
-  `@toon-protocol/client` 2.x; the protocol pieces stay so a port can be
-  written against the 2.x client.
+  `@toon-protocol/client` 2.x (now 3.x); the protocol pieces stay so a port can be
+  written against the current client.
 
 [epic #246](https://github.com/toon-protocol/toon-client/issues/246).

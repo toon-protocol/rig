@@ -9,10 +9,11 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { NostrEvent } from '../remote-state.js';
+import { hexToNpub } from '../npub.js';
 import type { UnsignedEvent } from '../nip34-events.js';
 import {
   buildCiJobResult,
@@ -185,6 +186,7 @@ function job(opts: {
         logsUrl: `http://localhost:3000/raw/tx-${opts.jobId}`,
         logTail: 'ok\n',
         logOmittedBytes: 0,
+        queuedAt: T0 - 25,
         startedAt: T0 - 20,
         exitCode: opts.conclusion === 'failure' ? 1 : 0,
       },
@@ -222,7 +224,8 @@ interface Harness {
 
 function makeHarness(
   events: NostrEvent[],
-  cwd = '/nonexistent-not-a-repo'
+  cwd = '/nonexistent-not-a-repo',
+  env: NodeJS.ProcessEnv = {}
 ): Harness {
   const out: string[] = [];
   const err: string[] = [];
@@ -237,7 +240,7 @@ function makeHarness(
   return {
     deps: {
       io,
-      env: {},
+      env,
       cwd,
       webSocketFactory: makeMockRelayFactory((filter) =>
         filterEvents(events, filter)
@@ -686,5 +689,235 @@ describe('rig ci status — assembly + verdict', () => {
     });
     expect(out.runs).toEqual([]);
     expect(out.ok).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #128 acceptance: the gate under --require-ci-trust with runs REMAINING, a
+// failed job, event ids + timings in the envelope, and no identity at all.
+// ---------------------------------------------------------------------------
+
+describe('rig ci status — #128 acceptance criteria', () => {
+  const STRANGER_TRIGGER: CiProvenance = {
+    kind: 'manual-trigger',
+    eventId: '55'.repeat(32),
+    relayUrl: RELAY,
+    pubkey: STRANGER,
+  };
+  const MAINTAINER_TRIGGER: CiProvenance = {
+    kind: 'manual-trigger',
+    eventId: '66'.repeat(32),
+    relayUrl: RELAY,
+    pubkey: MAINTAINER,
+  };
+
+  it('--require-ci-trust maintainer-directed hides a run whose trigger came from a non-maintainer; the exit code reflects only the remaining runs', async () => {
+    // Same coordinator, two workflows: a stranger's manual trigger produced a
+    // RED run, a declared maintainer's manual trigger produced a GREEN one.
+    const strangerRun = result({
+      runId: 'stranger',
+      trig: { workflow: WF2, reason: 'manual' },
+      provenance: STRANGER_TRIGGER,
+      conclusion: 'failure',
+    });
+    const maintainerRun = result({
+      runId: 'maint',
+      trig: { reason: 'manual' },
+      provenance: MAINTAINER_TRIGGER,
+      conclusion: 'success',
+    });
+    const events = [announcement([MAINTAINER]), strangerRun, maintainerRun];
+
+    // Without a requirement both count: the stranger's red run fails the gate.
+    const ungated = await status(events);
+    expect(ungated.code).toBe(1);
+    expect(
+      Object.fromEntries(ungated.report.runs.map((r) => [r.runId, r.trust]))
+    ).toEqual({ stranger: 'no-known-context', maint: 'maintainer-directed' });
+    expect(ungated.report.summary).toEqual({
+      counted: 2,
+      green: 1,
+      red: 1,
+      pending: 0,
+    });
+
+    // With it, the stranger-triggered run is listed but ignored: exit 0 on
+    // the strength of the maintainer-directed run alone.
+    const gated = await status(events, [
+      '--require-ci-trust',
+      'maintainer-directed',
+    ]);
+    expect(gated.code).toBe(0);
+    expect(gated.report.requiredTrust).toBe('maintainer-directed');
+    expect(gated.report.runs.map((r) => r.runId)).toEqual([
+      'stranger',
+      'maint',
+    ]);
+    expect(gated.report.summary).toEqual({
+      counted: 1,
+      green: 1,
+      red: 0,
+      pending: 0,
+    });
+    expect(gated.report.ok).toBe(true);
+    expect(gated.report.reason).toBeUndefined();
+
+    // Even when the coordinator itself is authorized (a standing owner
+    // request), a stranger's trigger only reaches operationally-associated —
+    // still below the requirement, still hidden.
+    const authorized = await status(
+      [
+        announcement([MAINTAINER]),
+        serviceRequest(),
+        strangerRun,
+        maintainerRun,
+      ],
+      ['--require-ci-trust', 'maintainer-directed']
+    );
+    expect(authorized.code).toBe(0);
+    expect(
+      authorized.report.runs.find((r) => r.runId === 'stranger')?.trust
+    ).toBe('operationally-associated');
+    expect(authorized.report.summary.counted).toBe(1);
+  });
+
+  it('a failed job exits 1; the envelope carries every run’s and job’s event id, conclusion and timings', async () => {
+    const jobBuild = job({ runId: 'r1', jobId: 'build', id: 'a1'.repeat(32) });
+    const jobTest = job({
+      runId: 'r1',
+      jobId: 'test',
+      conclusion: 'failure',
+      id: 'a2'.repeat(32),
+    });
+    const red = result({
+      runId: 'r1',
+      conclusion: 'failure',
+      jobs: [
+        { eventId: jobBuild.id, jobId: 'build' },
+        { eventId: jobTest.id, jobId: 'test' },
+      ],
+    });
+    const { code, report } = await status([
+      announcement(),
+      serviceRequest(),
+      jobBuild,
+      jobTest,
+      red,
+    ]);
+    expect(code).toBe(1);
+    expect(report.summary).toEqual({
+      counted: 1,
+      green: 0,
+      red: 1,
+      pending: 0,
+    });
+    const run = report.runs[0] as CiStatusReport['runs'][0];
+    expect(run.eventId).toBe(red.id);
+    expect(run).toMatchObject({
+      conclusion: 'failure',
+      queuedAt: T0 - 30,
+      startedAt: T0 - 20,
+      createdAt: T0,
+    });
+    expect(run.jobs.map((j) => [j.jobId, j.conclusion, j.eventId])).toEqual([
+      ['build', 'success', jobBuild.id],
+      ['test', 'failure', jobTest.id],
+    ]);
+    // Timings: the 9841's queued_at / started_at, and its created_at as the
+    // instant the runner published the conclusion.
+    expect(run.jobs[1]).toMatchObject({
+      exitCode: 1,
+      queuedAt: T0 - 25,
+      startedAt: T0 - 20,
+      concludedAt: T0 - 1,
+    });
+  });
+
+  it('an in-progress run’s event id is its newest 39842', async () => {
+    const queued = progress({
+      status: 'queued',
+      runId: 'r1',
+      createdAt: T0 - 50,
+    });
+    const running = progress({
+      status: 'in_progress',
+      runId: 'r1',
+      createdAt: T0 - 10,
+    });
+    const { code, report } = await status([
+      announcement(),
+      serviceRequest(),
+      queued,
+      running,
+    ]);
+    expect(code).toBe(1);
+    expect(report.runs).toHaveLength(1);
+    expect(report.runs[0]).toMatchObject({
+      status: 'in_progress',
+      eventId: running.id,
+      createdAt: T0 - 10,
+    });
+  });
+
+  it('works with no identity configured: a bare env, an empty client state dir, and an npub owner', async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), 'toon-rig-ci-status-noid-'));
+    try {
+      const h = makeHarness(
+        [announcement(), serviceRequest(), result({})],
+        '/nonexistent-not-a-repo',
+        { TOON_CLIENT_HOME: stateDir }
+      );
+      const code = await dispatch(
+        [
+          'ci',
+          'status',
+          COMMIT,
+          '--repo-id',
+          REPO,
+          '--owner',
+          hexToNpub(OWNER),
+          '--relay',
+          RELAY,
+          '--json',
+        ],
+        h.deps
+      );
+      expect(code).toBe(0);
+      expect(h.json).toHaveLength(1);
+      expect(h.json[0]).toMatchObject({
+        command: 'ci status',
+        repo: { owner: OWNER, repoId: REPO },
+        ok: true,
+      });
+      // Nothing was provisioned or read: the state dir is still empty and the
+      // standalone (paid) loader was never touched (it throws if it is).
+      expect(readdirSync(stateDir)).toEqual([]);
+      expect(h.err).toEqual([]);
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it('human output shows each job’s duration and the run’s wall-clock time', async () => {
+    const j = job({ runId: 'r1', jobId: 'build', id: 'a1'.repeat(32) });
+    const h = makeHarness([
+      announcement(),
+      serviceRequest(),
+      j,
+      result({ runId: 'r1', jobs: [{ eventId: j.id, jobId: 'build' }] }),
+      // A newer attempt of the same workflow, still running: it is the one
+      // that counts (exit 1); r1 is still listed with its timings.
+      progress({ status: 'in_progress', runId: 'r2', createdAt: T0 + 5 }),
+    ]);
+    const code = await dispatch(['ci', 'status', COMMIT, ...ADDR], h.deps);
+    expect(code).toBe(1); // r2 is still running
+    const text = h.out.join('\n');
+    // Run: started T0-20, 9842 at T0 → 20s. Job: started T0-20, 9841 at T0-1 → 19s.
+    expect(text).toMatch(
+      /✓ success\s+.*trust maintainer-directed {2}took 20s$/m
+    );
+    expect(text).toContain('    success         Job build (exit 0)  took 19s');
+    // A run still in progress has no wall-clock time yet.
+    expect(text).toMatch(/… in_progress\s+.*trust maintainer-directed$/m);
   });
 });

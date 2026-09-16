@@ -802,3 +802,158 @@ export function aggregateRunStatus(
   if (runs.some((r) => r.conclusion === 'success')) return 'success';
   return 'neutral';
 }
+
+// ---------------------------------------------------------------------------
+// Coordinator Advertisement (19843)
+// ---------------------------------------------------------------------------
+
+export type CiAdmissionPolicy =
+  'operator-selected' | 'maintainer-request' | 'open';
+export type CiExecutionPolicy = 'automatic' | 'request-required';
+export type CiBillingPolicy = 'not-required' | 'out-of-band';
+
+const ADMISSIONS: ReadonlySet<string> = new Set<CiAdmissionPolicy>([
+  'operator-selected',
+  'maintainer-request',
+  'open',
+]);
+const EXECUTIONS: ReadonlySet<string> = new Set<CiExecutionPolicy>([
+  'automatic',
+  'request-required',
+]);
+const BILLINGS: ReadonlySet<string> = new Set<CiBillingPolicy>([
+  'not-required',
+  'out-of-band',
+]);
+
+/** A Coordinator's standing offer: what it runs and how it admits repos. */
+export interface CiAdvertisement {
+  eventId: string;
+  pubkey: string;
+  createdAt: number;
+  /** `software` tag version (empty when the tag is absent). */
+  version: string;
+  /** Supported runner families (`W`), case-folded + deduplicated. */
+  families: string[];
+  /** Accepted `<family>:<selector>` values (`R`), case-folded + deduplicated. */
+  selectors: string[];
+  admission: CiAdmissionPolicy;
+  execution: CiExecutionPolicy;
+  billing?: CiBillingPolicy;
+  secretsKey?: { pubkey: string; inboxRelays: string[] };
+  /** NIP-40 expiration; the offer is stale past it. */
+  expiresAt: number;
+}
+
+function tagsNamed(tags: string[][], name: string): string[][] {
+  return tags.filter((t) => t[0] === name);
+}
+
+/** Exactly one tag of this name, else null. */
+function singleTag(tags: string[][], name: string): string[] | null {
+  const found = tagsNamed(tags, name);
+  return found.length === 1 ? (found[0] as string[]) : null;
+}
+
+/** No tag → undefined; exactly one → the tag; several → null. */
+function optionalTag(
+  tags: string[][],
+  name: string
+): string[] | null | undefined {
+  const found = tagsNamed(tags, name);
+  if (found.length === 0) return undefined;
+  return found.length === 1 ? (found[0] as string[]) : null;
+}
+
+function foldUnique(items: Iterable<string>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of items) {
+    const v = raw.toLowerCase();
+    if (!seen.has(v)) {
+      seen.add(v);
+      out.push(v);
+    }
+  }
+  return out;
+}
+
+/**
+ * Parse a kind:19843 Coordinator Advertisement (same rules as rig's
+ * `parseCiAdvertisement`): empty content, no `d`, exactly one `M`/`X`/
+ * `expiration` (the expiry after `created_at`), every `R` selector under an
+ * advertised `W` family and every family with at least one selector, an
+ * optional single `B`, `software` and `secrets-key` (nip44-v2 + a hex pubkey
+ * + at least one ws(s) inbox relay). Anything else is not an advertisement.
+ */
+export function parseCiAdvertisement(
+  event: NostrEvent
+): CiAdvertisement | null {
+  if (event.kind !== CI_ADVERTISEMENT_KIND || event.content !== '') return null;
+  const { tags } = event;
+  if (tagsNamed(tags, 'd').length > 0) return null;
+  const M = singleTag(tags, 'M');
+  const X = singleTag(tags, 'X');
+  const exp = singleTag(tags, 'expiration');
+  if (!M || !X || !exp) return null;
+  if (!ADMISSIONS.has(M[1] ?? '') || !EXECUTIONS.has(X[1] ?? '')) return null;
+  const B = optionalTag(tags, 'B');
+  if (B === null || (B !== undefined && !BILLINGS.has(B[1] ?? ''))) return null;
+  const expiresAt = Number(exp[1]);
+  if (!Number.isInteger(expiresAt) || expiresAt <= event.created_at)
+    return null;
+
+  const families = foldUnique(
+    tagsNamed(tags, 'W')
+      .map((t) => t[1] ?? '')
+      .filter((v) => v !== '')
+  );
+  const selectors = foldUnique(
+    tagsNamed(tags, 'R')
+      .map((t) => t[1] ?? '')
+      .filter((v) => v !== '')
+  );
+  if (families.length === 0 || selectors.length === 0) return null;
+  const covered = new Set<string>();
+  for (const s of selectors) {
+    const family = s.slice(0, s.indexOf(':'));
+    if (!family || !families.includes(family)) return null;
+    covered.add(family);
+  }
+  if (covered.size !== families.length) return null;
+
+  const software = optionalTag(tags, 'software');
+  if (software === null) return null;
+
+  const sk = optionalTag(tags, 'secrets-key');
+  if (sk === null) return null;
+  let secretsKey: CiAdvertisement['secretsKey'];
+  if (sk !== undefined) {
+    const pubkey = sk[2]?.toLowerCase();
+    const inboxRelays = sk.slice(3).filter((u) => /^wss?:\/\//i.test(u));
+    if (
+      sk[1] !== 'nip44-v2' ||
+      pubkey === undefined ||
+      !HEX64_RE.test(pubkey) ||
+      inboxRelays.length === 0
+    ) {
+      return null;
+    }
+    secretsKey = { pubkey, inboxRelays };
+  }
+
+  const result: CiAdvertisement = {
+    eventId: event.id,
+    pubkey: event.pubkey.toLowerCase(),
+    createdAt: event.created_at,
+    version: software?.[2] ?? '',
+    families,
+    selectors,
+    admission: M[1] as CiAdmissionPolicy,
+    execution: X[1] as CiExecutionPolicy,
+    expiresAt,
+  };
+  if (B !== undefined) result.billing = B[1] as CiBillingPolicy;
+  if (secretsKey) result.secretsKey = secretsKey;
+  return result;
+}

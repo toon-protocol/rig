@@ -17,6 +17,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { formatRelativeDate } from '../../date-utils.js';
 import { hexToNpub } from '../../npub.js';
 import { shortRefName } from '@/lib/ref-utils';
+import { storeLinkHref } from '../../gateway-preference.js';
 import type { CiJobResult, CiRun } from '../../nip-c1-parsers.js';
 
 function formatDuration(seconds: number): string {
@@ -83,7 +84,7 @@ function JobCard({ job }: { job: CiJobResult }) {
       <footer className="flex flex-wrap items-center gap-3 border-t px-4 py-2 text-xs">
         {job.logsUrl ? (
           <a
-            href={job.logsUrl}
+            href={storeLinkHref(job.logsUrl)}
             target="_blank"
             rel="noreferrer"
             className="text-primary underline-offset-2 hover:underline"
@@ -100,7 +101,7 @@ function JobCard({ job }: { job: CiJobResult }) {
               <span key={artifact.url}>
                 {i > 0 && ', '}
                 <a
-                  href={artifact.url}
+                  href={storeLinkHref(artifact.url)}
                   target="_blank"
                   rel="noreferrer"
                   title={
