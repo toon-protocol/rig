@@ -4,7 +4,7 @@
  * One URL is the whole configuration. A TOON connector describes itself on
  * `GET /ilp` (connector ADR 0050): its ILP addresses, the routes it prices,
  * the chains it settles on and the key a payload is sealed to. The client
- * (`@toon-protocol/client` 2.x) reads that once, opens or adopts a payment
+ * (`@toon-protocol/client` 3.x) reads that once, opens or adopts a payment
  * channel against the node, and pays each request with a signed claim. There
  * is nothing to discover and nothing to negotiate — kind:10032 announces were
  * removed by ADR 0046, and a node's word about itself replaced them.
