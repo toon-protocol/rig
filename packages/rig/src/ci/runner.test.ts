@@ -72,6 +72,81 @@ describe('FakeRunner', () => {
     expect(result.jobs[0]?.log).toContain(REQUEST.trigger.commit);
   });
 
+  it('reports a multi-job workflow job by job: mixed conclusions, exit codes, timings, logs, artifacts', async () => {
+    const runner = new FakeRunner(() => ({
+      conclusion: 'failure',
+      startedAt: 100,
+      finishedAt: 130,
+      jobs: [
+        {
+          jobId: 'build',
+          name: 'Build it',
+          conclusion: 'success',
+          exitCode: 0,
+          startedAt: 100,
+          finishedAt: 110,
+          log: 'compiling\n',
+          artifacts: [
+            {
+              path: '/tmp/art/outputs/out.txt',
+              filename: 'out.txt',
+              name: 'outputs',
+            },
+          ],
+        },
+        {
+          jobId: 'test',
+          conclusion: 'failure',
+          exitCode: 2,
+          startedAt: 110,
+          finishedAt: 130,
+          log: '1 test failed\n',
+          artifacts: [],
+        },
+        {
+          jobId: 'docs',
+          conclusion: 'skipped',
+          startedAt: 130,
+          finishedAt: 130,
+          log: '',
+          artifacts: [],
+        },
+      ],
+    }));
+    const streamed: [string, string][] = [];
+    const result = await runner.run({
+      ...REQUEST,
+      onLog: (jobId, chunk) => streamed.push([jobId, chunk]),
+    });
+
+    expect(result.conclusion).toBe('failure');
+    expect(result.jobs.map((j) => j.jobId)).toEqual(['build', 'test', 'docs']);
+    expect(result.jobs.map((j) => [j.conclusion, j.exitCode])).toEqual([
+      ['success', 0],
+      ['failure', 2],
+      ['skipped', undefined],
+    ]);
+    for (const job of result.jobs) {
+      expect(job.finishedAt).toBeGreaterThanOrEqual(job.startedAt);
+      expect(job.startedAt).toBeGreaterThanOrEqual(result.startedAt);
+      expect(job.finishedAt).toBeLessThanOrEqual(result.finishedAt);
+    }
+    expect(result.jobs[0]?.artifacts).toEqual([
+      {
+        path: '/tmp/art/outputs/out.txt',
+        filename: 'out.txt',
+        name: 'outputs',
+      },
+    ]);
+    expect(result.jobs[1]?.log).toBe('1 test failed\n');
+    // One onLog call per job, in job order.
+    expect(streamed).toEqual([
+      ['build', 'compiling\n'],
+      ['test', '1 test failed\n'],
+      ['docs', ''],
+    ]);
+  });
+
   it('streams the scripted job logs to onLog when a sink is given', async () => {
     const runner = new FakeRunner();
     const seen: [string, string][] = [];
