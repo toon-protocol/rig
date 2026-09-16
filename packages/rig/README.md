@@ -377,7 +377,13 @@ can read rig's events.
   the repo owner or a declared maintainer (`rig maintainers`).
 - **Triggers**: a push (a new kind:30618 whose refs moved), a pull request or PR
   update (kinds 1617/1618/1619 — rig's own `rig pr create` patches included),
-  or a Manual Trigger (9840) from a maintainer.
+  or a Manual Trigger (9840) from a maintainer. A pull request runs the
+  workflows with `on: pull_request`; its events carry NIP-22 tags back to the PR
+  (`E`/`K`/`P` root, `e`/`k`/`p` for the update that supplied the commit) and
+  no git ref. A PR update supersedes the previous tip: the earlier run for that
+  PR, queued or in progress, concludes `cancelled` before the new one starts.
+  `rig ci status` shows a PR run's PR event id and whether its author is the
+  repo owner or a declared maintainer (`pr.authorIsMaintainer` in `--json`).
 - The **Runner** is behind one interface. The first implementation is act on the
   host's Docker; a TOON-lease runner is a later class behind the same seam.
 

@@ -33,6 +33,7 @@ import {
   repoAddress,
   type CiArtifact,
   type CiConclusion,
+  type CiPrContext,
   type CiProgressStatus,
   type CiProvenance,
   type CiTriggerReason,
@@ -113,6 +114,16 @@ export interface CiStatusJob {
   publisher: string;
 }
 
+/**
+ * A `pull_request` run's NIP-22 context (the PR as root, the PR or PR Update
+ * that supplied the commit as parent) plus whether the PR author is the repo
+ * owner or a declared maintainer — derived here from the 30617, never from
+ * anything the coordinator asserts (#130).
+ */
+export interface CiStatusPullRequest extends CiPrContext {
+  authorIsMaintainer: boolean;
+}
+
 export interface CiStatusRun {
   runId: string;
   coordinator: string;
@@ -125,6 +136,8 @@ export interface CiStatusRun {
   startedAt?: number;
   queuedAt?: number;
   provenance?: CiProvenance;
+  /** Present exactly when the run was triggered by a pull request. */
+  pr?: CiStatusPullRequest;
   jobs: CiStatusJob[];
   /** Event id of the 9842 (concluded) or the latest 39842. */
   eventId: string;
@@ -370,6 +383,16 @@ export function assembleCiStatus(opts: AssembleStatusOptions): {
       ...(startedAt !== undefined ? { startedAt } : {}),
       ...(queuedAt !== undefined ? { queuedAt } : {}),
       ...(provenance ? { provenance } : {}),
+      ...(base.trigger.pr
+        ? {
+            pr: {
+              ...base.trigger.pr,
+              authorIsMaintainer: opts.authorized.has(
+                base.trigger.pr.prAuthor.toLowerCase()
+              ),
+            },
+          }
+        : {}),
       jobs: runJobs,
       eventId: base.eventId,
     });
@@ -614,6 +637,16 @@ function glyph(run: CiStatusRun): string {
   return GREEN.has(run.conclusion) ? '✓' : '✗';
 }
 
+/** `    pull request <id>  by <npub> (author is a maintainer)[  via update <id>]` */
+function pullRequestLine(pr: CiStatusPullRequest): string {
+  const who = pr.authorIsMaintainer
+    ? 'author is a maintainer'
+    : 'author is not a maintainer';
+  const via =
+    pr.sourceEventId !== pr.prEventId ? `  via update ${pr.sourceEventId}` : '';
+  return `    pull request ${pr.prEventId}  by ${shortNpub(pr.prAuthor)} (${who})${via}`;
+}
+
 function shortNpub(hex: string): string {
   try {
     const npub = hexToNpub(hex);
@@ -659,6 +692,7 @@ export function renderStatus(report: CiStatusReport): string[] {
           tookSuffix(job.startedAt, job.concludedAt)
       );
     }
+    if (run.pr) lines.push(pullRequestLine(run.pr));
   }
   const s = report.summary;
   const verdict = report.ok
