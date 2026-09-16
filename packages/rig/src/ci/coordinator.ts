@@ -158,6 +158,16 @@ export interface RunCostEstimate {
 
 export type CanAfford = (estimate: RunCostEstimate) => Promise<boolean>;
 
+/** What {@link CoordinatorOptions.onRunConcluded} reports: a run whose result is on the relay. */
+export interface ConcludedRun {
+  runId: string;
+  repoAddr: RepoAddress;
+  trigger: CiTriggerContext;
+  conclusion: CiConclusion;
+  /** Event id of the run's Workflow Result (9842). */
+  resultEventId: string;
+}
+
 export interface CoordinatorOptions {
   /** Hex pubkey of the coordinator identity (the publisher signs as it). */
   coordinatorPubkey: string;
@@ -201,6 +211,14 @@ export interface CoordinatorOptions {
   advertisementTtlSeconds?: number;
   /** Keep checkouts after their runs (default: delete). */
   keepCheckouts?: boolean;
+  /**
+   * Called once per run after its Workflow Result (9842) and final
+   * `concluded` progress marker are published — including runs that never
+   * reached the Runner (`startup_failure`, `cancelled`). Ignored or refused
+   * triggers publish nothing and never reach it. `rig ci serve --once`
+   * stops on the first call.
+   */
+  onRunConcluded?: (run: ConcludedRun) => void;
 }
 
 export interface CoordinatorHandle {
@@ -600,13 +618,22 @@ export async function startCoordinator(
       jobs: [] as CiJobQuote[],
     };
     const now = clock();
-    await publish(buildCiWorkflowResult({ ...base, conclusion }, now));
+    const resultEventId = await publish(
+      buildCiWorkflowResult({ ...base, conclusion }, now)
+    );
     await publish(
       buildCiWorkflowProgress(
         { ...base, status: 'concluded', conclusion, expiresAt: now + adTtl },
         now
       )
     );
+    opts.onRunConcluded?.({
+      runId: run.runId,
+      repoAddr: run.repo.addr,
+      trigger: run.trigger,
+      conclusion,
+      resultEventId,
+    });
   };
 
   const executeRun = async (run: QueuedRun): Promise<void> => {
@@ -812,7 +839,7 @@ export async function startCoordinator(
     }
 
     const now = clock();
-    await publish(
+    const resultEventId = await publish(
       buildCiWorkflowResult(
         {
           trigger,
@@ -828,6 +855,13 @@ export async function startCoordinator(
     );
     await publish(progress('concluded', conclusion));
     log(`[ci] ${label}: ${conclusion}`);
+    opts.onRunConcluded?.({
+      runId: run.runId,
+      repoAddr: repo.addr,
+      trigger,
+      conclusion,
+      resultEventId,
+    });
   };
 
   const pump = (): void => {

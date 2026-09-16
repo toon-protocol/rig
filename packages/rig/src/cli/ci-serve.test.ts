@@ -4,7 +4,9 @@
  * through the dispatch-level seams — fake standalone context (fake
  * Publisher), scripted relay, FakeRunner, injected abort signal — proving the
  * coordinator advertises, runs a push, and stops cleanly with exit 0, with
- * exactly one JSON document under `--json`.
+ * exactly one JSON document under `--json`. The `--once` sessions (#127)
+ * drive one Manual Trigger (9840) from the relay to its Workflow Result and
+ * assert the NIP-C1 sequence, the `q` quotes, and the store URLs in full.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -22,11 +24,18 @@ import {
 } from '../ci/ci-testkit.js';
 import {
   CI_ADVERTISEMENT_KIND,
+  CI_JOB_RESULT_KIND,
+  CI_WORKFLOW_PROGRESS_KIND,
   CI_WORKFLOW_RESULT_KIND,
+  buildCiManualTrigger,
   buildCiServiceRequest,
+  parseCiJobResult,
+  parseCiWorkflowProgress,
+  parseCiWorkflowResult,
   repoAddress,
 } from '../ci/nip-c1-events.js';
-import { FakeRunner } from '../ci/runner.js';
+import { FakeRunner, type RunnerRunResult } from '../ci/runner.js';
+import { sha256Hex } from '../ci/workflows.js';
 import type { NostrEvent } from '../remote-state.js';
 import { hexToNpub } from '../npub.js';
 import type { CiDeps } from './ci.js';
@@ -133,7 +142,9 @@ function signed(
   };
 }
 
-function makeServeWorld() {
+function makeServeWorld(
+  options: { extraWorkflows?: Record<string, string> } = {}
+) {
   const srcDir = tempDir('rig-ci-serve-src-');
   git(['init', '--initial-branch=main'], srcDir);
   mkdirSync(join(srcDir, '.github', 'workflows'), { recursive: true });
@@ -141,6 +152,10 @@ function makeServeWorld() {
     join(srcDir, '.github', 'workflows', 'ci.yml'),
     'on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n'
   );
+  for (const [path, content] of Object.entries(options.extraWorkflows ?? {})) {
+    mkdirSync(dirname(join(srcDir, path)), { recursive: true });
+    writeFileSync(join(srcDir, path), content);
+  }
   writeFileSync(join(srcDir, 'README.md'), '# demo\n');
   git(['add', '.'], srcDir);
   git(['commit', '-m', 'initial'], srcDir);
@@ -401,6 +416,356 @@ describe('rig ci serve: a serve session', () => {
       error: expect.any(String),
     });
     expect(world.rec.err.join('\n')).toContain('no identity found');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// --once: one manual trigger → workflow result → exit (#127)
+// ---------------------------------------------------------------------------
+
+const MANUAL_WORKFLOW_PATH = '.github/workflows/manual.yml';
+const MANUAL_WORKFLOW = `name: manual
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo build
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo test
+`;
+const GATEWAY = 'http://gateway.test:3000';
+const ADDR = repoAddress(OWNER, REPO);
+
+function manualTrigger(
+  commit: string,
+  from: string,
+  n: number,
+  workflow = { path: MANUAL_WORKFLOW_PATH, sha256: sha256Hex(MANUAL_WORKFLOW) }
+): NostrEvent {
+  return signed(
+    buildCiManualTrigger(
+      COORD,
+      { repoAddr: ADDR, commit, workflow, ref: 'refs/heads/main' },
+      1500 + n
+    ),
+    from,
+    n
+  );
+}
+
+/** The `a`/`c`/`w`/`o` tags every event of a manual run must carry. */
+function commonTagsOf(tags: string[][]) {
+  return {
+    a: tags.filter((t) => t[0] === 'a').map((t) => t[1]),
+    c: tags.filter((t) => t[0] === 'c').map((t) => t[1]),
+    w: tags.filter((t) => t[0] === 'w').map((t) => t.slice(1)),
+    o: tags.filter((t) => t[0] === 'o').map((t) => t[1]),
+  };
+}
+
+describe('rig ci serve --once: manual trigger → workflow result → exit (#127)', () => {
+  it('refuses a stranger, then runs ONE maintainer trigger through the fake Runner and publisher in NIP-C1 order and exits 0 on its own', async () => {
+    const world = makeServeWorld({
+      extraWorkflows: { [MANUAL_WORKFLOW_PATH]: MANUAL_WORKFLOW },
+    });
+    const commit = git(['rev-parse', 'HEAD'], world.srcDir);
+
+    // A two-job scripted outcome: build succeeds with one artifact file,
+    // test fails with exit code 1 — so the run concludes `failure`.
+    const artifactDir = tempDir('rig-ci-once-artifact-');
+    writeFileSync(join(artifactDir, 'out.txt'), 'built\n');
+    const runner = new FakeRunner((): RunnerRunResult => ({
+      conclusion: 'failure',
+      startedAt: 10,
+      finishedAt: 30,
+      jobs: [
+        {
+          jobId: 'build',
+          name: 'build',
+          conclusion: 'success',
+          exitCode: 0,
+          startedAt: 10,
+          finishedAt: 20,
+          log: 'building…\nok\n',
+          artifacts: [
+            {
+              path: join(artifactDir, 'out.txt'),
+              filename: 'out.txt',
+              name: 'outputs',
+            },
+          ],
+        },
+        {
+          jobId: 'test',
+          name: 'test',
+          conclusion: 'failure',
+          exitCode: 1,
+          startedAt: 20,
+          finishedAt: 30,
+          log: 'testing…\nFAIL\n',
+          artifacts: [],
+        },
+      ],
+    }));
+    world.deps.runner = runner;
+
+    const running = dispatch(
+      [
+        'ci',
+        'serve',
+        '--relay',
+        RELAY,
+        '--repo',
+        REPO_FLAG,
+        '--gateway',
+        GATEWAY,
+        '--once',
+        '--json',
+      ],
+      world.deps
+    );
+    await waitFor(
+      () => world.publisher.ofKind(CI_ADVERTISEMENT_KIND).length === 1,
+      'the advertisement'
+    );
+    await flush();
+    expect(world.rec.json).toHaveLength(1);
+    expect(world.rec.json[0]).toMatchObject({
+      command: 'ci serve',
+      once: true,
+    });
+
+    // A stranger's trigger: nothing published, the refusal logged, and the
+    // coordinator keeps listening (--once counts runs, not requests).
+    world.relay.push(manualTrigger(commit, STRANGER, 2));
+    await waitFor(
+      () => world.rec.err.some((l) => /non-maintainer/.test(l)),
+      'the refusal on stderr'
+    );
+    await flush();
+    expect(world.publisher.publishedEvents).toHaveLength(1); // the advertisement
+    expect(runner.requests).toHaveLength(0);
+
+    // The maintainer's trigger runs, and the session ends by itself.
+    const trigger = manualTrigger(commit, MAINT, 3);
+    world.relay.push(trigger);
+    expect(await running).toBe(0);
+    expect(world.stoppedCount()).toBe(1);
+    expect(world.rec.err.join('\n')).toContain('--once');
+    expect(world.rec.json).toHaveLength(1);
+
+    // Exactly ONE run was handed to the Runner, at the requested commit.
+    expect(runner.requests).toHaveLength(1);
+    expect(must(runner.requests[0])).toMatchObject({
+      workflow: {
+        path: MANUAL_WORKFLOW_PATH,
+        sha256: sha256Hex(MANUAL_WORKFLOW),
+      },
+      trigger: { commit, reason: 'manual' },
+    });
+
+    // The NIP-C1 sequence, in order: queued → in_progress → per job (9841 +
+    // the renewed in_progress quoting it) → 9842 → concluded.
+    const published = world.publisher.publishedEvents.filter(
+      (p) => p.event.kind !== CI_ADVERTISEMENT_KIND
+    );
+    expect(published.map((p) => p.event.kind)).toEqual([
+      CI_WORKFLOW_PROGRESS_KIND, // queued
+      CI_WORKFLOW_PROGRESS_KIND, // in_progress: build, test
+      CI_JOB_RESULT_KIND, // build
+      CI_WORKFLOW_PROGRESS_KIND, // in_progress, quoting build
+      CI_JOB_RESULT_KIND, // test
+      CI_WORKFLOW_PROGRESS_KIND, // in_progress, quoting build + test
+      CI_WORKFLOW_RESULT_KIND, // result
+      CI_WORKFLOW_PROGRESS_KIND, // concluded
+    ]);
+    // Every one of them carries the common trigger tags, paid from the
+    // coordinator's own identity to the one relay.
+    for (const p of published) {
+      expect(commonTagsOf(p.event.tags)).toEqual({
+        a: [ADDR],
+        c: [commit],
+        w: [[MANUAL_WORKFLOW_PATH, sha256Hex(MANUAL_WORKFLOW)]],
+        o: ['manual'],
+      });
+      expect(p.relayUrls).toEqual([RELAY]);
+    }
+
+    const asRelay = (p: (typeof published)[number]) =>
+      world.publisher.asRelayEvent(p, COORD);
+    const progress = world.publisher
+      .ofKind(CI_WORKFLOW_PROGRESS_KIND)
+      .map((p) => must(parseCiWorkflowProgress(asRelay(p)), 'a 39842'));
+    const jobs = world.publisher
+      .ofKind(CI_JOB_RESULT_KIND)
+      .map((p) => must(parseCiJobResult(asRelay(p)), 'a 9841'));
+    const [result] = world.publisher
+      .ofKind(CI_WORKFLOW_RESULT_KIND)
+      .map((p) => must(parseCiWorkflowResult(asRelay(p)), 'a 9842'));
+    const [queued, inProgress, afterBuild, afterTest, concluded] = progress;
+    const runId = must(queued).runId;
+
+    expect(queued).toMatchObject({
+      status: 'queued',
+      jobs: [],
+      provenance: {
+        kind: 'manual-trigger',
+        eventId: trigger.id,
+        pubkey: MAINT,
+      },
+      trigger: { reason: 'manual', commit, ref: 'refs/heads/main' },
+    });
+    expect(inProgress).toMatchObject({
+      status: 'in_progress',
+      runId,
+      inProgress: ['build', 'test'],
+      jobs: [],
+    });
+
+    // One 9841 per job: conclusion, exit code, timings, log tail, and the
+    // store gateway URLs of the uploaded log and artifact.
+    const [build, test] = jobs;
+    expect(build).toMatchObject({
+      jobId: 'build',
+      name: 'build',
+      conclusion: 'success',
+      exitCode: 0,
+      startedAt: 10,
+      progressAddress: `39842:${COORD}:${runId}`,
+      logsUrl: `${GATEWAY}/raw/tx-1`,
+      logTail: 'building…\nok\n',
+      logOmittedBytes: 0,
+      artifacts: [
+        { url: `${GATEWAY}/raw/tx-2`, filename: 'out.txt', name: 'outputs' },
+      ],
+      runsOn: ['ubuntu-latest'],
+    });
+    expect(test).toMatchObject({
+      jobId: 'test',
+      conclusion: 'failure',
+      exitCode: 1,
+      startedAt: 20,
+      progressAddress: `39842:${COORD}:${runId}`,
+      logsUrl: `${GATEWAY}/raw/tx-3`,
+      logTail: 'testing…\nFAIL\n',
+      artifacts: [],
+    });
+    // …and those URLs came from the publisher's blob upload, byte for byte.
+    expect(
+      world.publisher.uploadedBlobs.map((b) => ({
+        txId: b.txId,
+        contentType: b.contentType,
+        repoId: b.repoId,
+        body: Buffer.from(b.body).toString('utf-8'),
+      }))
+    ).toEqual([
+      {
+        txId: 'tx-1',
+        contentType: 'text/plain; charset=utf-8',
+        repoId: REPO,
+        body: 'building…\nok\n',
+      },
+      {
+        txId: 'tx-2',
+        contentType: 'text/plain',
+        repoId: REPO,
+        body: 'built\n',
+      },
+      {
+        txId: 'tx-3',
+        contentType: 'text/plain; charset=utf-8',
+        repoId: REPO,
+        body: 'testing…\nFAIL\n',
+      },
+    ]);
+
+    // The `q` quotes link the pieces: each renewed 39842 quotes the job
+    // results so far, and the 9842 quotes every job result AND the trigger.
+    const buildQuote = {
+      eventId: must(build).eventId,
+      relayUrl: RELAY,
+      pubkey: COORD,
+      jobId: 'build',
+    };
+    const testQuote = {
+      ...buildQuote,
+      eventId: must(test).eventId,
+      jobId: 'test',
+    };
+    expect(afterBuild).toMatchObject({
+      status: 'in_progress',
+      inProgress: ['test'],
+      jobs: [buildQuote],
+    });
+    expect(afterTest).toMatchObject({
+      status: 'in_progress',
+      inProgress: [],
+      jobs: [buildQuote, testQuote],
+    });
+    expect(result).toMatchObject({
+      runId,
+      conclusion: 'failure',
+      startedAt: expect.any(Number),
+      provenance: {
+        kind: 'manual-trigger',
+        eventId: trigger.id,
+        relayUrl: RELAY,
+        pubkey: MAINT,
+      },
+      jobs: [buildQuote, testQuote],
+      trigger: { reason: 'manual', commit, ref: 'refs/heads/main' },
+    });
+    expect(concluded).toMatchObject({
+      status: 'concluded',
+      conclusion: 'failure',
+      runId,
+      jobs: [buildQuote, testQuote],
+      provenance: { kind: 'manual-trigger', eventId: trigger.id },
+    });
+    expect(must(build).eventId).not.toBe(must(test).eventId);
+  });
+
+  it('also exits after a trigger whose run concludes startup_failure (the commit cannot be materialized)', async () => {
+    const world = makeServeWorld();
+    const running = runCiServe(
+      ['--relay', RELAY, '--repo', REPO_FLAG, '--once'],
+      world.deps
+    );
+    await waitFor(
+      () => world.publisher.ofKind(CI_ADVERTISEMENT_KIND).length === 1,
+      'the advertisement'
+    );
+    await flush();
+    expect(world.rec.out.join('\n')).toContain('one run');
+
+    world.relay.push(
+      manualTrigger('9'.repeat(40), OWNER, 2, {
+        path: '.github/workflows/ci.yml',
+        sha256: 'ab'.repeat(32),
+      })
+    );
+    expect(await running).toBe(0);
+    expect(world.runner.requests).toHaveLength(0);
+    const kinds = world.publisher.publishedEvents
+      .map((p) => p.event.kind)
+      .filter((k) => k !== CI_ADVERTISEMENT_KIND);
+    expect(kinds).toEqual([
+      CI_WORKFLOW_PROGRESS_KIND,
+      CI_WORKFLOW_RESULT_KIND,
+      CI_WORKFLOW_PROGRESS_KIND,
+    ]);
+    const [result] = world.publisher
+      .ofKind(CI_WORKFLOW_RESULT_KIND)
+      .map((p) =>
+        must(parseCiWorkflowResult(world.publisher.asRelayEvent(p, COORD)))
+      );
+    expect(result).toMatchObject({ conclusion: 'startup_failure', jobs: [] });
+    const stopLine = world.rec.err.find((l) => l.includes('--once'));
+    expect(stopLine).toContain('concluded startup_failure');
+    expect(stopLine).toContain(`result ${must(result).eventId.slice(0, 8)}`);
   });
 });
 

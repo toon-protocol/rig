@@ -452,6 +452,7 @@ rig ci serve --relay wss://<relay> --repo <owner-npub>/<repo-id> [--repo …]
 | `--act-bin <path>` | `act` on PATH (or `RIG_ACT_BIN`) | the act binary |
 | `--platform <label>=<image>` | `ubuntu-latest=catthehacker/ubuntu:act-latest` | `runs-on` label → Docker image (repeatable) |
 | `--workdir <dir>` | `<state-dir>/work` | where commits are materialized |
+| `--once` | | stop after the first run concludes (its 9842 and final 39842 are on the relay) — one `rig ci trigger` answered by one bounded serve; ignored or refused triggers do not count |
 | `--json` | | one JSON document with the coordinator, relay, repos and state dir on start |
 
 On start the coordinator publishes an **Advertisement** (19843: runner family
