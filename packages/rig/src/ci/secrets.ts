@@ -239,6 +239,25 @@ export function effectiveSecrets(
   return out;
 }
 
+/**
+ * Replace every occurrence of every secret value in `text` with `***`,
+ * longest value first so a value that contains another is never left half
+ * visible. The coordinator runs job logs through this before they reach the
+ * store or the relay: act masks secrets in its own output, but no Runner is
+ * trusted to, and the 9841 log tail is a public event.
+ */
+export function redactSecretValues(
+  text: string,
+  values: Iterable<string>
+): string {
+  const ordered = [...new Set(values)]
+    .filter((v) => v !== '')
+    .sort((a, b) => b.length - a.length);
+  let out = text;
+  for (const value of ordered) out = out.split(value).join('***');
+  return out;
+}
+
 /** A fresh NIP-44 recipient (secrets-key) or sender keypair. */
 export function generateSecretsKey(): {
   secretKey: Uint8Array;

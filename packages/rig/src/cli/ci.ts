@@ -49,6 +49,7 @@ import type { Runner } from '../ci/runner.js';
 import {
   encryptSecretUpdate,
   generateSecretsKey,
+  MAX_SECRET_VALUE_BYTES,
   RESERVED_SECRET_NAMES,
   SECRET_NAME_RE,
   type SecretUpdatePlaintext,
@@ -652,6 +653,16 @@ function assertSecretName(name: string): void {
   }
 }
 
+/** NIP-C1 value limits, checked before any relay or wallet is touched — never echoes the value. */
+function assertSecretValue(name: string, value: string): void {
+  if (value === '') throw new Error(`secret ${name} has an empty value`);
+  if (Buffer.byteLength(value, 'utf-8') > MAX_SECRET_VALUE_BYTES) {
+    throw new Error(
+      `secret ${name} value exceeds ${MAX_SECRET_VALUE_BYTES} bytes`
+    );
+  }
+}
+
 async function runCiSecret(args: string[], deps: CiDeps): Promise<number> {
   const { io } = deps;
   const [sub, ...rest] = args;
@@ -718,7 +729,7 @@ async function runCiSecret(args: string[], deps: CiDeps): Promise<number> {
         stdinName = name;
       } else {
         const value = entry.slice(eq + 1);
-        if (value === '') throw new Error(`secret ${name} has an empty value`);
+        assertSecretValue(name, value);
         set[name] = value;
       }
     }
@@ -738,6 +749,12 @@ async function runCiSecret(args: string[], deps: CiDeps): Promise<number> {
       io.err(
         `secret ${stdinName}: no value on stdin (pipe the value, or pass ${stdinName}=<value>)`
       );
+      return 2;
+    }
+    try {
+      assertSecretValue(stdinName, trimmed);
+    } catch (err) {
+      io.err(err instanceof Error ? err.message : String(err));
       return 2;
     }
     set[stdinName] = trimmed;

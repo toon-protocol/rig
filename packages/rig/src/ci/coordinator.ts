@@ -120,6 +120,7 @@ import {
   decryptSecretUpdate,
   effectiveSecrets,
   generateSecretsKey,
+  redactSecretValues,
   validateSecretUpdate,
   type SecretInventory,
 } from './secrets.js';
@@ -748,10 +749,14 @@ export async function startCoordinator(
 
     // Per job: upload the log (+ artifacts), publish 9841, renew 39842.
     for (const job of result.jobs) {
-      const { tail, omitted } = logTail(job.log);
+      // An injected value never leaves this process in the clear: not in the
+      // uploaded log, not in the 9841 tail (act masks its own output, but no
+      // Runner is trusted to).
+      const jobLog = redactSecretValues(job.log, Object.values(run.secrets));
+      const { tail, omitted } = logTail(jobLog);
       const logReceipt = await serial.run(() =>
         uploadBlob({
-          body: Buffer.from(job.log, 'utf-8'),
+          body: Buffer.from(jobLog, 'utf-8'),
           contentType: 'text/plain; charset=utf-8',
           repoId: repo.repoId,
         })

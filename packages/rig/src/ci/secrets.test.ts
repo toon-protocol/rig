@@ -15,6 +15,7 @@ import {
   effectiveSecrets,
   encryptSecretUpdate,
   generateSecretsKey,
+  redactSecretValues,
   validateSecretUpdate,
   type SecretInventory,
   type SecretUpdatePlaintext,
@@ -250,5 +251,26 @@ describe('inventory ordering', () => {
       'ff'.repeat(32)
     );
     expect(inv['A']?.value).toBe('from-00');
+  });
+});
+
+describe('redactSecretValues', () => {
+  it('replaces every occurrence of every value with ***, longest value first', () => {
+    expect(
+      redactSecretValues('a=hunter2 b=hunter2_long c=hunter2', [
+        'hunter2',
+        'hunter2_long',
+      ])
+    ).toBe('a=*** b=*** c=***');
+  });
+
+  it('treats values literally (no regex metacharacters) and ignores empty ones', () => {
+    expect(redactSecretValues('x a+b(c) y', ['a+b(c)', ''])).toBe('x *** y');
+    expect(redactSecretValues('x a+b(c) y', ['.*'])).toBe('x a+b(c) y');
+  });
+
+  it('returns the text unchanged when there is nothing to redact', () => {
+    expect(redactSecretValues('plain log\n', [])).toBe('plain log\n');
+    expect(redactSecretValues('plain log\n', ['absent'])).toBe('plain log\n');
   });
 });
