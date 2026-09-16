@@ -270,6 +270,8 @@ interface QueuedRun {
   queuedAt: number;
 }
 
+/** Runs executed at once (`--concurrency`). */
+export const DEFAULT_CONCURRENCY = 1;
 export const DEFAULT_RUN_TIMEOUT_MS = 30 * 60 * 1000;
 export const DEFAULT_ADVERTISEMENT_TTL = 30 * 60;
 /** Renew progress markers and the advertisement at this fraction of their TTL. */
@@ -354,7 +356,7 @@ export async function startCoordinator(
 ): Promise<CoordinatorHandle> {
   const me = opts.coordinatorPubkey.toLowerCase();
   const { publisher, relayUrl, runner } = opts;
-  const concurrency = Math.max(1, opts.concurrency ?? 1);
+  const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
   const timeoutMs = opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
   const clock = opts.clock ?? nowSeconds;
   const scheduler = opts.scheduler ?? realScheduler;
