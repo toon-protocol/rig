@@ -105,7 +105,10 @@ export interface CiStatusJob {
   logsUrl?: string;
   artifacts: CiArtifact[];
   exitCode?: number;
+  queuedAt?: number;
   startedAt?: number;
+  /** The 9841's `created_at`: when the runner published this conclusion. */
+  concludedAt: number;
   eventId: string;
   publisher: string;
 }
@@ -335,7 +338,9 @@ export function assembleCiStatus(opts: AssembleStatusOptions): {
         ...(j.logsUrl !== undefined ? { logsUrl: j.logsUrl } : {}),
         artifacts: j.artifacts,
         ...(j.exitCode !== undefined ? { exitCode: j.exitCode } : {}),
+        ...(j.queuedAt !== undefined ? { queuedAt: j.queuedAt } : {}),
         ...(j.startedAt !== undefined ? { startedAt: j.startedAt } : {}),
+        concludedAt: j.createdAt,
         eventId: j.eventId,
         publisher: j.pubkey,
       }));
@@ -618,7 +623,16 @@ function shortNpub(hex: string): string {
   }
 }
 
-/** Human lines: one per run (newest first), jobs indented, then the verdict. */
+/** `  took 12s` from a start instant to an end instant; '' when unknown. */
+function tookSuffix(startedAt: number | undefined, endedAt: number): string {
+  if (startedAt === undefined) return '';
+  return `  took ${Math.max(0, endedAt - startedAt)}s`;
+}
+
+/**
+ * Human lines: one per run (newest first) with its wall-clock time once
+ * concluded, jobs indented with their durations, then the verdict.
+ */
 export function renderStatus(report: CiStatusReport): string[] {
   const lines: string[] = [];
   lines.push(
@@ -630,14 +644,19 @@ export function renderStatus(report: CiStatusReport): string[] {
   for (const run of report.runs) {
     const state =
       run.status === 'concluded' ? (run.conclusion ?? 'concluded') : run.status;
+    const took =
+      run.status === 'concluded'
+        ? tookSuffix(run.startedAt, run.createdAt)
+        : '';
     lines.push(
       `${glyph(run)} ${state.padEnd(15)} ${run.workflow.path}  ${run.reason}  ` +
-        `coordinator ${shortNpub(run.coordinator)}  trust ${run.trust}`
+        `coordinator ${shortNpub(run.coordinator)}  trust ${run.trust}${took}`
     );
     for (const job of run.jobs) {
       const extra = job.exitCode !== undefined ? ` (exit ${job.exitCode})` : '';
       lines.push(
-        `    ${job.conclusion.padEnd(15)} ${job.name ?? job.jobId}${extra}`
+        `    ${job.conclusion.padEnd(15)} ${job.name ?? job.jobId}${extra}` +
+          tookSuffix(job.startedAt, job.concludedAt)
       );
     }
   }

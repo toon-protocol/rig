@@ -409,13 +409,15 @@ triggers) and gives a third-party pull request an **empty** secret set, so a
 contributor cannot exfiltrate them. Values are never echoed by rig, in any mode.
 
 `rig ci status <commit>` is the merge gate: one line per run (conclusion,
-workflow, trigger reason, coordinator, trust level) and a summary; with `--json`
-exactly one document (`ok`, `runs[]` with per-job conclusions, log and artifact
-URLs, `summary`). It exits **0** only when at least one run counted and every
-counted run concluded green (`success`/`neutral`/`skipped`); **1** when a run is
-red, still queued/in progress, or nothing was found. `--require-ci-trust <level>`
-drops runs below that level before counting, so a passing run from an unknown
-coordinator does not count as green.
+workflow, trigger reason, coordinator, trust level, wall-clock time once
+concluded), one indented line per job (conclusion, exit code, duration) and a
+summary; with `--json` exactly one document (`ok`, `runs[]` with each run's and
+job's event id, conclusion, timings — `queuedAt`/`startedAt`/`concludedAt` —
+log and artifact URLs, `summary`). It exits **0** only when at least one run
+counted and every counted run concluded green (`success`/`neutral`/`skipped`);
+**1** when a run is red, still queued/in progress, or nothing was found.
+`--require-ci-trust <level>` drops runs below that level before counting, so a
+passing run from an unknown coordinator does not count as green.
 
 **Trust levels** are derived client-side from Service Requests and the repo's
 declared maintainers, strongest first:
