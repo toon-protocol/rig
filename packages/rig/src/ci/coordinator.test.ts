@@ -86,6 +86,18 @@ jobs:
       - run: echo hello
 `;
 
+/** A second workflow that only answers tag moves (`on: push: tags`). */
+const RELEASE_WORKFLOW = `name: release
+on:
+  push:
+    tags: ['v*']
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo release
+`;
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -565,6 +577,124 @@ describe('push trigger', () => {
     await handle.idle();
     expect(world.runner.requests).toHaveLength(0);
     expect(publishedKinds(world.publisher)).toEqual([]);
+    await handle.stop();
+  });
+
+  it('a 30618 whose refs did not move — an arweave-map-only republish, or a byte-identical one — runs nothing but advances the cursor (#129)', async () => {
+    const world = makeWorld();
+    const { announce, refsEvent } = world.snapshot(1000);
+    world.relay.serve([announce, refsEvent, serviceRequest(MAINT, 1100)]);
+    const handle = await world.start();
+    const tip = git(['rev-parse', 'HEAD'], world.srcDir);
+
+    // The owner re-uploads: same refs, later created_at, a different arweave map.
+    const { refsEvent: reuploaded } = repoStateEvents({
+      repoDir: world.srcDir,
+      owner: OWNER,
+      repoId: REPO,
+      createdAt: 2000,
+      arweaveMap: new Map([[tip, 'tx-reuploaded']]),
+    });
+    expect(reuploaded.id).not.toBe(refsEvent.id);
+    expect(reuploaded.tags.filter((t) => t[0] === 'r')).toEqual(
+      refsEvent.tags.filter((t) => t[0] === 'r')
+    );
+    expect(reuploaded.tags).toContainEqual(['arweave', tip, 'tx-reuploaded']);
+    world.relay.push(reuploaded);
+    await handle.idle();
+
+    // Then a byte-identical 30618 (same refs, same map), only later.
+    const { refsEvent: identical } = world.snapshot(2500);
+    world.relay.push(identical);
+    await handle.idle();
+
+    expect(world.runner.requests).toHaveLength(0);
+    expect(publishedKinds(world.publisher)).toEqual([]);
+    // Both events are recorded as processed; the cursor moved on.
+    const cursor = JSON.parse(
+      readFileSync(cursorPath(world.stateDir), 'utf-8')
+    );
+    expect(cursor.repos[ADDR].lastCreatedAt).toBe(2500);
+    expect(cursor.repos[ADDR].lastEventId).toBe(identical.id);
+    expect(cursor.repos[ADDR].processed).toEqual(
+      expect.arrayContaining([reuploaded.id, identical.id])
+    );
+    expect(cursor.repos[ADDR].refs['refs/heads/main']).toBe(tip);
+
+    // A real branch move afterwards still runs, exactly once.
+    push(world, 3000);
+    await handle.idle();
+    expect(world.runner.requests).toHaveLength(1);
+    expect(resultEvents(world.publisher)).toHaveLength(1);
+    await handle.stop();
+  });
+
+  it('a tag move runs only the workflows whose on: push filter matches refs/tags, tagged o=push and r=refs/tags/… (#129)', async () => {
+    const world = makeWorld();
+    writeFileSync(
+      join(world.srcDir, '.github', 'workflows', 'release.yml'),
+      RELEASE_WORKFLOW
+    );
+    git(['add', '.'], world.srcDir);
+    git(['commit', '-m', 'add release workflow'], world.srcDir);
+    const { announce, refsEvent } = world.snapshot(1000);
+    world.relay.serve([announce, refsEvent, serviceRequest(MAINT, 1100)]);
+    const handle = await world.start();
+
+    // Tag the tip: the only ref that moves is refs/tags/v1.
+    git(['tag', 'v1'], world.srcDir);
+    const tip = git(['rev-parse', 'HEAD'], world.srcDir);
+    const { refsEvent: tagged } = world.snapshot(2000);
+    expect(tagged.tags).toContainEqual(['r', 'refs/tags/v1', tip]);
+    world.relay.push(tagged);
+    await handle.idle();
+
+    // ci.yml (branches: [main]) is skipped; release.yml (tags: ['v*']) runs.
+    expect(world.runner.requests.map((r) => r.workflow.path)).toEqual([
+      '.github/workflows/release.yml',
+    ]);
+    expect(must(world.runner.requests[0]).trigger).toMatchObject({
+      reason: 'push',
+      ref: 'refs/tags/v1',
+      commit: tip,
+    });
+    expect(publishedKinds(world.publisher)).toEqual([
+      39842, 39842, 9841, 39842, 9842, 39842,
+    ]);
+    const [result] = resultEvents(world.publisher);
+    expect(must(result).trigger).toMatchObject({
+      reason: 'push',
+      ref: 'refs/tags/v1',
+      workflow: {
+        path: '.github/workflows/release.yml',
+        sha256: sha256Hex(RELEASE_WORKFLOW),
+      },
+    });
+    // The raw event carries `o = push` and `r = refs/tags/v1` (plus the run-id r).
+    const raw = must(world.publisher.ofKind(CI_WORKFLOW_RESULT_KIND)[0]).event
+      .tags;
+    expect(raw).toContainEqual(['o', 'push']);
+    expect(raw).toContainEqual(['r', 'refs/tags/v1']);
+    // The in_progress marker names release.yml's declared job, not ci.yml's.
+    expect(must(progressEvents(world.publisher)[1])).toMatchObject({
+      status: 'in_progress',
+      inProgress: ['publish'],
+    });
+    expect(must(jobEvents(world.publisher)[0]).logTail).toContain(
+      'ran .github/workflows/release.yml'
+    );
+
+    // A branch move on main afterwards runs only ci.yml.
+    push(world, 3000);
+    await handle.idle();
+    expect(world.runner.requests.map((r) => r.workflow.path)).toEqual([
+      '.github/workflows/release.yml',
+      '.github/workflows/ci.yml',
+    ]);
+    expect(must(world.runner.requests[1]).trigger).toMatchObject({
+      reason: 'push',
+      ref: 'refs/heads/main',
+    });
     await handle.stop();
   });
 
