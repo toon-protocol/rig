@@ -490,6 +490,93 @@ describe('rig ci trigger', () => {
     expect(fake.published).toHaveLength(0);
     expect(h.err.join('\n')).toContain('--workflow');
   });
+
+  it('refuses without a coordinator (exit 2 + usage) and without a repo id (unconfigured_repo_address); nothing published', async () => {
+    const h = makeHarness(repoDir, fake);
+    expect(
+      await dispatch(
+        ['ci', 'trigger', '--workflow', '.github/workflows/ci.yml', '--yes'],
+        h.deps
+      )
+    ).toBe(2);
+    expect(
+      await dispatch(
+        [
+          'ci',
+          'trigger',
+          'not-a-key',
+          '--workflow',
+          '.github/workflows/ci.yml',
+          '--yes',
+        ],
+        h.deps
+      )
+    ).toBe(2);
+    expect(h.err.join('\n')).toContain('<coordinator>');
+    expect(h.err.join('\n')).toContain('Usage: rig ci trigger');
+    expect(fake.published).toHaveLength(0);
+
+    // A git repo with the workflow but NO toon config: the sha is computable,
+    // the repo address is not — refused before anything is paid.
+    const bare = makeRepo();
+    try {
+      const h2 = makeHarness(bare, fake);
+      const code = await dispatch(
+        [
+          'ci',
+          'trigger',
+          COORDINATOR,
+          '--workflow',
+          '.github/workflows/ci.yml',
+          '--yes',
+          '--json',
+        ],
+        h2.deps
+      );
+      expect(code).toBe(1);
+      expect(h2.json[0]).toMatchObject({
+        command: 'ci trigger',
+        error: 'unconfigured_repo_address',
+      });
+      expect(fake.published).toHaveLength(0);
+
+      // --repo-id (with --owner and --relay, since nothing is configured) cures it.
+      const h3 = makeHarness(bare, fake);
+      expect(
+        await dispatch(
+          [
+            'ci',
+            'trigger',
+            COORDINATOR,
+            '--workflow',
+            '.github/workflows/ci.yml',
+            '--repo-id',
+            'demo',
+            '--owner',
+            hexToNpub(OWNER),
+            '--relay',
+            RELAY,
+            '--yes',
+            '--json',
+          ],
+          h3.deps
+        )
+      ).toBe(0);
+      expect(fake.published).toHaveLength(1);
+      expect(fake.published[0]?.event.tags).toContainEqual([
+        'a',
+        `30617:${OWNER}:demo`,
+      ]);
+      expect(h3.json[0]).toMatchObject({
+        command: 'ci trigger',
+        kind: 9840,
+        executed: true,
+        repoAddr: { ownerPubkey: OWNER, repoId: 'demo' },
+      });
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -13,6 +13,10 @@
  * paid session (always embedded; the daemon has no NIP-C1 routes) → Runner
  * (act on the host's Docker, or an injected one) → `startCoordinator` →
  * block until SIGINT/SIGTERM (or the injected abort signal) → clean stop.
+ * Under `--once` the block also ends when the first run concludes — its
+ * Workflow Result and final progress marker are on the relay — so one
+ * `rig ci trigger` can be answered by one bounded `rig ci serve --once`
+ * (#127); ignored or refused triggers publish nothing and do not count.
  * Everything the coordinator says goes to stderr; under `--json` stdout
  * carries exactly ONE document, emitted at start, describing what is being
  * served.
@@ -25,9 +29,11 @@ import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { ActRunner, DEFAULT_ACT_PLATFORMS } from '../ci/act-runner.js';
 import {
+  DEFAULT_CONCURRENCY,
   DEFAULT_RUN_TIMEOUT_MS,
   startCoordinator,
   type CanAfford,
+  type ConcludedRun,
   type CoordinatorHandle,
   type CoordinatorRepo,
   type RunCostEstimate,
@@ -76,8 +82,9 @@ Options:
                          or hex; NIP-C1 operator policy); repeatable — for
                          running your own coordinator against a repo you do
                          not maintain; such runs show as lower trust
-  --concurrency <n>      runs executed at once (default 1); more queue
-  --timeout <seconds>    wall-clock budget per run → timed_out (default 1800)
+  --concurrency <n>      runs executed at once (default ${DEFAULT_CONCURRENCY}); more queue
+  --timeout <seconds>    wall-clock budget per run → timed_out
+                         (default ${DEFAULT_RUN_TIMEOUT_MS / 1000})
   --gateway <url>        gateway that serves the store's raw bytes, for log +
                          artifact links (default: ${PREFERRED_GATEWAY})
   --act-bin <path>       the act executable (default: RIG_ACT_BIN, else PATH)
@@ -85,6 +92,9 @@ Options:
                          (default: ubuntu-latest=${DEFAULT_ACT_PLATFORMS['ubuntu-latest']})
   --workdir <dir>        where commits are checked out for runs (default:
                          <state-dir>/work)
+  --once                 stop after the first run concludes (its Workflow
+                         Result and final progress marker are on the relay);
+                         ignored or refused triggers do not count
   --json                 emit ONE JSON document describing the coordinator
                          at start; everything else goes to stderr
   --standalone           accepted for symmetry; the coordinator always runs
@@ -115,6 +125,8 @@ interface ServeFlags {
   actBin?: string;
   platforms?: Record<string, string>;
   workdir?: string;
+  /** Stop after the first run concludes. */
+  once: boolean;
   json: boolean;
 }
 
@@ -133,6 +145,7 @@ function parseServeArgs(args: string[]): ServeFlags | 'help' {
       'act-bin': { type: 'string' },
       platform: { type: 'string', multiple: true },
       workdir: { type: 'string' },
+      once: { type: 'boolean', default: false },
       json: { type: 'boolean', default: false },
       standalone: { type: 'boolean', default: false },
       'no-daemon': { type: 'boolean', default: false },
@@ -196,7 +209,11 @@ function parseServeArgs(args: string[]): ServeFlags | 'help' {
       throw new ServeUsageError(`${flag} expects a positive integer`);
     return n;
   };
-  const concurrency = positiveInt('--concurrency', values.concurrency, 1);
+  const concurrency = positiveInt(
+    '--concurrency',
+    values.concurrency,
+    DEFAULT_CONCURRENCY
+  );
   const timeoutMs =
     positiveInt('--timeout', values.timeout, DEFAULT_RUN_TIMEOUT_MS / 1000) *
     1000;
@@ -225,6 +242,7 @@ function parseServeArgs(args: string[]): ServeFlags | 'help' {
     ...(values['act-bin'] !== undefined ? { actBin: values['act-bin'] } : {}),
     ...(platforms ? { platforms } : {}),
     ...(values.workdir !== undefined ? { workdir: values.workdir } : {}),
+    once: values.once,
     json: values.json,
   };
 }
@@ -318,11 +336,17 @@ export function makeAffordabilityCheck(args: {
   };
 }
 
-/** Resolve on SIGINT/SIGTERM or when `signal` aborts, whichever first. */
-function untilStopRequested(signal: AbortSignal | undefined): Promise<string> {
+/**
+ * Resolve on SIGINT/SIGTERM, when `signal` aborts, or — under `--once` —
+ * when `firstRun` settles, whichever first. The value says why.
+ */
+function untilStopRequested(
+  signal: AbortSignal | undefined,
+  firstRun?: Promise<ConcludedRun>
+): Promise<string | ConcludedRun> {
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (reason: string): void => {
+    const finish = (reason: string | ConcludedRun): void => {
       if (settled) return;
       settled = true;
       process.off('SIGINT', onSigint);
@@ -335,6 +359,7 @@ function untilStopRequested(signal: AbortSignal | undefined): Promise<string> {
     signal?.addEventListener('abort', () => finish('abort'), { once: true });
     process.once('SIGINT', onSigint);
     process.once('SIGTERM', onSigterm);
+    void firstRun?.then(finish);
   });
 }
 
@@ -396,6 +421,14 @@ export async function runCiServe(
     const workdir = flags.workdir ?? join(stateDir, 'work');
     const version = rigVersion();
 
+    // --once: the first concluded run ends the session (see the header).
+    let concludeFirstRun: (run: ConcludedRun) => void = () => undefined;
+    const firstRun = flags.once
+      ? new Promise<ConcludedRun>((resolve) => {
+          concludeFirstRun = resolve;
+        })
+      : undefined;
+
     handle = await startCoordinator({
       coordinatorPubkey: coordinator,
       publisher: ctx.publisher,
@@ -422,6 +455,9 @@ export async function runCiServe(
       ...(forced.fetchFn ? { fetchFn: forced.fetchFn } : {}),
       ...(forced.resolveSha ? { resolveSha: forced.resolveSha } : {}),
       ...(forced.clock ? { clock: forced.clock } : {}),
+      ...(firstRun
+        ? { onRunConcluded: (run: ConcludedRun) => concludeFirstRun(run) }
+        : {}),
       log: (line) => io.err(line),
     });
 
@@ -443,6 +479,7 @@ export async function runCiServe(
         runner: { family: runner.family, selectors: runner.selectors },
         concurrency: flags.concurrency,
         timeoutSeconds: flags.timeoutMs / 1000,
+        once: flags.once,
         stateDir,
         workdir,
         secretsKey: handle.secretsKeyPubkey,
@@ -464,12 +501,19 @@ export async function runCiServe(
       io.out(`State:       ${stateDir}`);
       io.out('Maintainers authorize this coordinator with:');
       io.out(`  rig ci request ${npub}`);
-      io.out('Listening — press Ctrl-C to stop.');
+      io.out(
+        flags.once
+          ? 'Listening for one run — stops after it concludes (or Ctrl-C).'
+          : 'Listening — press Ctrl-C to stop.'
+      );
     }
 
-    const reason = await untilStopRequested(forced.signal);
+    const reason = await untilStopRequested(forced.signal, firstRun);
     io.err(
-      `rig ci serve: ${reason} — stopping (active runs conclude cancelled)`
+      typeof reason === 'string'
+        ? `rig ci serve: ${reason} — stopping (active runs conclude cancelled)`
+        : `rig ci serve: run ${reason.runId.slice(0, 8)} concluded ${reason.conclusion} ` +
+            `(result ${reason.resultEventId.slice(0, 8)}) — --once, stopping`
     );
     await handle.stop();
     handle = undefined;
