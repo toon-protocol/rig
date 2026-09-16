@@ -3,6 +3,7 @@ import { MemoryRouter, Outlet, Route, Routes } from 'react-router';
 import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest';
 import type { RepoContext } from '@/app/repo-layout';
 import type { CiRun, CiJobResult } from '../nip-c1-parsers.js';
+import { PREFERRED_GATEWAY } from '../gateway-preference.js';
 
 vi.mock('@/hooks/use-ci-runs', () => ({
   useCiRuns: vi.fn(),
@@ -275,5 +276,50 @@ describe('[P1] RunDetailPage', () => {
     });
     renderAt('/npub1owner/demo/actions/nope');
     expect(screen.getByText('Run not found.')).toBeInTheDocument();
+  });
+});
+
+describe('[P1] RunDetailPage store gateway links (rig#132)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('re-points a testnet-gateway log or artifact link to the preferred gateway and leaves a sandbox store link alone', () => {
+    mockUseCiRun.mockReturnValue({
+      run: run(),
+      jobs: [
+        job({
+          logsUrl: 'https://ar-io.dev/raw/tx-log',
+          artifacts: [
+            {
+              url: 'https://ar-io.dev/raw/tx-art',
+              filename: 'dist/index.js',
+              name: 'dist',
+            },
+            {
+              url: 'http://localhost:3000/raw/tx-local',
+              filename: 'coverage.txt',
+              name: 'coverage',
+            },
+          ],
+        }),
+      ],
+      loading: false,
+      error: null,
+    });
+    renderAt('/npub1owner/demo/actions/run-1');
+    expect(PREFERRED_GATEWAY).not.toMatch(/ar-io\.dev/);
+    expect(screen.getByRole('link', { name: /full log/i })).toHaveAttribute(
+      'href',
+      `${PREFERRED_GATEWAY}/raw/tx-log`
+    );
+    expect(screen.getByRole('link', { name: 'dist/index.js' })).toHaveAttribute(
+      'href',
+      `${PREFERRED_GATEWAY}/raw/tx-art`
+    );
+    expect(screen.getByRole('link', { name: 'coverage.txt' })).toHaveAttribute(
+      'href',
+      'http://localhost:3000/raw/tx-local'
+    );
   });
 });

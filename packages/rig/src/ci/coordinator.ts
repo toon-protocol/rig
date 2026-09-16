@@ -158,6 +158,16 @@ export interface RunCostEstimate {
 
 export type CanAfford = (estimate: RunCostEstimate) => Promise<boolean>;
 
+/** What {@link CoordinatorOptions.onRunConcluded} reports: a run whose result is on the relay. */
+export interface ConcludedRun {
+  runId: string;
+  repoAddr: RepoAddress;
+  trigger: CiTriggerContext;
+  conclusion: CiConclusion;
+  /** Event id of the run's Workflow Result (9842). */
+  resultEventId: string;
+}
+
 export interface CoordinatorOptions {
   /** Hex pubkey of the coordinator identity (the publisher signs as it). */
   coordinatorPubkey: string;
@@ -201,6 +211,14 @@ export interface CoordinatorOptions {
   advertisementTtlSeconds?: number;
   /** Keep checkouts after their runs (default: delete). */
   keepCheckouts?: boolean;
+  /**
+   * Called once per run after its Workflow Result (9842) and final
+   * `concluded` progress marker are published — including runs that never
+   * reached the Runner (`startup_failure`, `cancelled`). Ignored or refused
+   * triggers publish nothing and never reach it. `rig ci serve --once`
+   * stops on the first call.
+   */
+  onRunConcluded?: (run: ConcludedRun) => void;
 }
 
 export interface CoordinatorHandle {
@@ -268,6 +286,10 @@ interface QueuedRun {
   manualProvenance?: CiProvenance;
   runId: string;
   queuedAt: number;
+  /** Set while the run executes, so a superseding PR update can abort it. */
+  abort?: AbortController;
+  /** A later update to the same pull request replaced this run's tip. */
+  superseded?: boolean;
 }
 
 /** Runs executed at once (`--concurrency`). */
@@ -561,6 +583,7 @@ export async function startCoordinator(
   // ── Run queue + concurrency slots ───────────────────────────────────────
   const queue: QueuedRun[] = [];
   const activeAborts = new Set<AbortController>();
+  const activeRuns = new Set<QueuedRun>();
   let active = 0;
   let inflight = 0; // triggers being handled + runs active
   const idleWaiters: (() => void)[] = [];
@@ -602,13 +625,22 @@ export async function startCoordinator(
       jobs: [] as CiJobQuote[],
     };
     const now = clock();
-    await publish(buildCiWorkflowResult({ ...base, conclusion }, now));
+    const resultEventId = await publish(
+      buildCiWorkflowResult({ ...base, conclusion }, now)
+    );
     await publish(
       buildCiWorkflowProgress(
         { ...base, status: 'concluded', conclusion, expiresAt: now + adTtl },
         now
       )
     );
+    opts.onRunConcluded?.({
+      runId: run.runId,
+      repoAddr: run.repo.addr,
+      trigger: run.trigger,
+      conclusion,
+      resultEventId,
+    });
   };
 
   const executeRun = async (run: QueuedRun): Promise<void> => {
@@ -691,6 +723,7 @@ export async function startCoordinator(
 
     const abort = new AbortController();
     activeAborts.add(abort);
+    run.abort = abort;
     let timedOut = false;
     const timeoutHandle = scheduler.setTimeout(() => {
       timedOut = true;
@@ -746,7 +779,8 @@ export async function startCoordinator(
     }
     let conclusion = result.conclusion;
     if (timedOut) conclusion = 'timed_out';
-    else if (stopping && abort.signal.aborted) conclusion = 'cancelled';
+    else if (run.superseded || (stopping && abort.signal.aborted))
+      conclusion = 'cancelled';
 
     // Per job: upload the log (+ artifacts), publish 9841, renew 39842.
     for (const job of result.jobs) {
@@ -814,7 +848,7 @@ export async function startCoordinator(
     }
 
     const now = clock();
-    await publish(
+    const resultEventId = await publish(
       buildCiWorkflowResult(
         {
           trigger,
@@ -830,6 +864,13 @@ export async function startCoordinator(
     );
     await publish(progress('concluded', conclusion));
     log(`[ci] ${label}: ${conclusion}`);
+    opts.onRunConcluded?.({
+      runId: run.runId,
+      repoAddr: repo.addr,
+      trigger,
+      conclusion,
+      resultEventId,
+    });
   };
 
   const pump = (): void => {
@@ -837,6 +878,7 @@ export async function startCoordinator(
       const run = queue.shift() as QueuedRun;
       active += 1;
       inflight += 1;
+      activeRuns.add(run);
       void executeRun(run)
         .catch((err) => {
           log(
@@ -844,6 +886,7 @@ export async function startCoordinator(
           );
         })
         .finally(async () => {
+          activeRuns.delete(run);
           active -= 1;
           inflight -= 1;
           await releaseCheckout(run.checkout);
@@ -913,6 +956,40 @@ export async function startCoordinator(
       `[ci] queued ${workflow.path} for ${repo.repoId}@${trigger.commit.slice(0, 7)} [${run.runId.slice(0, 8)}]`
     );
     pump();
+  };
+
+  /**
+   * A PR update supersedes the previous tip (#130): every run for the same
+   * pull request that has not concluded is cancelled before the update's
+   * own runs are queued. A still-queued run concludes `cancelled` from the
+   * queue without reaching the Runner; an active one is aborted and its
+   * Workflow Result + final progress marker say `cancelled`.
+   */
+  const supersedePrRuns = async (
+    repo: RepoRuntime,
+    prEventId: string,
+    updateEventId: string
+  ): Promise<void> => {
+    const samePr = (run: QueuedRun): boolean =>
+      run.repo === repo && run.trigger.pr?.prEventId === prEventId;
+    const why = `superseded by PR update ${updateEventId.slice(0, 8)} — cancelled`;
+    for (const run of queue.filter(samePr)) {
+      queue.splice(queue.indexOf(run), 1);
+      run.superseded = true;
+      log(
+        `[ci] ${repo.repoId} ${run.workflow.path}@${run.trigger.commit.slice(0, 7)} [${run.runId.slice(0, 8)}]: queued run ${why}`
+      );
+      await concludeWithoutJobs(run, 'cancelled', undefined);
+      await releaseCheckout(run.checkout);
+    }
+    for (const run of activeRuns) {
+      if (!samePr(run) || run.superseded) continue;
+      run.superseded = true;
+      log(
+        `[ci] ${repo.repoId} ${run.workflow.path}@${run.trigger.commit.slice(0, 7)} [${run.runId.slice(0, 8)}]: ${why}`
+      );
+      run.abort?.abort();
+    }
   };
 
   // ── Trigger handling: materialize → discover → enqueue ──────────────────
@@ -1217,6 +1294,7 @@ export async function startCoordinator(
       );
       return;
     }
+    await supersedePrRuns(repo, pr.id, ev.id);
     await handleTrigger({
       repo,
       reason: 'pull_request',
