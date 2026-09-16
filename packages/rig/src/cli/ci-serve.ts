@@ -29,6 +29,7 @@ import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { ActRunner, DEFAULT_ACT_PLATFORMS } from '../ci/act-runner.js';
 import {
+  DEFAULT_CONCURRENCY,
   DEFAULT_RUN_TIMEOUT_MS,
   startCoordinator,
   type CanAfford,
@@ -81,8 +82,9 @@ Options:
                          or hex; NIP-C1 operator policy); repeatable — for
                          running your own coordinator against a repo you do
                          not maintain; such runs show as lower trust
-  --concurrency <n>      runs executed at once (default 1); more queue
-  --timeout <seconds>    wall-clock budget per run → timed_out (default 1800)
+  --concurrency <n>      runs executed at once (default ${DEFAULT_CONCURRENCY}); more queue
+  --timeout <seconds>    wall-clock budget per run → timed_out
+                         (default ${DEFAULT_RUN_TIMEOUT_MS / 1000})
   --gateway <url>        gateway that serves the store's raw bytes, for log +
                          artifact links (default: ${PREFERRED_GATEWAY})
   --act-bin <path>       the act executable (default: RIG_ACT_BIN, else PATH)
@@ -207,7 +209,11 @@ function parseServeArgs(args: string[]): ServeFlags | 'help' {
       throw new ServeUsageError(`${flag} expects a positive integer`);
     return n;
   };
-  const concurrency = positiveInt('--concurrency', values.concurrency, 1);
+  const concurrency = positiveInt(
+    '--concurrency',
+    values.concurrency,
+    DEFAULT_CONCURRENCY
+  );
   const timeoutMs =
     positiveInt('--timeout', values.timeout, DEFAULT_RUN_TIMEOUT_MS / 1000) *
     1000;
