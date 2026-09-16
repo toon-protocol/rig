@@ -33,6 +33,7 @@ import {
   repoAddress,
   type CiArtifact,
   type CiConclusion,
+  type CiPrContext,
   type CiProgressStatus,
   type CiProvenance,
   type CiTriggerReason,
@@ -105,9 +106,22 @@ export interface CiStatusJob {
   logsUrl?: string;
   artifacts: CiArtifact[];
   exitCode?: number;
+  queuedAt?: number;
   startedAt?: number;
+  /** The 9841's `created_at`: when the runner published this conclusion. */
+  concludedAt: number;
   eventId: string;
   publisher: string;
+}
+
+/**
+ * A `pull_request` run's NIP-22 context (the PR as root, the PR or PR Update
+ * that supplied the commit as parent) plus whether the PR author is the repo
+ * owner or a declared maintainer — derived here from the 30617, never from
+ * anything the coordinator asserts (#130).
+ */
+export interface CiStatusPullRequest extends CiPrContext {
+  authorIsMaintainer: boolean;
 }
 
 export interface CiStatusRun {
@@ -122,6 +136,8 @@ export interface CiStatusRun {
   startedAt?: number;
   queuedAt?: number;
   provenance?: CiProvenance;
+  /** Present exactly when the run was triggered by a pull request. */
+  pr?: CiStatusPullRequest;
   jobs: CiStatusJob[];
   /** Event id of the 9842 (concluded) or the latest 39842. */
   eventId: string;
@@ -335,7 +351,9 @@ export function assembleCiStatus(opts: AssembleStatusOptions): {
         ...(j.logsUrl !== undefined ? { logsUrl: j.logsUrl } : {}),
         artifacts: j.artifacts,
         ...(j.exitCode !== undefined ? { exitCode: j.exitCode } : {}),
+        ...(j.queuedAt !== undefined ? { queuedAt: j.queuedAt } : {}),
         ...(j.startedAt !== undefined ? { startedAt: j.startedAt } : {}),
+        concludedAt: j.createdAt,
         eventId: j.eventId,
         publisher: j.pubkey,
       }));
@@ -365,6 +383,16 @@ export function assembleCiStatus(opts: AssembleStatusOptions): {
       ...(startedAt !== undefined ? { startedAt } : {}),
       ...(queuedAt !== undefined ? { queuedAt } : {}),
       ...(provenance ? { provenance } : {}),
+      ...(base.trigger.pr
+        ? {
+            pr: {
+              ...base.trigger.pr,
+              authorIsMaintainer: opts.authorized.has(
+                base.trigger.pr.prAuthor.toLowerCase()
+              ),
+            },
+          }
+        : {}),
       jobs: runJobs,
       eventId: base.eventId,
     });
@@ -609,6 +637,16 @@ function glyph(run: CiStatusRun): string {
   return GREEN.has(run.conclusion) ? '✓' : '✗';
 }
 
+/** `    pull request <id>  by <npub> (author is a maintainer)[  via update <id>]` */
+function pullRequestLine(pr: CiStatusPullRequest): string {
+  const who = pr.authorIsMaintainer
+    ? 'author is a maintainer'
+    : 'author is not a maintainer';
+  const via =
+    pr.sourceEventId !== pr.prEventId ? `  via update ${pr.sourceEventId}` : '';
+  return `    pull request ${pr.prEventId}  by ${shortNpub(pr.prAuthor)} (${who})${via}`;
+}
+
 function shortNpub(hex: string): string {
   try {
     const npub = hexToNpub(hex);
@@ -618,7 +656,16 @@ function shortNpub(hex: string): string {
   }
 }
 
-/** Human lines: one per run (newest first), jobs indented, then the verdict. */
+/** `  took 12s` from a start instant to an end instant; '' when unknown. */
+function tookSuffix(startedAt: number | undefined, endedAt: number): string {
+  if (startedAt === undefined) return '';
+  return `  took ${Math.max(0, endedAt - startedAt)}s`;
+}
+
+/**
+ * Human lines: one per run (newest first) with its wall-clock time once
+ * concluded, jobs indented with their durations, then the verdict.
+ */
 export function renderStatus(report: CiStatusReport): string[] {
   const lines: string[] = [];
   lines.push(
@@ -630,16 +677,22 @@ export function renderStatus(report: CiStatusReport): string[] {
   for (const run of report.runs) {
     const state =
       run.status === 'concluded' ? (run.conclusion ?? 'concluded') : run.status;
+    const took =
+      run.status === 'concluded'
+        ? tookSuffix(run.startedAt, run.createdAt)
+        : '';
     lines.push(
       `${glyph(run)} ${state.padEnd(15)} ${run.workflow.path}  ${run.reason}  ` +
-        `coordinator ${shortNpub(run.coordinator)}  trust ${run.trust}`
+        `coordinator ${shortNpub(run.coordinator)}  trust ${run.trust}${took}`
     );
     for (const job of run.jobs) {
       const extra = job.exitCode !== undefined ? ` (exit ${job.exitCode})` : '';
       lines.push(
-        `    ${job.conclusion.padEnd(15)} ${job.name ?? job.jobId}${extra}`
+        `    ${job.conclusion.padEnd(15)} ${job.name ?? job.jobId}${extra}` +
+          tookSuffix(job.startedAt, job.concludedAt)
       );
     }
+    if (run.pr) lines.push(pullRequestLine(run.pr));
   }
   const s = report.summary;
   const verdict = report.ok

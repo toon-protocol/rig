@@ -51,6 +51,7 @@ import {
   generateSecretsKey,
   RESERVED_SECRET_NAMES,
   SECRET_NAME_RE,
+  serializeSecretUpdate,
   type SecretUpdatePlaintext,
 } from '../ci/secrets.js';
 import { sha256Hex } from '../ci/workflows.js';
@@ -639,10 +640,14 @@ async function gitShowBytes(
 // rig ci secret set | remove
 // ---------------------------------------------------------------------------
 
-function assertSecretName(name: string): void {
+/**
+ * Name grammar + the reserved name. Never echoes the argument: a mistyped
+ * `rig ci secret set <c> hunter2` (no `NAME=`) would otherwise print the value.
+ */
+function assertSecretName(name: string, position: number): void {
   if (!SECRET_NAME_RE.test(name)) {
     throw new Error(
-      `invalid secret name ${JSON.stringify(name)} — must match [A-Z_][A-Z0-9_]*`
+      `invalid secret name in argument ${position} — NAME must match [A-Z_][A-Z0-9_]* (the argument is not shown)`
     );
   }
   if (RESERVED_SECRET_NAMES.includes(name)) {
@@ -696,17 +701,18 @@ async function runCiSecret(args: string[], deps: CiDeps): Promise<number> {
       );
     }
     const seen = new Set<string>();
-    for (const entry of entries) {
+    for (const [index, entry] of entries.entries()) {
+      const position = index + 1;
       const eq = entry.indexOf('=');
       const name = eq === -1 ? entry : entry.slice(0, eq);
-      assertSecretName(name);
+      assertSecretName(name, position);
       if (seen.has(name))
         throw new Error(`secret name ${name} given more than once`);
       seen.add(name);
       if (sub === 'remove') {
         if (eq !== -1)
           throw new Error(
-            `rig ci secret remove takes bare names (got ${JSON.stringify(entry)})`
+            `rig ci secret remove takes bare names — argument ${position} is NAME=value`
           );
         remove.push(name);
       } else if (eq === -1) {
@@ -717,30 +723,35 @@ async function runCiSecret(args: string[], deps: CiDeps): Promise<number> {
         }
         stdinName = name;
       } else {
-        const value = entry.slice(eq + 1);
-        if (value === '') throw new Error(`secret ${name} has an empty value`);
-        set[name] = value;
+        set[name] = entry.slice(eq + 1);
       }
     }
+    if (stdinName !== undefined) {
+      const value = io.isInteractive
+        ? ''
+        : await (deps.readStdin ?? defaultReadStdin)();
+      // Trailing newline from `echo`/heredocs is never part of a secret.
+      const trimmed = value.replace(/\r?\n$/, '');
+      if (trimmed === '') {
+        throw new Error(
+          `secret ${stdinName}: no value on stdin (pipe the value, or pass ${stdinName}=<value>)`
+        );
+      }
+      set[stdinName] = trimmed;
+    }
+    // Every NIP-C1 limit — empty or oversized values, too many names, the
+    // whole-plaintext bound — before any relay or wallet is touched. The real
+    // author and created_at are bound later; their serialized width is fixed.
+    serializeSecretUpdate({
+      author: '0'.repeat(64),
+      created_at: 9_999_999_999,
+      set,
+      remove,
+    });
   } catch (err) {
     io.err(err instanceof Error ? err.message : String(err));
     io.err(CI_SECRET_USAGE);
     return 2;
-  }
-
-  if (stdinName !== undefined) {
-    const value = io.isInteractive
-      ? ''
-      : await (deps.readStdin ?? defaultReadStdin)();
-    // Trailing newline from `echo`/heredocs is never part of a secret.
-    const trimmed = value.replace(/\r?\n$/, '');
-    if (trimmed === '') {
-      io.err(
-        `secret ${stdinName}: no value on stdin (pipe the value, or pass ${stdinName}=<value>)`
-      );
-      return 2;
-    }
-    set[stdinName] = trimmed;
   }
 
   const names = [...Object.keys(set), ...remove];

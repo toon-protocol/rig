@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import type { NostrEvent } from './nip34-parsers.js';
 import {
+  CI_ADVERTISEMENT_KIND,
   CI_JOB_RESULT_KIND,
   CI_SERVICE_REQUEST_KIND,
   CI_SERVICE_STOP_KIND,
@@ -18,6 +19,7 @@ import {
   buildCiRuns,
   controlOrder,
   deriveTrustLevel,
+  parseCiAdvertisement,
   parseCiJobResult,
   parseCiServiceControl,
   parseCiTriggerContext,
@@ -767,5 +769,88 @@ describe('buildCiRuns + aggregateRunStatus', () => {
       aggregateRunStatus([mk('concluded', 'failure'), mk('in_progress')])
     ).toBe('pending');
     expect(aggregateRunStatus([mk('concluded', 'neutral')])).toBe('neutral');
+  });
+});
+
+describe('parseCiAdvertisement (19843)', () => {
+  const NOW = 1_700_000_000;
+  const SECRETS_KEY = '77'.repeat(32);
+  const adTags = (): string[][] => [
+    ['software', 'rig', '4.3.0'],
+    ['W', 'act'],
+    ['R', 'act:ubuntu-latest'],
+    ['R', 'act:Ubuntu-24.04'],
+    ['M', 'maintainer-request'],
+    ['X', 'request-required'],
+    ['B', 'out-of-band'],
+    ['secrets-key', 'nip44-v2', SECRETS_KEY, RELAY],
+    ['expiration', String(NOW + 900)],
+  ];
+  const ad = (tags = adTags(), overrides: Partial<NostrEvent> = {}) =>
+    event({ kind: CI_ADVERTISEMENT_KIND, created_at: NOW, tags, ...overrides });
+  const without = (name: string) => adTags().filter((t) => t[0] !== name);
+  const replacing = (name: string, tag: string[]) =>
+    adTags().map((t) => (t[0] === name ? tag : t));
+
+  it('round-trips a full advertisement, case-folding and de-duplicating W/R', () => {
+    const ev = ad([...adTags(), ['W', 'ACT'], ['R', 'act:ubuntu-latest']]);
+    expect(parseCiAdvertisement(ev)).toEqual({
+      eventId: ev.id,
+      pubkey: COORD,
+      createdAt: NOW,
+      version: '4.3.0',
+      families: ['act'],
+      selectors: ['act:ubuntu-latest', 'act:ubuntu-24.04'],
+      admission: 'maintainer-request',
+      execution: 'request-required',
+      billing: 'out-of-band',
+      secretsKey: { pubkey: SECRETS_KEY, inboxRelays: [RELAY] },
+      expiresAt: NOW + 900,
+    });
+  });
+
+  it('omits billing, secrets-key and version when the tags are absent', () => {
+    const parsed = parseCiAdvertisement(
+      ad(
+        adTags().filter(
+          (t) => !['B', 'secrets-key', 'software'].includes(t[0] ?? '')
+        )
+      )
+    );
+    expect(parsed).toMatchObject({
+      admission: 'maintainer-request',
+      execution: 'request-required',
+      version: '',
+    });
+    expect(parsed?.billing).toBeUndefined();
+    expect(parsed?.secretsKey).toBeUndefined();
+  });
+
+  it('rejects everything that is not an advertisement per the NIP', () => {
+    const cases: Record<string, NostrEvent> = {
+      'wrong kind': { ...ad(), kind: CI_SERVICE_REQUEST_KIND },
+      'non-empty content': ad(adTags(), { content: 'hi' }),
+      'a d tag': ad([...adTags(), ['d', 'x']]),
+      'missing M': ad(without('M')),
+      'unknown X': ad(replacing('X', ['X', 'whenever'])),
+      'two X': ad([...adTags(), ['X', 'automatic']]),
+      'unknown B': ad(replacing('B', ['B', 'prepaid'])),
+      'missing expiration': ad(without('expiration')),
+      'expiration not after created_at': ad(
+        replacing('expiration', ['expiration', String(NOW)])
+      ),
+      'R under an unadvertised family': ad([...adTags(), ['R', 'docker:x']]),
+      'W without any R': ad(without('R')),
+      'a family with no selector': ad([...adTags(), ['W', 'docker']]),
+      'secrets-key without an inbox relay': ad(
+        replacing('secrets-key', ['secrets-key', 'nip44-v2', SECRETS_KEY])
+      ),
+      'secrets-key with an unknown scheme': ad(
+        replacing('secrets-key', ['secrets-key', 'nip04', SECRETS_KEY, RELAY])
+      ),
+    };
+    for (const [label, ev] of Object.entries(cases)) {
+      expect(parseCiAdvertisement(ev), label).toBeNull();
+    }
   });
 });

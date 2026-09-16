@@ -8,13 +8,17 @@
 import { describe, it, expect } from 'vitest';
 import { getPublicKey } from 'nostr-tools/pure';
 import {
+  MIN_REDACTED_BYTES,
   RESERVED_SECRET_NAMES,
   SECRET_NAME_RE,
   applySecretUpdate,
+  containsSecretValue,
   decryptSecretUpdate,
   effectiveSecrets,
   encryptSecretUpdate,
   generateSecretsKey,
+  redactSecretValues,
+  serializeSecretUpdate,
   validateSecretUpdate,
   type SecretInventory,
   type SecretUpdatePlaintext,
@@ -250,5 +254,84 @@ describe('inventory ordering', () => {
       'ff'.repeat(32)
     );
     expect(inv['A']?.value).toBe('from-00');
+  });
+});
+
+describe('redactSecretValues', () => {
+  it('replaces every occurrence of every value with ***, longest value first', () => {
+    expect(
+      redactSecretValues('a=hunter2 b=hunter2_long c=hunter2', [
+        'hunter2',
+        'hunter2_long',
+      ])
+    ).toBe('a=*** b=*** c=***');
+  });
+
+  it('treats values literally (no regex metacharacters) and ignores empty ones', () => {
+    expect(redactSecretValues('x a+b(c) y', ['a+b(c)', ''])).toBe('x *** y');
+    expect(redactSecretValues('x a+b(c) y', ['.+b(c)'])).toBe('x a+b(c) y');
+  });
+
+  it('redacts each line of a multi-line value, however it is indented, and CRLF values', () => {
+    const pem = '-----BEGIN KEY-----\nMIIabc+/=\nZZZZ\n-----END KEY-----';
+    const log =
+      'key: |\n    -----BEGIN KEY-----\n    MIIabc+/=\n    ZZZZ\n    -----END KEY-----\ndone\n';
+    expect(redactSecretValues(log, [pem])).toBe(
+      'key: |\n    ***\n    ***\n    ***\n    ***\ndone\n'
+    );
+    expect(redactSecretValues('a\r\nb1234\r\n', ['line1\r\nb1234'])).toBe(
+      'a\r\n***\r\n'
+    );
+  });
+
+  it('redacts the URL-encoded and JSON-escaped forms tools print in errors', () => {
+    const value = 'p@ss/w"rd';
+    expect(
+      redactSecretValues(
+        `fatal: https://u:p%40ss%2Fw%22rd@host and "p@ss/w\\"rd" and ${value}`,
+        [value]
+      )
+    ).toBe('fatal: https://u:***@host and "***" and ***');
+  });
+
+  it('leaves values (and lines) shorter than MIN_REDACTED_BYTES alone', () => {
+    expect(MIN_REDACTED_BYTES).toBe(4);
+    expect(redactSecretValues('exit 1 at 10:11', ['1', 'us', 'abc'])).toBe(
+      'exit 1 at 10:11'
+    );
+    expect(redactSecretValues('x abcd y', ['abcd'])).toBe('x *** y');
+  });
+
+  it('returns the text unchanged when there is nothing to redact', () => {
+    expect(redactSecretValues('plain log\n', [])).toBe('plain log\n');
+    expect(redactSecretValues('plain log\n', ['absent'])).toBe('plain log\n');
+  });
+});
+
+describe('containsSecretValue', () => {
+  it('finds a value, one of its lines, or an encoded form in raw bytes', () => {
+    const values = ['hunter2', 'L1\nline-two'];
+    expect(containsSecretValue(Buffer.from('token=hunter2\n'), values)).toBe(
+      true
+    );
+    expect(containsSecretValue(Buffer.from('  line-two  '), values)).toBe(true);
+    expect(containsSecretValue(Buffer.from('clean\n'), values)).toBe(false);
+    expect(containsSecretValue(new Uint8Array([0, 1, 2, 255]), values)).toBe(
+      false
+    );
+  });
+});
+
+describe('serializeSecretUpdate', () => {
+  it('is what encryptSecretUpdate encrypts and enforces every limit', () => {
+    expect(JSON.parse(serializeSecretUpdate(PLAIN))).toEqual(PLAIN);
+    const big: Record<string, string> = {};
+    for (let i = 0; i < 5; i++) big[`B${i}`] = 'x'.repeat(16000);
+    expect(() =>
+      serializeSecretUpdate({ ...PLAIN, set: big, remove: [] })
+    ).toThrow(/65535/);
+    expect(() =>
+      serializeSecretUpdate({ ...PLAIN, set: { A: '' }, remove: [] })
+    ).toThrow(/non-empty/);
   });
 });
