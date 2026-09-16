@@ -211,6 +211,7 @@ function makeServeWorld() {
     srcDir,
     relay,
     publisher,
+    gateway,
     snapshot,
     abort,
     rec,
@@ -384,6 +385,75 @@ describe('rig ci serve: a serve session', () => {
     expect(await running).toBe(0);
     expect(world.rec.json).toHaveLength(1);
     expect(world.rec.err.some((l) => l.startsWith('[ci]'))).toBe(true);
+  });
+
+  /**
+   * A gateway shaped like the sandbox's (and any ar.io node behind a
+   * sandboxing redirect): plain `/<txId>` is NOT served, only the store's
+   * raw-bytes route `/raw/<txId>` is. Every other host is unreachable, so a
+   * run can only succeed if the coordinator reads through the named gateway.
+   */
+  function rawRouteOnlyGateway(world: ReturnType<typeof makeServeWorld>) {
+    const seen: string[] = [];
+    world.deps.fetchFn = async (url, init) => {
+      seen.push(url);
+      const parsed = new URL(url);
+      const raw = /^\/raw\/([^/]+)$/.exec(parsed.pathname);
+      if (parsed.host !== 'gw.test' || raw === null) {
+        return { ok: false, arrayBuffer: async () => new ArrayBuffer(0) };
+      }
+      return world.gateway.fetchFn(`https://gw.test/${raw[1]}`, init);
+    };
+    return seen;
+  }
+
+  it('reads objects through --gateway (<url>/raw/<txId>) before the shared gateway list (#134)', async () => {
+    const world = makeServeWorld();
+    const seen = rawRouteOnlyGateway(world);
+    const running = runCiServe(
+      ['--relay', RELAY, '--repo', REPO_FLAG, '--gateway', 'https://gw.test/'],
+      world.deps
+    );
+    await waitFor(
+      () => world.publisher.ofKind(CI_ADVERTISEMENT_KIND).length === 1,
+      'the advertisement'
+    );
+    world.push(2000);
+    await waitFor(
+      () => world.publisher.ofKind(CI_WORKFLOW_RESULT_KIND).length === 1,
+      'the workflow result'
+    );
+    expect(world.runner.requests).toHaveLength(1);
+    // Every object came from the named gateway's raw route; nothing fell
+    // through to the shared list.
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((u) => u.startsWith('https://gw.test/raw/'))).toBe(true);
+    world.abort.abort();
+    expect(await running).toBe(0);
+  });
+
+  it('RIG_ARWEAVE_GATEWAY names the gateway when --gateway is absent, for links and reads alike (#134)', async () => {
+    const world = makeServeWorld();
+    const seen = rawRouteOnlyGateway(world);
+    world.deps.env = {
+      ...world.deps.env,
+      RIG_ARWEAVE_GATEWAY: 'https://gw.test',
+    };
+    const running = runCiServe(
+      ['--relay', RELAY, '--repo', REPO_FLAG, '--json'],
+      world.deps
+    );
+    await waitFor(() => world.rec.json.length === 1, 'the JSON document');
+    expect(world.rec.json[0]).toMatchObject({ gateway: 'https://gw.test' });
+    world.push(2000);
+    await waitFor(
+      () => world.publisher.ofKind(CI_WORKFLOW_RESULT_KIND).length === 1,
+      'the workflow result'
+    );
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((u) => u.startsWith('https://gw.test/raw/'))).toBe(true);
+    world.abort.abort();
+    expect(await running).toBe(0);
   });
 
   it('reports a session failure as a CLI error and stops the context', async () => {

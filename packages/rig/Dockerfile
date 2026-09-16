@@ -15,8 +15,17 @@
 #     -v /var/run/docker.sock:/var/run/docker.sock \
 #     -v rig-ci-state:/state \
 #     -e RIG_MNEMONIC='<the coordinator phrase>' \
-#     -e TOON_CONNECTOR=http://host.docker.internal:3200 \
-#     rig-ci ci serve --relay ws://host.docker.internal:7100 --repo <owner>/<repo-id>
+#     -e TOON_CONNECTOR=https://<connector> \
+#     -e RIG_ARWEAVE_GATEWAY=https://<gateway> \
+#     rig-ci ci serve --relay wss://<relay> --repo <owner>/<repo-id>
+#
+# Every environment variable rig honours means the same here (TOON_CLIENT_*,
+# RIG_*); RIG_ARWEAVE_GATEWAY (or --gateway) is both where log links point and
+# the first gateway the coordinator reads objects through. Against the sandbox
+# on the same host add `--network host` and use its localhost addresses: a
+# client dials the endpoint a node ADVERTISES, and the sandbox hub advertises
+# http://127.0.0.1:3200/ilp (sandbox-only). The README's "Packaging" section
+# has the full sandbox command.
 #
 # Later this image is what a TOON workload spawns (TOON_Network #14 asks the
 # provider for a docker capability for exactly this reason): the coordinator

@@ -40,6 +40,7 @@ import {
 } from '../standalone/channel-map.js';
 import type { Runner } from '../ci/runner.js';
 import { defaultCoordinatorStateDir } from '../ci/state.js';
+import { ARWEAVE_GATEWAYS } from '@toon-protocol/arweave';
 import { PREFERRED_GATEWAY } from '../gateway-preference.js';
 import { hexToNpub, ownerToHex } from '../npub.js';
 import type { CiDeps } from './ci.js';
@@ -78,8 +79,11 @@ Options:
                          not maintain; such runs show as lower trust
   --concurrency <n>      runs executed at once (default 1); more queue
   --timeout <seconds>    wall-clock budget per run → timed_out (default 1800)
-  --gateway <url>        gateway that serves the store's raw bytes, for log +
-                         artifact links (default: ${PREFERRED_GATEWAY})
+  --gateway <url>        gateway that serves the store's raw bytes: where log +
+                         artifact links point, and the first place the
+                         coordinator reads objects from (<url>/raw/<txId>)
+                         before the shared gateway list (default:
+                         RIG_ARWEAVE_GATEWAY, else ${PREFERRED_GATEWAY})
   --act-bin <path>       the act executable (default: RIG_ACT_BIN, else PATH)
   --platform <label=img> runs-on label → Docker image; repeatable
                          (default: ubuntu-latest=${DEFAULT_ACT_PLATFORMS['ubuntu-latest']})
@@ -111,7 +115,8 @@ interface ServeFlags {
   requesters: string[];
   concurrency: number;
   timeoutMs: number;
-  gateway: string;
+  /** `--gateway` as given; absent → RIG_ARWEAVE_GATEWAY, else the preferred one. */
+  gateway?: string;
   actBin?: string;
   platforms?: Record<string, string>;
   workdir?: string;
@@ -221,7 +226,7 @@ function parseServeArgs(args: string[]): ServeFlags | 'help' {
     requesters,
     concurrency,
     timeoutMs,
-    gateway: values.gateway ?? PREFERRED_GATEWAY,
+    ...(values.gateway !== undefined ? { gateway: values.gateway } : {}),
     ...(values['act-bin'] !== undefined ? { actBin: values['act-bin'] } : {}),
     ...(platforms ? { platforms } : {}),
     ...(values.workdir !== undefined ? { workdir: values.workdir } : {}),
@@ -360,6 +365,21 @@ export async function runCiServe(
     return 2;
   }
 
+  // The gateway that serves the store's raw bytes — `--gateway`, else
+  // RIG_ARWEAVE_GATEWAY (the variable `rig push` and `rig site` honour), else
+  // rig's preferred public gateway. It is where log/artifact links point AND
+  // the first place the coordinator reads objects from, on the store's
+  // raw-bytes route `<gateway>/raw/<txId>`, ahead of the shared public list:
+  // a private or local gateway (the sandbox's answers only on /raw/) is
+  // otherwise unreachable on the read path, and a public one serves the same
+  // bytes there as at `/<txId>`.
+  const gateway = (
+    flags.gateway ??
+    forced.env['RIG_ARWEAVE_GATEWAY'] ??
+    PREFERRED_GATEWAY
+  ).replace(/\/+$/, '');
+  const readGateways = [`${gateway}/raw`, ...ARWEAVE_GATEWAYS];
+
   // Runner first: a missing act binary must fail BEFORE the identity is
   // loaded or anything is paid.
   let runner: Runner;
@@ -400,7 +420,8 @@ export async function runCiServe(
       coordinatorPubkey: coordinator,
       publisher: ctx.publisher,
       relayUrl: flags.relay,
-      gatewayUrl: flags.gateway,
+      gatewayUrl: gateway,
+      gateways: readGateways,
       repos: flags.repos,
       runner,
       stateDir,
@@ -437,7 +458,7 @@ export async function runCiServe(
         coordinator,
         coordinatorNpub: npub,
         relay: flags.relay,
-        gateway: flags.gateway,
+        gateway,
         repos: flags.repos,
         requesters: flags.requesters,
         runner: { family: runner.family, selectors: runner.selectors },

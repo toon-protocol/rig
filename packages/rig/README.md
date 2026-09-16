@@ -448,7 +448,7 @@ rig ci serve --relay wss://<relay> --repo <owner-npub>/<repo-id> [--repo …]
 | `--concurrency <n>` | `1` | bounded run slots — more pushes queue (`queue` rounds are published on the progress event) |
 | `--requester <npub\|hex>` | (none) | also accept Service Requests from this pubkey (NIP-C1 operator policy; repeatable) — for running your own coordinator against a repo you do not maintain; such runs show as `seen-in-network` |
 | `--timeout <secs>` | `1800` | wall clock per run; a hung run concludes `timed_out` |
-| `--gateway <url>` | rig's preferred Arweave gateway | prefix for log/artifact URLs (`<gateway>/raw/<txId>`) |
+| `--gateway <url>` | `RIG_ARWEAVE_GATEWAY`, else rig's preferred Arweave gateway | the gateway that serves the store's raw bytes: prefix for log/artifact URLs (`<gateway>/raw/<txId>`) **and** the first gateway the coordinator reads a commit's objects from (same `/raw/` route), ahead of the shared public list — name a private or local gateway (the sandbox's) and the coordinator needs nothing else to read |
 | `--act-bin <path>` | `act` on PATH (or `RIG_ACT_BIN`) | the act binary |
 | `--platform <label>=<image>` | `ubuntu-latest=catthehacker/ubuntu:act-latest` | `runs-on` label → Docker image (repeatable) |
 | `--workdir <dir>` | `<state-dir>/work` | where commits are materialized |
@@ -492,6 +492,33 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v rig-ci-state:/st
   -e RIG_MNEMONIC='<coordinator phrase>' -e TOON_CONNECTOR=https://<connector> \
   rig-ci ci serve --relay wss://<relay> --repo <owner>/<repo-id>
 ```
+
+The entrypoint is `rig`, so every verb works (`docker run --rm rig-ci --version`),
+and every environment variable rig honours means the same inside the image
+(`TOON_CLIENT_HOME` is `/state`). act launches each job as a container on the
+daemon behind the mounted socket and copies the checkout in, so no host path
+has to match. Against the [sandbox](#dogfooding-rigs-own-ciyml-on-the-sandbox)
+on the same host, run on the host network with the sandbox's own `localhost`
+addresses — a client dials the endpoint a node **advertises**, and the sandbox
+hub advertises `http://127.0.0.1:3200/ilp` so host-run smokes can reach it
+(sandbox-only; a real connector advertises its public URL, which the default
+bridge network reaches fine):
+
+```sh
+docker run --rm --network host \
+  -v /var/run/docker.sock:/var/run/docker.sock -v rig-ci-state:/state \
+  -e RIG_MNEMONIC='<coordinator phrase>' \
+  -e TOON_CONNECTOR=http://localhost:3200 \
+  -e TOON_CLIENT_CHAIN=solana -e TOON_CLIENT_RPC_URL=http://localhost:8899 \
+  -e TOON_CLIENT_STORE_SEAL_TO=http://localhost:3210 \
+  -e RIG_ARWEAVE_GATEWAY=http://localhost:3000 \
+  rig-ci ci serve --relay ws://localhost:7100 --repo <maintainer-npub>/<repo-id>
+```
+
+`RIG_ARWEAVE_GATEWAY` (or `--gateway`) is both where the published log links
+point and the first gateway the coordinator reads a commit's objects through,
+which is what lets it materialize a commit whose objects live only on the
+sandbox's store.
 
 This is the shape a TOON workload will later spawn.
 

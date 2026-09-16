@@ -7,11 +7,15 @@
  * writes.
  *
  * Every step drives the REAL code paths (`dispatch` with default deps: the
- * embedded standalone publisher, the real relay, the real store); the only
- * injected seams are the two the sandbox's local gateway needs — an Arweave
- * `fetchFn` that maps `<gateway>/<txId>` to the local gateway's `/raw/<txId>`,
- * and a `resolveSha` that never reaches the public GraphQL index (every SHA a
- * fresh push writes is in the kind:30618 `arweave` map anyway).
+ * embedded standalone publisher, the real relay, the real store). The
+ * coordinator is given NO fetch seam: it reads the commit's objects through
+ * `--gateway` on its own (`<gateway>/raw/<txId>`, the store's raw-bytes route
+ * — the only one the sandbox's local gateway serves; plain `/<txId>` 302s to
+ * an unreachable ArNS host), exactly as the Docker image does. The maintainer's
+ * verbs get an Arweave `fetchFn` that maps `<gateway>/<txId>` onto that same
+ * `/raw/` route, and both sides get a `resolveSha` that never reaches the
+ * public GraphQL index (every SHA a fresh push writes is in the kind:30618
+ * `arweave` map anyway).
  *
  * NETWORK- AND DOCKER-GATED, opt-in:
  *
@@ -492,13 +496,19 @@ describe.skipIf(!ENABLED || !preflight.ok)(
         expect(push1.code, push1.rec.err.join('\n')).toBe(0);
 
         // 2. The coordinator starts serving the repo (in-process, until aborted).
+        //    No fetchFn: object reads must reach the sandbox gateway through
+        //    `--gateway` alone, the way the packaged coordinator's do (#134).
         const actBin = resolveActBinary(process.env);
         if (!actBin) throw new Error('unreachable: preflight checked act');
-        const serveDeps = deps(coordinator, stateDir, {
+        const serveDeps: DispatchDeps & CiDeps = {
+          io: makeIo().io,
+          env: coordinator.env,
+          cwd: stateDir,
+          resolveSha: async () => null,
           runner: new ActRunner({ actBin }),
           stateDir,
           signal: abort.signal,
-        });
+        };
         servePromise = dispatch(
           [
             'ci',
