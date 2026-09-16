@@ -8,7 +8,14 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { clearShaCache } from '@toon-protocol/arweave';
@@ -22,6 +29,7 @@ import {
   txFor,
 } from '../cli/read-testkit.js';
 import { MaterializeError, materializeCommit } from './materialize-commit.js';
+import { discoverWorkflows } from './workflows.js';
 
 const OWNER = 'ab'.repeat(32);
 const REPO = 'demo-repo';
@@ -110,6 +118,60 @@ describe('materializeCommit', () => {
     expect(() => readFileSync(join(dest, 'code.txt'))).toThrow();
     expect(gitText(dest, ['status', '--porcelain'])).toBe('');
     expect(gitText(dest, ['fsck', '--strict', '--no-dangling'])).toBe('');
+  });
+
+  it('materializes the exact tree and yields the workflow list with paths and SHA-256 hashes', async () => {
+    // The coordinator's two-step: materializeCommit() then discoverWorkflows()
+    // on the checkout — workflows are read from the materialized tree, never
+    // from the relay, and each carries the SHA-256 of its exact bytes.
+    const src = makeSourceRepo();
+    mkdirSync(join(src, '.github', 'workflows'), { recursive: true });
+    mkdirSync(join(src, '.ngit', 'act', 'workflows'), { recursive: true });
+    mkdirSync(join(src, 'src', 'nested'), { recursive: true });
+    const ghWorkflow =
+      'name: ci\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n';
+    const ngitWorkflow =
+      'on: [push, pull_request]\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo lint\n';
+    writeFileSync(join(src, '.github', 'workflows', 'ci.yml'), ghWorkflow);
+    writeFileSync(
+      join(src, '.ngit', 'act', 'workflows', 'ngit.yaml'),
+      ngitWorkflow
+    );
+    writeFileSync(join(src, 'src', 'nested', 'deep.txt'), 'deep\n');
+    git(['add', '.'], src);
+    git(['commit', '-m', 'add workflows'], src);
+    const tip = git(['rev-parse', 'HEAD'], src);
+    const dest = join(tempDir('rig-ci-mat-dst-'), 'checkout');
+
+    const result = await materializeCommit({
+      ownerPubkey: OWNER,
+      repoId: REPO,
+      relayUrls: [RELAY],
+      commit: tip,
+      dir: dest,
+      ...world(src),
+    });
+    expect(result.commit).toBe(tip);
+    // Exact tree: every blob at every path, byte for byte (git's own view).
+    expect(gitText(dest, ['ls-tree', '-r', 'HEAD'])).toBe(
+      git(['ls-tree', '-r', 'HEAD'], src)
+    );
+    expect(readFileSync(join(dest, 'src', 'nested', 'deep.txt'), 'utf-8')).toBe(
+      'deep\n'
+    );
+
+    const workflows = await discoverWorkflows(result.dir);
+    const sha = (text: string): string =>
+      createHash('sha256').update(text).digest('hex');
+    expect(workflows.map((w) => [w.path, w.sha256])).toEqual([
+      ['.github/workflows/ci.yml', sha(ghWorkflow)],
+      ['.ngit/act/workflows/ngit.yaml', sha(ngitWorkflow)],
+    ]);
+    expect(workflows.every((w) => w.parseError === undefined)).toBe(true);
+    expect(workflows.map((w) => w.jobs.map((j) => j.id))).toEqual([
+      ['build'],
+      ['lint'],
+    ]);
   });
 
   it('applies a kind:1617 format-patch on its declared base with git am', async () => {
