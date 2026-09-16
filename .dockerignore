@@ -1,0 +1,16 @@
+# Build context for packages/rig/Dockerfile (built from the workspace root).
+**/node_modules
+**/dist
+**/coverage
+.git
+.sandcastle
+.changeset
+.github
+docs
+scripts
+packages/rig-web/src
+packages/rig-web/tests
+packages/rig-web/public
+**/*.log
+.env
+.env.*

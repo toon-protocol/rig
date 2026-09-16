@@ -97,7 +97,9 @@ export function filterEvents(
     if (filter.kinds && !filter.kinds.includes(event.kind)) return false;
     if (filter.ids && !filter.ids.includes(event.id)) return false;
     if (filter.authors && !filter.authors.includes(event.pubkey)) return false;
-    for (const tagName of ['a', 'e', 'd'] as const) {
+    if (filter.since !== undefined && event.created_at < filter.since)
+      return false;
+    for (const tagName of ['a', 'e', 'd', 'c', 'p'] as const) {
       const wanted = filter[`#${tagName}`];
       if (
         wanted &&

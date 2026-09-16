@@ -27,6 +27,7 @@ export function RepoLayout() {
     const path = location.pathname;
     if (path.includes('/issues')) return 'issues';
     if (path.includes('/pulls')) return 'pulls';
+    if (path.includes('/actions')) return 'actions';
     if (path.includes('/commit')) return 'commits';
     return 'code';
   }, [location.pathname]);
@@ -65,6 +66,9 @@ export function RepoLayout() {
         break;
       case 'pulls':
         navigate(`${base}/pulls`);
+        break;
+      case 'actions':
+        navigate(`${base}/actions`);
         break;
       case 'commits': {
         const resolved = refs ? resolveDefaultRef(metadata, refs) : null;
@@ -114,6 +118,9 @@ export function RepoLayout() {
           { key: 'issues', label: 'Issues', icon: 'M8 9.5a1.5 1.5 0 100-3 1.5 1.5 0 000 3z M8 0a8 8 0 100 16A8 8 0 008 0zM1.5 8a6.5 6.5 0 1113 0 6.5 6.5 0 01-13 0z' },
           { key: 'pulls', label: 'Pull Requests', icon: 'M1.5 3.25a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zm5.677-.177L9.573.677A.25.25 0 0110 .854V2.5h1A2.5 2.5 0 0113.5 5v5.628a2.251 2.251 0 11-1.5 0V5a1 1 0 00-1-1h-1v1.646a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm0 9.5a.75.75 0 100 1.5.75.75 0 000-1.5zm8.25.75a.75.75 0 11-1.5 0 .75.75 0 011.5 0z' },
           { key: 'commits', label: 'Commits', icon: 'M11.93 8.5a4.002 4.002 0 01-7.86 0H.75a.75.75 0 010-1.5h3.32a4.002 4.002 0 017.86 0h3.32a.75.75 0 010 1.5h-3.32zm-1.43-.75a2.5 2.5 0 10-5 0 2.5 2.5 0 005 0z' },
+          // Actions (rig#125): NIP-C1 workflow runs published by coordinators.
+          // Octicon "play": a circle with a triangle.
+          { key: 'actions', label: 'Actions', icon: 'M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Zm4.879-2.773 4.264 2.559a.25.25 0 0 1 0 .428l-4.264 2.559A.25.25 0 0 1 6 10.559V5.442a.25.25 0 0 1 .379-.215Z' },
         ] as const).map(({ key, label, icon }) => (
           <button
             key={key}

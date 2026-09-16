@@ -3,7 +3,7 @@
  *
  * rig owns exactly: init, identity, remote, clone, fetch, push, site, issue,
  * comment, pr, maintainers, channel (+ the `channels` list shorthand), fund,
- * balance, chain, entry, name, help/-h/--help, and --version. EVERY other
+ * balance, chain, entry, name, ci, help/-h/--help, and --version. EVERY other
  * subcommand is executed as `git <argv...>` verbatim (./git-passthrough.ts)
  * — `rig status` IS `git status`, `rig add -p`, `rig commit`, `rig rebase
  * -i`, … all land in git with rig's stdio and git's exit code. Owned verbs
@@ -27,6 +27,7 @@ import { createRequire } from 'node:module';
 import { runBalance } from './balance.js';
 import { runChain } from './chain.js';
 import { runChannel } from './channel.js';
+import { runCi } from './ci.js';
 import { runClone } from './clone.js';
 import {
   runComment,
@@ -124,6 +125,20 @@ Commands rig owns:
                              path otherwise does this automatically)
   channel close <channelId>  start the settlement challenge window (on-chain)
   channel settle <channelId> release collateral after the window (on-chain)
+  ci request <coordinator>   authorize a CI coordinator to run this repo's
+  ci stop <coordinator>      workflows (kind:9843) / revoke it (kind:9844)
+  ci trigger <coordinator> --workflow <path> [--commit <sha>]
+                             run one exact workflow on one commit (kind:9840)
+  ci secret set|remove <coordinator> NAME[=value]
+                             CI secrets, NIP-44 encrypted to the coordinator's
+                             advertised key (kind:29846) — the relay never
+                             sees names or values
+  ci status <commit>         every CI run + job for a commit with NIP-C1 trust
+                             levels (free); exits non-zero unless green — the
+                             one-command merge gate (--require-ci-trust)
+  ci serve --relay <url> --repo <owner>/<id>
+                             run a coordinator: watch the relay, run workflows
+                             with act on Docker, publish results as paid writes
 
 Any other command is passed through to git verbatim: \`rig status\` runs
 \`git status\`, and \`rig add -p\`, \`rig commit\`, \`rig log --oneline\`,
@@ -242,6 +257,10 @@ export async function dispatch(
       return runEntry(rest, deps);
     case 'name':
       return runName(rest, deps);
+    case 'ci':
+      // Relay-native CI (#125): request/stop/trigger/secret are paid NIP-C1
+      // publishes, status is a free read, serve runs the coordinator.
+      return runCi(rest, deps);
     case 'help':
     case '--help':
     case '-h':

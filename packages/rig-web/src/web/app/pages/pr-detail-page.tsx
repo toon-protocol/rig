@@ -2,6 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, useOutletContext } from 'react-router';
 import type { RepoContext } from '@/app/repo-layout';
 import { usePRs } from '@/hooks/use-prs';
+import { useCiRuns } from '@/hooks/use-ci-runs';
+import { prCiRuns } from '@/app/pages/pr-list-page';
+import { CiStatusDot } from '@/components/ci-status-dot';
 import { useComments } from '@/hooks/use-comments';
 import { useCommitDetail } from '@/hooks/use-commit-detail';
 import { useProfileCache } from '@/hooks/use-profile-cache';
@@ -125,9 +128,10 @@ function MergeStatusBox({ pr }: { pr: PRMetadata }) {
 
 export function PRDetailPage() {
   const { id = '' } = useParams();
-  const { metadata, refs, owner } = useOutletContext<RepoContext>();
+  const { metadata, refs, owner, repo } = useOutletContext<RepoContext>();
   const { prs, loading: prsLoading } = usePRs(owner, metadata.repoId, metadata.maintainers);
   const { getDisplayName, requestProfiles } = useProfileCache();
+  const { runsForPr, runsForCommit } = useCiRuns(owner, metadata.repoId, metadata.maintainers);
 
   const pr = useMemo(() => {
     return prs.find((p) => p.eventId === id) ?? null;
@@ -173,6 +177,7 @@ export function PRDetailPage() {
         <Badge className={STATUS_BADGE_CLASS[pr.status] ?? ''}>
           {STATUS_LABEL[pr.status] ?? pr.status}
         </Badge>
+        <CiStatusDot runs={prCiRuns(pr, runsForPr, runsForCommit)} owner={owner} repo={repo} />
       </div>
 
       <p className="text-sm text-muted-foreground">

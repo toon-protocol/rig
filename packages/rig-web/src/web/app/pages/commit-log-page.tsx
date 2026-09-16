@@ -3,6 +3,8 @@ import { useParams, useOutletContext, Link } from 'react-router';
 import { Check, Copy, Code } from 'lucide-react';
 import type { RepoContext } from '@/app/repo-layout';
 import { useCommitLog } from '@/hooks/use-commit-log';
+import { useCiRuns } from '@/hooks/use-ci-runs';
+import { CiStatusDot } from '@/components/ci-status-dot';
 import { useProfileCache } from '@/hooks/use-profile-cache';
 import { parseAuthorIdent, type AuthorIdent } from '../../git-objects.js';
 import { formatRelativeDate } from '../../date-utils.js';
@@ -13,6 +15,7 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import type { CommitLogEntry } from '../../commit-walker.js';
+import type { CiRun } from '../../nip-c1-parsers.js';
 
 /**
  * Best-effort synchronous copy via the legacy `document.execCommand('copy')`
@@ -67,9 +70,11 @@ interface CommitRowProps {
   relDate: string;
   copied: boolean;
   onCopySha: (sha: string) => void;
+  /** Current CI runs for this commit (rig#125); empty renders no dot. */
+  ciRuns: readonly CiRun[];
 }
 
-function CommitRow({ entry, owner, repo, authorName, relDate, copied, onCopySha }: CommitRowProps) {
+function CommitRow({ entry, owner, repo, authorName, relDate, copied, onCopySha, ciRuns }: CommitRowProps) {
   const message = entry.commit.message.split('\n')[0] ?? '';
   const initials = (authorName ?? '?').slice(0, 2).toUpperCase();
   const shortSha = entry.sha.slice(0, 7);
@@ -109,6 +114,7 @@ function CommitRow({ entry, owner, repo, authorName, relDate, copied, onCopySha 
         )}
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
+        <CiStatusDot runs={ciRuns} owner={owner} repo={repo} className="mr-1" />
         <Link
           to={`/${owner}/${repo}/commit/${entry.sha}`}
           className="rounded-md border px-2 py-1 font-mono text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -162,6 +168,9 @@ export function CommitLogPage() {
 
   const { entries, loading, error } = useCommitLog(startSha, metadata.repoId, refs);
   const { getDisplayName, requestProfiles } = useProfileCache();
+  // CI status per commit (rig#125): two relay reads for the whole list; a
+  // repo with no coordinator gets empty maps and the rows render unchanged.
+  const { runsForCommit } = useCiRuns(owner, metadata.repoId, metadata.maintainers);
 
   // Request profiles for commit authors
   useEffect(() => {
@@ -256,6 +265,7 @@ export function CommitLogPage() {
                     relDate={relDate}
                     copied={copiedSha === entry.sha}
                     onCopySha={onCopySha}
+                    ciRuns={runsForCommit(entry.sha)}
                   />
                 );
               })}

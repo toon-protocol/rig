@@ -167,6 +167,7 @@ export const RIG_OWNED_VERBS: ReadonlySet<string> = new Set([
   'chain',
   'entry',
   'name',
+  'ci',
 ]);
 
 /**
