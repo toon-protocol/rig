@@ -9,7 +9,7 @@ lives in NIP-34 Nostr events and the objects live on Arweave.
 - **Writes are paid** — pushing objects and publishing events spends from a
   payment channel funded by your wallet. Writes are permanent and non-refundable.
 - **One node URL is the whole network configuration** — `rig` embeds its own
-  payment client (`@toon-protocol/client` 2.x) built from your seed phrase and
+  payment client (`@toon-protocol/client` 3.x) built from your seed phrase and
   pays the TOON connector you name with `rig entry <url>`. The node describes
   itself on `GET /ilp`; there is nothing to discover (see
   [Pointing at a node](#pointing-at-a-node)).
@@ -765,7 +765,7 @@ it — that stays behind the `Publisher` seam:
   split, and `JobDeliveryPort` is the injected seam for the per-increment
   encrypt/pay leg. The concrete port and the buyer-side payment helpers that
   rode the 0.x client's serve-side job API were removed with the move to
-  `@toon-protocol/client` 2.x; the protocol pieces stay so a port can be
-  written against the 2.x client.
+  `@toon-protocol/client` 2.x (now 3.x); the protocol pieces stay so a port can be
+  written against the current client.
 
 [epic #246](https://github.com/toon-protocol/toon-client/issues/246).
