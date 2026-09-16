@@ -1,5 +1,72 @@
 # @toon-protocol/rig
 
+## 4.4.0
+
+### Minor Changes
+
+- 5bae212: Pull request triggers: a PR update supersedes the previous tip, and `rig ci status` shows PR runs (#130).
+
+  When a kind:1619 Pull Request Update reaches a served repo, the coordinator
+  now cancels every run it still holds for that pull request before queuing the
+  update's own runs: a run that is still queued concludes `cancelled` without
+  reaching the Runner, and one in progress is aborted and its Workflow Result
+  (9842) and final progress marker (39842) say `cancelled`. Previously the old
+  tip's run finished alongside the new one.
+
+  `rig ci status` reports each `pull_request` run's NIP-22 context — the PR
+  event id and kind, its author, and the PR or PR Update that supplied the
+  commit — plus `authorIsMaintainer`, derived on the read side from the repo's
+  kind:30617 (owner ∪ declared maintainers), never from anything the coordinator
+  asserts. The human output gains one `pull request …` line under each PR run;
+  the `--json` envelope's runs gain an optional `pr` object.
+
+- 8f335c7: `rig ci serve --once`: stop after the first run concludes (#127).
+
+  A coordinator started with `--once` listens as usual, and exits 0 on its own
+  once the first run's Workflow Result (9842) and final `concluded` progress
+  marker (39842) are on the relay — so one `rig ci trigger` from a maintainer can
+  be answered by one bounded `rig ci serve --once` on the coordinator side, with
+  nothing left running. Runs that never reach the Runner (`startup_failure`,
+  `cancelled`) count; ignored or refused triggers (a non-maintainer author, a
+  workflow SHA-256 mismatch, an unaffordable run) publish nothing and do not.
+  The `--json` start document gains `once`, and the library's
+  `CoordinatorOptions` gains the `onRunConcluded` hook the flag is built on.
+
+- 6558479: Move the paid write path to `@toon-protocol/client` 3.x (#136).
+
+  Client 2.x wrote a 32-byte `executionCondition` on every PREPARE. Connectors
+  built since ADR 0069 read a one-byte `greeting` flag there instead, so every
+  paid `rig push`, `rig ci request` and coordinator write was refused at the
+  first packet with `invalid packet type byte`. The `^2.1.1` range could never
+  resolve to a client that speaks the new framing.
+
+  `@toon-protocol/client` is now `^3.0.0` and `@toon-protocol/core` is `^3.5.0`,
+  the pair the sandbox runs. The 3.0 major only removes
+  `IlpSendParams.executionCondition`, `SealedExchange.condition`,
+  `deriveCondition` and `resolveExecutionCondition`, none of which rig used, so
+  no code under `standalone/*` changes. This changes which connectors rig can
+  pay: anything carrying ADR 0069 (the sandbox hub and the current devnet
+  fleet) now accepts rig's writes.
+
+### Patch Changes
+
+- 00ff782: CI 1 (#126): close the two evidence gaps in the Runner seam's tests. `FakeRunner`
+  is now driven with a multi-job workflow (mixed conclusions, exit codes, timings,
+  per-job logs and artifacts, one `onLog` call per job), and `materializeCommit` +
+  `discoverWorkflows` are tested together on a materialized checkout: the exact tree
+  lands (`git ls-tree -r` equality) and the workflow list carries paths from both
+  `.github/workflows/` and `.ngit/act/workflows/` with the SHA-256 of each file's
+  bytes. Tests only; no runtime change.
+- 2916ca4: CI 4 (#129): close the two evidence gaps in the coordinator's push-trigger
+  tests. A kind:30618 whose refs did not move — an `arweave`-map-only re-upload,
+  or a byte-identical republish — is now shown to run nothing while still
+  advancing the persisted cursor, and a tag move (`refs/tags/v1`) is shown to run
+  only the workflows whose `on: push` filter matches tags, with `o = push` and
+  `r = refs/tags/v1` on the published events while a `branches: [main]` workflow
+  stays quiet (and vice versa on the next branch move). Tests only; no runtime
+  change.
+- 0c0c73c: `rig ci status` now prints each job's duration and each concluded run's wall-clock time on the human lines, and the `--json` envelope's jobs carry `queuedAt` and `concludedAt` (the Job Result's `created_at`) next to `startedAt`, so a script can read job timings without re-parsing the 9841 (rig#128).
+
 ## 4.3.0
 
 ### Minor Changes
