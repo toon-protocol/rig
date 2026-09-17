@@ -21,6 +21,7 @@
 import { mkdtemp, mkdir, readdir, rename, rm, rmdir } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
+import { readGateways } from '../gateway-preference.js';
 import {
   setHeadSymref,
   isSafeRefname,
@@ -57,6 +58,11 @@ from Arweave gateways. A clone right after a push may report missing
 objects — retry after propagation.
 
 Options:
+  --gateway <url>      gateway to read objects through FIRST, on its raw-bytes
+                       route <url>/raw/<txId>, ahead of the public gateway
+                       list — name a private, local or air-gapped gateway to
+                       clone a repo the public ones do not carry
+                       (env RIG_ARWEAVE_GATEWAY also sets it)
   --concurrency <n>    parallel gateway downloads (default 8)
   --json               machine-readable result envelope
   -h, --help           show this help`;
@@ -92,6 +98,8 @@ interface CloneArgs {
   repoId: string;
   dir: string | undefined;
   concurrency: number | undefined;
+  /** `--gateway` as given; absent → RIG_ARWEAVE_GATEWAY, else no override. */
+  gateway: string | undefined;
   json: boolean;
 }
 
@@ -101,6 +109,7 @@ function parseCloneArgs(args: string[]): CloneArgs | { help: true } {
     options: {
       json: { type: 'boolean', default: false },
       concurrency: { type: 'string' },
+      gateway: { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
     allowPositionals: true,
@@ -136,6 +145,7 @@ function parseCloneArgs(args: string[]): CloneArgs | { help: true } {
     repoId,
     dir,
     concurrency,
+    gateway: values.gateway,
     json: values.json === true,
   };
 }
@@ -231,6 +241,8 @@ export async function runClone(
       tips,
       shaToTxId: remoteState.shaToTxId,
       resolveMissing: (shas) => remoteState.resolveMissing(shas),
+      // `--gateway` / RIG_ARWEAVE_GATEWAY first, public list behind it (#176).
+      gateways: readGateways(parsed.gateway, deps.env),
       ...(deps.fetchFn ? { fetchFn: deps.fetchFn } : {}),
       ...(parsed.concurrency !== undefined
         ? { concurrency: parsed.concurrency }

@@ -1,5 +1,5 @@
 /**
- * Which Arweave gateway rig PRINTS.
+ * Which Arweave gateway rig PRINTS — and which one it READS through (#176).
  *
  * Fetches try every gateway in `@toon-protocol/arweave`'s shared list, so the
  * order there only matters for redundancy. A printed URL is different: it is
@@ -32,4 +32,60 @@ export const PREFERRED_GATEWAY: string =
 export function mirrorGatewaysFor(primary: string): string[] {
   const p = primary.replace(/\/+$/, '');
   return ARWEAVE_GATEWAYS.filter((g) => g.replace(/\/+$/, '') !== p);
+}
+
+// ---------------------------------------------------------------------------
+// The gateway override on the READ path (#176)
+// ---------------------------------------------------------------------------
+
+/** Environment variable naming the gateway rig writes through and reads from. */
+export const ARWEAVE_GATEWAY_ENV = 'RIG_ARWEAVE_GATEWAY';
+
+/** Trailing slashes off a gateway base URL, so `${g}/raw` never doubles up. */
+export function normalizeGatewayUrl(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
+/**
+ * The gateway this invocation was configured with: `--gateway`, else
+ * `RIG_ARWEAVE_GATEWAY`, else null — nothing configured, blank counting as
+ * unset. Normalized, so a caller can append a route to it.
+ */
+export function configuredGateway(
+  flag: string | undefined,
+  env: NodeJS.ProcessEnv
+): string | null {
+  const raw = (flag ?? env[ARWEAVE_GATEWAY_ENV] ?? '').trim();
+  return raw === '' ? null : normalizeGatewayUrl(raw);
+}
+
+/**
+ * Where object bytes are read from once a gateway IS configured: its raw-bytes
+ * route FIRST, then the shared public list as the fallback.
+ *
+ * `<gateway>/raw/<txId>`, not `<gateway>/<txId>`: an ar.io node serves raw
+ * transaction bytes there whether or not it does sandboxed-subdomain
+ * redirects, and the TOON store's own gateway (the dev sandbox's) answers on
+ * that route ALONE. A public gateway serves the same bytes on both.
+ */
+export function readGatewaysFor(gateway: string): string[] {
+  return [`${normalizeGatewayUrl(gateway)}/raw`, ...ARWEAVE_GATEWAYS];
+}
+
+/**
+ * The read path's gateway list for a command that takes `--gateway`: the
+ * configured gateway first ({@link readGatewaysFor}), or — nothing configured
+ * — the shared public list exactly as it stands today.
+ *
+ * This is what gives `rig clone` / `rig fetch` the reach `rig push` has: a
+ * repository whose objects live only on a private, local or air-gapped
+ * gateway becomes readable by naming it, with the public gateways still
+ * serving everyone else.
+ */
+export function readGateways(
+  flag: string | undefined,
+  env: NodeJS.ProcessEnv
+): readonly string[] {
+  const gateway = configuredGateway(flag, env);
+  return gateway === null ? ARWEAVE_GATEWAYS : readGatewaysFor(gateway);
 }
