@@ -12,6 +12,8 @@ import type { CiJobResult } from './nip-c1-parsers.js';
 import {
   CI_ADVERTISEMENT_KIND,
   CI_JOB_RESULT_KIND,
+  CI_LIVE_LOG_TAIL_KIND,
+  CI_RUNNER_CHANNEL_KEY,
   CI_SERVICE_REQUEST_KIND,
   CI_SERVICE_STOP_KIND,
   CI_WORKFLOW_PROGRESS_KIND,
@@ -23,6 +25,7 @@ import {
   deriveTrustLevel,
   parseCiAdvertisement,
   parseCiJobResult,
+  parseCiLiveLogTail,
   parseCiServiceControl,
   parseCiTriggerContext,
   parseCiWorkflowProgress,
@@ -962,6 +965,137 @@ describe('parseCiAdvertisement (19843)', () => {
     };
     for (const [label, ev] of Object.entries(cases)) {
       expect(parseCiAdvertisement(ev), label).toBeNull();
+    }
+  });
+});
+
+describe('parseCiLiveLogTail (39841, rig#194)', () => {
+  const CREATED = 1_700_000_000;
+  const tailTags = (): string[][] => [
+    ...COMMON_PUSH_TAGS,
+    ['d', RUN_ID],
+    ['expiration', String(CREATED + 600)],
+  ];
+  const without = (tags: string[][], name: string) =>
+    tags.filter((t) => t[0] !== name);
+  const tailEvent = (
+    tags: string[][] = tailTags(),
+    body: unknown = {
+      jobs: [{ job: 'build', tail: 'compiling…', omitted: 12 }],
+    }
+  ): NostrEvent =>
+    event({
+      kind: CI_LIVE_LOG_TAIL_KIND,
+      created_at: CREATED,
+      tags,
+      content: typeof body === 'string' ? body : JSON.stringify(body),
+    });
+
+  it('reads a run’s tails: one entry per unfinished job, with what precedes each', () => {
+    const parsed = parseCiLiveLogTail(
+      tailEvent(tailTags(), {
+        jobs: [
+          { job: 'build', tail: 'compiling…', omitted: 132096 },
+          { job: 'test', tail: 'running tests' },
+        ],
+      })
+    );
+    expect(parsed).not.toBeNull();
+    expect(parsed?.runId).toBe(RUN_ID);
+    expect(parsed?.pubkey).toBe(COORD);
+    expect(parsed?.expiresAt).toBe(CREATED + 600);
+    expect(parsed?.trigger.commit).toBe(COMMIT);
+    expect(parsed?.jobs).toEqual([
+      { jobId: 'build', tail: 'compiling…', omittedBytes: 132096 },
+      // `omitted` is optional on the wire and means "nothing precedes it".
+      { jobId: 'test', tail: 'running tests', omittedBytes: 0 },
+    ]);
+    expect(parsed?.runner).toBeUndefined();
+  });
+
+  it('reads the runner channel, which is never one of the jobs', () => {
+    const parsed = parseCiLiveLogTail(
+      tailEvent(tailTags(), {
+        jobs: [],
+        runner: { tail: 'Error response from daemon: pull access denied' },
+      })
+    );
+    expect(parsed?.jobs).toEqual([]);
+    expect(parsed?.runner).toEqual({
+      tail: 'Error response from daemon: pull access denied',
+      omittedBytes: 0,
+    });
+  });
+
+  it('ignores fields it does not know, anywhere in the content', () => {
+    const parsed = parseCiLiveLogTail(
+      tailEvent(tailTags(), {
+        jobs: [{ job: 'build', tail: 'x', omitted: 0, step: 'checkout' }],
+        runner: { tail: 'y', omitted: 0, backend: 'act' },
+        cadenceMs: 10000,
+      })
+    );
+    expect(parsed?.jobs).toEqual([
+      { jobId: 'build', tail: 'x', omittedBytes: 0 },
+    ]);
+    expect(parsed?.runner).toEqual({ tail: 'y', omittedBytes: 0 });
+  });
+
+  it('refuses a half-parsed result rather than rendering one', () => {
+    const cases: Record<string, NostrEvent> = {
+      'wrong kind': { ...tailEvent(), kind: CI_WORKFLOW_PROGRESS_KIND },
+      'no d tag': tailEvent(without(tailTags(), 'd'), { jobs: [] }),
+      'empty d tag': tailEvent([...without(tailTags(), 'd'), ['d', '']], {
+        jobs: [],
+      }),
+      'no trigger context': tailEvent(
+        [
+          ['d', RUN_ID],
+          ['expiration', String(CREATED + 600)],
+        ],
+        { jobs: [] }
+      ),
+      'no expiration': tailEvent(without(tailTags(), 'expiration'), {
+        jobs: [],
+      }),
+      'expiration at created_at': tailEvent(
+        [...without(tailTags(), 'expiration'), ['expiration', String(CREATED)]],
+        { jobs: [] }
+      ),
+      'expiration past the 30-minute bound': tailEvent(
+        [
+          ...without(tailTags(), 'expiration'),
+          ['expiration', String(CREATED + 1801)],
+        ],
+        { jobs: [] }
+      ),
+      'content that is not JSON': tailEvent(tailTags(), 'not json'),
+      'content that is not an object': tailEvent(tailTags(), '[]'),
+      'no jobs array': tailEvent(tailTags(), { runner: { tail: 'x' } }),
+      'a job with no id': tailEvent(tailTags(), { jobs: [{ tail: 'x' }] }),
+      'a job with no tail': tailEvent(tailTags(), { jobs: [{ job: 'build' }] }),
+      'the same job twice': tailEvent(tailTags(), {
+        jobs: [
+          { job: 'build', tail: 'a' },
+          { job: 'build', tail: 'b' },
+        ],
+      }),
+      'the runner channel smuggled in as a job': tailEvent(tailTags(), {
+        jobs: [{ job: CI_RUNNER_CHANNEL_KEY, tail: 'x' }],
+      }),
+      'a negative omitted': tailEvent(tailTags(), {
+        jobs: [{ job: 'build', tail: 'x', omitted: -1 }],
+      }),
+      'a fractional omitted': tailEvent(tailTags(), {
+        jobs: [{ job: 'build', tail: 'x', omitted: 1.5 }],
+      }),
+      'a runner channel with no tail': tailEvent(tailTags(), {
+        jobs: [],
+        runner: { omitted: 0 },
+      }),
+    };
+    for (const [label, ev] of Object.entries(cases)) {
+      expect(parseCiLiveLogTail(ev), label).toBeNull();
     }
   });
 });

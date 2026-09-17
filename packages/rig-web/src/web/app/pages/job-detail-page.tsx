@@ -3,9 +3,11 @@ import { Link, useOutletContext, useParams } from 'react-router';
 import type { RepoContext } from '@/app/repo-layout';
 import { useCiRun } from '@/hooks/use-ci-runs';
 import { useJobLog } from '@/hooks/use-job-log';
+import { useLiveLogTail } from '@/hooks/use-live-log-tail';
 import { useProfileCache } from '@/hooks/use-profile-cache';
 import { TrustBadge, workflowLabel } from '@/app/pages/actions-page';
 import { JobStateBadge } from '@/components/job-state-badge';
+import { LiveTailPane, RunnerChannelPane } from '@/components/live-tail-pane';
 import { Skeleton } from '@/components/ui/skeleton';
 import { formatByteSize, type JobLog } from '../../job-log.js';
 import {
@@ -17,6 +19,7 @@ import { hexToNpub } from '../../npub.js';
 import { storeLinkHref } from '../../gateway-preference.js';
 import {
   deriveRunJobs,
+  type CiLogTail,
   type CiRun,
   type CiRunJob,
 } from '../../nip-c1-parsers.js';
@@ -46,14 +49,30 @@ function PendingPane() {
 }
 
 /**
- * A job the run is executing. The durable job log is published when the run
- * concludes; the live tail that fills this pane while it runs is rig#194.
+ * A job the run is executing (rig#194).
+ *
+ * With a live tail on the relay this is the job's recent output, replaced as
+ * the coordinator publishes; with none — an old coordinator, an expired
+ * event — it is the plain statement it was before, because the absence of a
+ * live event is never an error. Either way the durable job log is published
+ * when the run concludes, and it is the record.
  */
-function RunningPane() {
+function RunningPane({ tail }: { tail?: CiLogTail }) {
+  if (!tail) {
+    return (
+      <section className="rounded-md border bg-muted/20 p-6 text-sm text-muted-foreground">
+        This job is running. Its job log is published when the run concludes.
+      </section>
+    );
+  }
   return (
-    <section className="rounded-md border bg-muted/20 p-6 text-sm text-muted-foreground">
-      This job is running. Its job log is published when the run concludes.
-    </section>
+    <LiveTailPane
+      testId="live-job-tail"
+      label="Live tail"
+      note="the most recent output of this job"
+      channel={tail}
+      empty="(no output yet)"
+    />
   );
 }
 
@@ -282,18 +301,27 @@ export function JobDetailPage() {
     metadata.maintainers
   );
   const { requestProfiles } = useProfileCache();
+  // Scoped to THIS run and opened only while it is unfinished: the actions
+  // list never asks for log bytes, and a concluded run converges on its
+  // durable job log rather than on the last thing the tail happened to catch.
+  const liveTail = useLiveLogTail(run);
 
   useEffect(() => {
     if (run) requestProfiles([run.coordinator]);
   }, [run, requestProfiles]);
 
-  const job = useMemo(
-    () =>
-      run
-        ? (deriveRunJobs(run, jobs).find((j) => j.jobId === jobId) ?? null)
-        : null,
-    [run, jobs, jobId]
-  );
+  const job = useMemo(() => {
+    if (!run) return null;
+    // A live tail is per-job evidence of execution: a job that has printed
+    // something has demonstrably started. With no tail on the relay there is
+    // no such evidence and the run-level reading stands.
+    const opts = liveTail
+      ? { startedJobIds: liveTail.jobs.map((j) => j.jobId) }
+      : {};
+    return (
+      deriveRunJobs(run, jobs, opts).find((j) => j.jobId === jobId) ?? null
+    );
+  }, [run, jobs, jobId, liveTail]);
 
   if (error) {
     return (
@@ -342,8 +370,13 @@ export function JobDetailPage() {
       </Link>
       <JobHeader job={job} run={run} owner={owner} repo={repo} />
       {job.state === 'pending' && <PendingPane />}
-      {job.state === 'running' && <RunningPane />}
+      {job.state === 'running' && (
+        <RunningPane
+          tail={liveTail?.jobs.find((entry) => entry.jobId === job.jobId)}
+        />
+      )}
       {job.state === 'concluded' && <JobLogPane job={job} />}
+      {liveTail?.runner && <RunnerChannelPane channel={liveTail.runner} />}
     </div>
   );
 }
