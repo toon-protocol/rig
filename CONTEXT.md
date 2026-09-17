@@ -32,6 +32,18 @@ _Avoid_: build, pipeline run
 One named unit of a workflow within a run, with its own conclusion, logs, and artifacts.
 _Avoid_: step, task
 
+**Job log**:
+The complete output of one job, cleared of injected secret values and stored durably. It is the record of what a job printed; the Job Result names it.
+_Avoid_: build log, output (when the whole log is meant)
+
+**Live log tail**:
+A short-lived view of the most recent output of a run's unfinished jobs, replaced as the run proceeds and expiring soon after it concludes. It is only ever a view — the job log is the record.
+_Avoid_: log stream, streaming logs, tail (unqualified)
+
+**Runner channel**:
+The runner's own account of executing a run — cleanup notes, backend output belonging to no job — carried alongside the jobs in a live log tail. It is not a job and never concludes.
+_Avoid_: runner job, system job
+
 **Trigger**:
 The relay event that causes a run: a push (repository state change), a pull request or its update, or a manual trigger from a maintainer.
 _Avoid_: hook, webhook

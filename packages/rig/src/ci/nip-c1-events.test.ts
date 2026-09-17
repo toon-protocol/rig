@@ -11,7 +11,12 @@ import type { UnsignedEvent } from '../nip34-events.js';
 import {
   CI_ADVERTISEMENT_KIND,
   CI_JOB_RESULT_KIND,
+  CI_LIVE_LOG_TAIL_INTERVAL_MS,
+  CI_LIVE_LOG_TAIL_JOB_BYTES,
+  CI_LIVE_LOG_TAIL_KIND,
+  CI_LIVE_LOG_TAIL_MAX_BYTES,
   CI_MANUAL_TRIGGER_KIND,
+  CI_RUNNER_CHANNEL_KEY,
   CI_SECRET_UPDATE_KIND,
   CI_SERVICE_REQUEST_KIND,
   CI_SERVICE_STOP_KIND,
@@ -19,6 +24,7 @@ import {
   CI_WORKFLOW_RESULT_KIND,
   buildCiAdvertisement,
   buildCiJobResult,
+  buildCiLiveLogTail,
   buildCiManualTrigger,
   buildCiSecretUpdate,
   buildCiServiceRequest,
@@ -27,8 +33,11 @@ import {
   buildCiWorkflowResult,
   commonTriggerTags,
   controlOrder,
+  liveLogTailBudget,
+  liveLogTailEventBudget,
   parseCiAdvertisement,
   parseCiJobResult,
+  parseCiLiveLogTail,
   parseCiManualTrigger,
   parseCiSecretUpdate,
   parseCiServiceControl,
@@ -38,6 +47,7 @@ import {
   parseRepoAddress,
   repoAddress,
   selectServiceRequests,
+  sliceLogTail,
   type CiTriggerContext,
   type ServiceControl,
 } from './nip-c1-events.js';
@@ -1102,5 +1112,250 @@ describe('Workflow Progress (39842)', () => {
         tags: good.tags.filter((t) => t[0] !== 'expiration'),
       })
     ).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// kind:39841 — Live Log Tail (rig's NIP-C1 extension, ADR-0002)
+// ---------------------------------------------------------------------------
+
+describe('Live Log Tail (39841)', () => {
+  const base = {
+    trigger: PUSH_TRIGGER,
+    runId: RUN_ID,
+    jobs: [
+      { job: 'build', tail: 'compiling…\n', omitted: 4096 },
+      { job: 'lint', tail: '', omitted: 0 },
+    ],
+    expiresAt: NOW + 1800,
+  };
+
+  it('is addressable on the run id and mirrors the run Progress tags', () => {
+    const event = buildCiLiveLogTail(base, NOW);
+    expect(event.kind).toBe(CI_LIVE_LOG_TAIL_KIND);
+    expect(event.tags).toEqual([
+      ...commonTriggerTags(PUSH_TRIGGER),
+      ['d', RUN_ID],
+      ['expiration', String(NOW + 1800)],
+    ]);
+    // The `d` is the run's Progress `d`, so holding a run addresses its tail.
+    const progress = buildCiWorkflowProgress(
+      {
+        trigger: PUSH_TRIGGER,
+        runId: RUN_ID,
+        status: 'in_progress',
+        jobs: [],
+        expiresAt: NOW + 1800,
+      },
+      NOW
+    );
+    expect(tag(event, 'd')).toEqual(tag(progress, 'd'));
+    expect(tag(event, 'a')).toEqual(tag(progress, 'a'));
+    expect(tag(event, 'c')).toEqual(tag(progress, 'c'));
+    expect(tag(event, 'w')).toEqual(tag(progress, 'w'));
+    expect(tag(event, 'o')).toEqual(tag(progress, 'o'));
+    expect(tag(event, 'r')).toEqual(tag(progress, 'r'));
+  });
+
+  it('round-trips jobs, tails, omitted counts and the runner channel', () => {
+    const event = signed(
+      buildCiLiveLogTail(
+        { ...base, runner: { tail: 'pulling image\n', omitted: 12 } },
+        NOW
+      ),
+      { id: '61'.repeat(32) }
+    );
+    expect(parseCiLiveLogTail(event)).toEqual({
+      eventId: '61'.repeat(32),
+      pubkey: COORDINATOR,
+      createdAt: NOW,
+      trigger: PUSH_TRIGGER,
+      runId: RUN_ID,
+      jobs: [
+        { job: 'build', tail: 'compiling…\n', omitted: 4096 },
+        { job: 'lint', tail: '', omitted: 0 },
+      ],
+      runner: { tail: 'pulling image\n', omitted: 12 },
+      expiresAt: NOW + 1800,
+    });
+  });
+
+  it('round-trips a run with no runner channel and no live jobs', () => {
+    const parsed = parseCiLiveLogTail(
+      signed(buildCiLiveLogTail({ ...base, jobs: [] }, NOW))
+    );
+    expect(parsed?.jobs).toEqual([]);
+    expect(parsed?.runner).toBeUndefined();
+  });
+
+  it('refuses an expiration beyond 30 minutes or not after created_at', () => {
+    expect(() =>
+      buildCiLiveLogTail({ ...base, expiresAt: NOW + 1801 }, NOW)
+    ).toThrow(/expiration/);
+    expect(() => buildCiLiveLogTail({ ...base, expiresAt: NOW }, NOW)).toThrow(
+      /expiration/
+    );
+    // A consumer applies the same bound, against the event's own created_at,
+    // so no clock skew is involved.
+    const good = signed(buildCiLiveLogTail(base, NOW));
+    expect(
+      parseCiLiveLogTail({
+        ...good,
+        tags: good.tags.map((t) =>
+          t[0] === 'expiration' ? ['expiration', String(NOW + 1801)] : t
+        ),
+      })
+    ).toBeNull();
+  });
+
+  it('refuses builder input the wire shape cannot carry', () => {
+    expect(() => buildCiLiveLogTail({ ...base, runId: '' }, NOW)).toThrow(
+      /run id/
+    );
+    expect(() =>
+      buildCiLiveLogTail(
+        { ...base, jobs: [{ job: 'build', tail: 'a', omitted: -1 }] },
+        NOW
+      )
+    ).toThrow(/omitted/);
+    expect(() =>
+      buildCiLiveLogTail(
+        {
+          ...base,
+          jobs: [
+            { job: 'build', tail: 'a', omitted: 0 },
+            { job: 'build', tail: 'b', omitted: 0 },
+          ],
+        },
+        NOW
+      )
+    ).toThrow(/twice/);
+    // The runner channel has its own slot; it is never a job.
+    expect(() =>
+      buildCiLiveLogTail(
+        {
+          ...base,
+          jobs: [{ job: CI_RUNNER_CHANNEL_KEY, tail: 'a', omitted: 0 }],
+        },
+        NOW
+      )
+    ).toThrow(/runner channel/);
+  });
+
+  it('ignores fields it does not know, at every level', () => {
+    const good = signed(buildCiLiveLogTail(base, NOW));
+    const forward: NostrEvent = {
+      ...good,
+      content: JSON.stringify({
+        jobs: [
+          { job: 'build', tail: 'x', omitted: 1, steps: [{ name: 'run' }] },
+        ],
+        runner: { tail: 'y', omitted: 2, backend: 'act' },
+        cursor: 'deadbeef',
+      }),
+      tags: [...good.tags, ['later-tag', 'value']],
+    };
+    expect(parseCiLiveLogTail(forward)).toMatchObject({
+      runId: RUN_ID,
+      jobs: [{ job: 'build', tail: 'x', omitted: 1 }],
+      runner: { tail: 'y', omitted: 2 },
+    });
+  });
+
+  it('defaults a missing omitted to zero', () => {
+    const good = signed(buildCiLiveLogTail(base, NOW));
+    const parsed = parseCiLiveLogTail({
+      ...good,
+      content: JSON.stringify({
+        jobs: [{ job: 'build', tail: 'x' }],
+        runner: { tail: 'y' },
+      }),
+    });
+    expect(parsed?.jobs).toEqual([{ job: 'build', tail: 'x', omitted: 0 }]);
+    expect(parsed?.runner).toEqual({ tail: 'y', omitted: 0 });
+  });
+
+  it('rejects a malformed event rather than half-parsing it', () => {
+    const good = signed(buildCiLiveLogTail(base, NOW));
+    const withContent = (content: unknown): NostrEvent => ({
+      ...good,
+      content: typeof content === 'string' ? content : JSON.stringify(content),
+    });
+    const cases: NostrEvent[] = [
+      { ...good, kind: CI_WORKFLOW_PROGRESS_KIND },
+      { ...good, tags: good.tags.filter((t) => t[0] !== 'd') },
+      { ...good, tags: good.tags.map((t) => (t[0] === 'd' ? ['d', ''] : t)) },
+      { ...good, tags: good.tags.filter((t) => t[0] !== 'expiration') },
+      { ...good, tags: good.tags.filter((t) => t[0] !== 'a') },
+      { ...good, tags: [...good.tags, ['d', 'run-0002']] },
+      withContent(''),
+      withContent('{not json'),
+      withContent([{ job: 'build', tail: 'x', omitted: 0 }]),
+      withContent({ runner: { tail: 'x', omitted: 0 } }),
+      withContent({ jobs: 'build' }),
+      withContent({ jobs: [{ tail: 'x', omitted: 0 }] }),
+      withContent({ jobs: [{ job: '', tail: 'x', omitted: 0 }] }),
+      withContent({ jobs: [{ job: 'build', omitted: 0 }] }),
+      withContent({ jobs: [{ job: 'build', tail: 'x', omitted: -1 }] }),
+      withContent({ jobs: [{ job: 'build', tail: 'x', omitted: 1.5 }] }),
+      withContent({ jobs: [{ job: 'build', tail: 'x', omitted: '1' }] }),
+      withContent({
+        jobs: [
+          { job: 'build', tail: 'x', omitted: 0 },
+          { job: 'build', tail: 'y', omitted: 0 },
+        ],
+      }),
+      withContent({
+        jobs: [{ job: CI_RUNNER_CHANNEL_KEY, tail: 'x', omitted: 0 }],
+      }),
+      withContent({ jobs: [], runner: 'x' }),
+      withContent({ jobs: [], runner: null }),
+      withContent({ jobs: [], runner: { omitted: 0 } }),
+    ];
+    for (const ev of cases) {
+      expect(parseCiLiveLogTail(ev)).toBeNull();
+    }
+  });
+});
+
+describe('live log tail budgets', () => {
+  it('gives a lone job the full per-job tail and keeps an event relay-safe', () => {
+    const one = liveLogTailBudget(1);
+    expect(one).toBe(CI_LIVE_LOG_TAIL_JOB_BYTES);
+    for (const entries of [1, 2, 3, 4, 7, 16, 64, 1000]) {
+      const share = liveLogTailBudget(entries);
+      expect(share).toBeGreaterThan(0);
+      expect(share).toBeLessThanOrEqual(one);
+      expect(share * entries).toBeLessThanOrEqual(CI_LIVE_LOG_TAIL_MAX_BYTES);
+    }
+    // Enough live entries and the budget is divided evenly, not per-job.
+    expect(liveLogTailBudget(64)).toBeLessThan(one);
+    expect(liveLogTailBudget(0)).toBe(one);
+  });
+
+  it('budgets one event per cadence tick plus the closing replacement', () => {
+    const cadence = CI_LIVE_LOG_TAIL_INTERVAL_MS;
+    expect(liveLogTailEventBudget(10 * cadence)).toBe(11);
+    // A partial tick still costs an event.
+    expect(liveLogTailEventBudget(10 * cadence + 1)).toBe(12);
+    // A run that cannot tick at all still pays for its closing replacement.
+    expect(liveLogTailEventBudget(0)).toBe(1);
+    expect(liveLogTailEventBudget(-1)).toBe(1);
+  });
+});
+
+describe('sliceLogTail', () => {
+  it('takes the end of the output and counts what precedes it', () => {
+    expect(sliceLogTail('abcdef', 4)).toEqual({ tail: 'cdef', omitted: 2 });
+    expect(sliceLogTail('abc', 8)).toEqual({ tail: 'abc', omitted: 0 });
+    expect(sliceLogTail('', 8)).toEqual({ tail: '', omitted: 0 });
+  });
+
+  it('counts bytes, not characters, and never splits one', () => {
+    // '€' is three UTF-8 bytes; a 4-byte budget keeps one and drops the rest.
+    const sliced = sliceLogTail('€€€', 4);
+    expect(sliced.tail).toBe('€');
+    expect(sliced.omitted).toBe(6);
+    expect(Buffer.byteLength(sliced.tail, 'utf8')).toBeLessThanOrEqual(4);
   });
 });
