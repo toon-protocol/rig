@@ -33,6 +33,7 @@ import {
   repoStateEvents,
   storeFromObjects,
   txFor,
+  type RefTagShape,
 } from './read-testkit.js';
 import type { ReadCommandDeps } from './read-seams.js';
 
@@ -129,6 +130,7 @@ function makeWorld(
     failHosts?: string[];
     dropShas?: string[];
     tamperSha?: string;
+    refShape?: RefTagShape;
   } = {}
 ): CloneWorld {
   const srcDir = makeSourceRepo();
@@ -136,6 +138,7 @@ function makeWorld(
     repoDir: srcDir,
     owner: OWNER,
     repoId: REPO,
+    ...(options.refShape ? { refShape: options.refShape } : {}),
   });
   const store = storeFromObjects(objects);
   for (const sha of options.dropShas ?? []) store.delete(txFor(sha));
@@ -278,6 +281,123 @@ describe('rig clone happy path', () => {
 });
 
 // ---------------------------------------------------------------------------
+// NIP-34 ref tag shapes (rig#156)
+// ---------------------------------------------------------------------------
+
+describe('rig clone reads both kind:30618 ref tag shapes', () => {
+  /** Every ref the clone wrote, as `refname sha` lines. */
+  function clonedRefs(dest: string): string[] {
+    return gitText(dest, [
+      'for-each-ref',
+      '--format=%(refname) %(objectname)',
+      'refs/heads',
+      'refs/tags',
+    ]).split('\n');
+  }
+
+  for (const refShape of ['legacy', 'nip', 'both'] as const) {
+    it(`resolves the same refs from a ${refShape}-shaped state event`, async () => {
+      const world = makeWorld({ refShape });
+      const code = await runClone([RELAY, `${OWNER}/${REPO}`], world.deps);
+      expect(world.io.errLines.join('\n')).toBe('');
+      expect(code).toBe(0);
+
+      const dest = join(world.cwd, REPO);
+      expect(clonedRefs(dest)).toEqual(clonedRefs(world.srcDir));
+      expect(gitText(dest, ['symbolic-ref', 'HEAD'])).toBe('refs/heads/main');
+      expect(gitText(dest, ['fsck', '--strict'])).toBe('');
+    });
+  }
+
+  it('lets the NIP shape win when the two shapes disagree on a ref', async () => {
+    const world = makeWorld({ refShape: 'both' });
+    const truth = gitText(world.srcDir, ['rev-parse', 'refs/heads/feature']);
+    // A hostile/stale legacy tag pointing `feature` at the main commit: the
+    // NIP-shape tag for the same ref must still decide.
+    const stale = gitText(world.srcDir, ['rev-parse', 'refs/heads/main']);
+    const refsEvent = world.events[1] as NostrEvent;
+    for (const tag of refsEvent.tags) {
+      if (tag[0] === 'r' && tag[1] === 'refs/heads/feature') tag[2] = stale;
+    }
+
+    const code = await runClone([RELAY, `${OWNER}/${REPO}`], world.deps);
+    expect(code).toBe(0);
+    expect(
+      gitText(join(world.cwd, REPO), ['rev-parse', 'refs/heads/feature'])
+    ).toBe(truth);
+  });
+
+  it('skips a peeled ^{} entry instead of listing it as a ref', async () => {
+    const world = makeWorld({ refShape: 'nip' });
+    const refsEvent = world.events[1] as NostrEvent;
+    const tagSha = gitText(world.srcDir, ['rev-parse', 'refs/tags/v1.0.0']);
+    const peeled = gitText(world.srcDir, ['rev-parse', 'refs/tags/v1.0.0^{}']);
+    expect(peeled).not.toBe(tagSha); // annotated: the two differ
+    refsEvent.tags.push(['refs/tags/v1.0.0^{}', peeled]);
+
+    const code = await runClone([RELAY, `${OWNER}/${REPO}`], world.deps);
+    expect(world.io.errLines.join('\n')).toBe('');
+    expect(code).toBe(0);
+
+    const dest = join(world.cwd, REPO);
+    expect(clonedRefs(dest)).toEqual(clonedRefs(world.srcDir));
+    // The annotated tag still points at the TAG object, not its peeled commit.
+    expect(gitText(dest, ['rev-parse', 'refs/tags/v1.0.0'])).toBe(tagSha);
+  });
+
+  it('applies the refname-safety gate to the NIP shape exactly as to the r shape', async () => {
+    const hostile = 'refs/heads/../../../../etc/passwd';
+    const sha = 'f'.repeat(40);
+
+    for (const tag of [
+      [hostile, sha],
+      ['r', hostile, sha],
+    ]) {
+      const world = makeWorld({ refShape: 'nip' });
+      (world.events[1] as NostrEvent).tags.push(tag);
+      const code = await runClone([RELAY, `${OWNER}/${REPO}`], world.deps);
+      expect(code).toBe(0);
+      expect(world.io.errLines.join('\n')).toContain(
+        'skipping unsafe ref name from relay'
+      );
+      expect(world.io.errLines.join('\n')).toContain(hostile);
+      const dest = join(world.cwd, REPO);
+      expect(clonedRefs(dest)).toEqual(clonedRefs(world.srcDir));
+    }
+  });
+
+  it('rejects a non-40-hex sha in the NIP shape exactly as in the r shape', async () => {
+    const outcomes: { code: number; err: string; left: boolean }[] = [];
+
+    for (const tag of [
+      ['refs/heads/short', 'abc123'],
+      ['r', 'refs/heads/short', 'abc123'],
+    ]) {
+      const world = makeWorld({ refShape: 'nip' });
+      (world.events[1] as NostrEvent).tags.push(tag);
+      const code = await runClone([RELAY, `${OWNER}/${REPO}`], world.deps);
+      outcomes.push({
+        code,
+        err: world.io.errLines.join('\n'),
+        left: existsSync(join(world.cwd, REPO)),
+      });
+    }
+
+    // Byte-for-byte the same outcome, whichever shape carried the bad sha:
+    // the tip is unfetchable, the clone fails, and nothing is written. (The
+    // `assertFullSha` gate in updateRef stands behind this, but the download
+    // step rejects first — which is exactly the point: one path, not two.)
+    const [nip, legacy] = outcomes;
+    expect(nip).toEqual(legacy);
+    expect(nip?.code).toBe(1);
+    expect(nip?.err).toContain('could not be downloaded');
+    expect(nip?.err).toContain('abc123');
+    // A rejected clone leaves no half-built repository behind.
+    expect(nip?.left).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Integrity + partial availability
 // ---------------------------------------------------------------------------
 
@@ -401,7 +521,10 @@ describe('rig clone empty-blob reconstruction', () => {
       owner: OWNER,
       repoId: REPO,
       arweaveMap: new Map(
-        objects_excluding(srcDir, EMPTY_BLOB_SHA).map((sha) => [sha, txFor(sha)])
+        objects_excluding(srcDir, EMPTY_BLOB_SHA).map((sha) => [
+          sha,
+          txFor(sha),
+        ])
       ),
     });
     const store = storeFromObjects(
