@@ -56,6 +56,7 @@ import {
   configuredGateway,
   readGatewaysFor,
 } from '../gateway-preference.js';
+import { shaResolverFor } from '../git-sha-resolver.js';
 import { hexToNpub, ownerToHex } from '../npub.js';
 import type { CiDeps } from './ci.js';
 import { rigVersion } from './dispatch.js';
@@ -531,7 +532,10 @@ export async function runCiServe(
         ? { webSocketFactory: forced.webSocketFactory }
         : {}),
       ...(forced.fetchFn ? { fetchFn: forced.fetchFn } : {}),
-      ...(forced.resolveSha ? { resolveSha: forced.resolveSha } : {}),
+      // SHAs the object map does not cover are resolved against the SAME
+      // permaweb the objects are read from, not arweave.net (#183).
+      resolveSha:
+        forced.resolveSha ?? shaResolverFor(flags.gateway, forced.env),
       ...(forced.clock ? { clock: forced.clock } : {}),
       ...(firstRun
         ? { onRunConcluded: (run: ConcludedRun) => concludeFirstRun(run) }
