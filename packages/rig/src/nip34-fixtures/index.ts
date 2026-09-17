@@ -5,13 +5,18 @@
  *
  * Every event here is committed exactly as the relay sent it — no edited
  * tags, no re-serialization — so `ngit-fixtures.test.ts` can verify each
- * one's id and signature. Both `@toon-protocol/rig` and
- * `@toon-protocol/rig-web` tests import these fixtures from this module (the
- * latter via the `@toon-protocol/rig` package, a workspace dependency it
- * already uses for other wire-level test fixtures — see
- * `packages/rig-web/tests/e2e/seed/lib/event-builders.ts`).
+ * one's id and signature. `@toon-protocol/rig` imports these fixtures from
+ * this module and re-exports them from its package index.
+ * `@toon-protocol/rig-web` tests use a self-contained COPY of this same
+ * captured data instead of importing this package directly
+ * (`packages/rig-web/src/web/__fixtures__/ngit-wire.ts`) — rig-web's
+ * typecheck gate runs before `@toon-protocol/rig` is built, so an import
+ * resolved through its built `dist/` would fail there even though it can
+ * look fine locally with a stale `dist/`. See that file's header for the
+ * full rationale.
  *
- * Re-capture with `scripts/capture-ngit-fixtures.mjs` (repo root).
+ * Re-capture with `scripts/capture-ngit-fixtures.mjs` (repo root); update
+ * BOTH this package's fixtures and rig-web's copy from the same capture.
  */
 
 export {
