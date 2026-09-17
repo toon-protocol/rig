@@ -20,7 +20,10 @@ import {
   FREE_TIER_MAX_ITEM_BYTES,
   hashGitObject,
 } from './objects.js';
-import type { UnsignedEvent } from './nip34-events.js';
+import {
+  MAX_ARWEAVE_TAGS_PER_EVENT,
+  type UnsignedEvent,
+} from './nip34-events.js';
 import {
   type FeeRates,
   type GitObjectUpload,
@@ -257,9 +260,13 @@ describe('planPush', () => {
     expect(plan.estimate.eventCount).toBe(2);
     expect(plan.estimate.eventFees).toBe(1000n);
     expect(plan.estimate.totalFee).toBe(uploadFees + 1000n);
+    // #158: the plan also carries the conformance facts a first announcement
+    // needs. The fixture has TWO roots (main's, plus the `emptytree` orphan),
+    // so the euc is the one reachable from the default branch.
     expect(plan.announcement).toEqual({
       name: 'Push Fixture',
       description: 'a test repo',
+      earliestUniqueCommit: commit1,
     });
 
     // Sizes are real: the README blob's size matches its content.
@@ -539,8 +546,17 @@ describe('executePush', () => {
     ]);
     expect(publisher.published[0]!.relayUrls).toEqual(RELAYS);
     const announce = publisher.published[0]!.event;
-    expect(tagValues(announce, 'd')[0]).toEqual([REPO_ID]);
-    expect(tagValues(announce, 'name')[0]).toEqual(['Push Fixture']);
+    // A first push announces d/name/description plus the #158 conformance
+    // tags. No `web` here: the planner was given none (the CLI supplies it).
+    expect(announce.tags).toEqual([
+      ['d', REPO_ID],
+      ['name', 'Push Fixture'],
+      ['description', 'a test repo'],
+      ['relays', ...RELAYS],
+      ['r', commit1, 'euc'],
+    ]);
+    expect(announce.tags.some((t) => t[0] === 'clone')).toBe(false);
+    expect(announce.content).toBe('');
 
     const refsEvent = publisher.published[1]!.event;
     expect(tagValues(refsEvent, 'd')[0]).toEqual([REPO_ID]);
@@ -772,6 +788,138 @@ describe('executePush', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Announcement conformance tags (#158)
+// ---------------------------------------------------------------------------
+
+describe('first-push announcement conformance tags (#158)', () => {
+  const WEB = 'https://toon-protocol.github.io/rig/#/npub1demo/push-fixture';
+
+  it('carries relays, web and the euc, and never a clone tag', async () => {
+    const remote = cannedRemote();
+    const plan = await planPush({
+      repoReader: reader,
+      remoteState: remote,
+      feeRates: FEE_RATES,
+      repoId: REPO_ID,
+      refs: ['refs/heads/main'],
+      announcement: { name: 'Push Fixture', description: 'a test repo', web: WEB },
+    });
+    const publisher = new MockPublisher();
+    await executePush({
+      plan,
+      publisher,
+      remoteState: remote,
+      repoReader: reader,
+      relayUrls: RELAYS,
+    });
+
+    const announce = publisher.published.find((p) => p.event.kind === 30617);
+    expect(announce).toBeDefined();
+    expect(announce?.event.tags).toEqual([
+      ['d', REPO_ID],
+      ['name', 'Push Fixture'],
+      ['description', 'a test repo'],
+      ['relays', ...RELAYS],
+      ['web', WEB],
+      ['r', commit1, 'euc'],
+    ]);
+  });
+
+  it('names every relay the publish goes to in ONE relays tag', async () => {
+    const remote = cannedRemote();
+    const manyRelays = ['wss://relay.one.test', 'wss://relay.two.test'];
+    const plan = await planPush({
+      repoReader: reader,
+      remoteState: remote,
+      feeRates: FEE_RATES,
+      repoId: REPO_ID,
+      refs: ['refs/heads/main'],
+    });
+    const publisher = new MockPublisher();
+    await executePush({
+      plan,
+      publisher,
+      remoteState: remote,
+      repoReader: reader,
+      relayUrls: manyRelays,
+    });
+
+    const announce = publisher.published.find((p) => p.event.kind === 30617);
+    expect(announce?.event.tags.filter((t) => t[0] === 'relays')).toEqual([
+      ['relays', ...manyRelays],
+    ]);
+  });
+
+  it('picks the SAME euc on every run of a multi-root repo', async () => {
+    const plans = await Promise.all(
+      [0, 1, 2].map(() =>
+        planPush({
+          repoReader: reader,
+          remoteState: cannedRemote(),
+          feeRates: FEE_RATES,
+          repoId: REPO_ID,
+          refs: ['refs/heads/main'],
+        })
+      )
+    );
+    // The fixture has two roots; the answer is stable and is main's root.
+    expect(await reader.rootCommits()).toHaveLength(2);
+    expect(plans.map((p) => p.announcement.earliestUniqueCommit)).toEqual([
+      commit1,
+      commit1,
+      commit1,
+    ]);
+  });
+
+  it('a push to an ALREADY-ANNOUNCED repo publishes no kind:30617 at all', async () => {
+    // The no-surprise-fee guarantee: a plain push never republishes an
+    // announcement, so it never charges an event fee the owner did not
+    // confirm — not even to backfill the #158 conformance tags.
+    const remote = cannedRemote({
+      announced: true,
+      announceEvent: {
+        id: '30'.repeat(32),
+        pubkey: 'ab'.repeat(32),
+        created_at: 1000,
+        kind: 30617,
+        tags: [
+          ['d', REPO_ID],
+          ['name', 'Push Fixture'],
+        ],
+        content: '',
+        sig: '0'.repeat(128),
+      },
+      refs: new Map([['refs/heads/main', commit1]]),
+      headSymref: 'refs/heads/main',
+    });
+    const plan = await planPush({
+      repoReader: reader,
+      remoteState: remote,
+      feeRates: FEE_RATES,
+      repoId: REPO_ID,
+      refs: ['refs/heads/main'],
+      announcement: { name: 'Push Fixture', description: 'a test repo', web: WEB },
+    });
+    expect(plan.announceNeeded).toBe(false);
+    // Not even computed: an announced repo's euc is never recomputed.
+    expect(plan.announcement.earliestUniqueCommit).toBeUndefined();
+    expect(plan.estimate.eventCount).toBe(1);
+
+    const publisher = new MockPublisher();
+    const result = await executePush({
+      plan,
+      publisher,
+      remoteState: remote,
+      repoReader: reader,
+      relayUrls: RELAYS,
+    });
+
+    expect(publisher.published.map((p) => p.event.kind)).toEqual([30618]);
+    expect(result.announceReceipt).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Empty (zero-byte) blob handling (#310)
 // ---------------------------------------------------------------------------
 
@@ -972,5 +1120,274 @@ describe('flat route pricing (estimate === claims parity)', () => {
       relayUrls: RELAYS,
     });
     expect(result.totalFeePaid).toBe(plan.estimate.totalFee);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Object-map cap on write (#162)
+// ---------------------------------------------------------------------------
+
+/** `count` sha→txId hints for objects that exist nowhere in the fixture repo. */
+function ancientHints(count: number): Map<string, string> {
+  const hints = new Map<string, string>();
+  for (let i = 0; i < count; i++) {
+    // The `f` prefix keeps these disjoint from every real fixture SHA.
+    const sha = 'f' + i.toString(16).padStart(39, '0');
+    hints.set(sha, `ancient-${i}`);
+  }
+  return hints;
+}
+
+/** The `arweave` tags of the single kind:30618 the publisher recorded. */
+function publishedArweaveTags(publisher: MockPublisher): string[][] {
+  const refsEvent = publisher.published.find((p) => p.event.kind === 30618);
+  if (!refsEvent) throw new Error('no kind:30618 was published');
+  return tagValues(refsEvent.event, 'arweave');
+}
+
+describe('object-map cap (#162)', () => {
+  it('a repo under the cap publishes the map byte-identically to before the cap', async () => {
+    const priorHints = new Map(
+      commit1Objects.map((sha) => [sha, `old-${sha}`] as [string, string])
+    );
+    const remote = cannedRemote({
+      announced: true,
+      refs: new Map([['refs/heads/main', commit1]]),
+      headSymref: 'refs/heads/main',
+      shaToTxId: priorHints,
+    });
+    const plan = await planPush({
+      repoReader: reader,
+      remoteState: remote,
+      feeRates: FEE_RATES,
+      repoId: REPO_ID,
+      refs: ['refs/heads/main'],
+    });
+    const publisher = new MockPublisher();
+    await executePush({
+      plan,
+      publisher,
+      remoteState: remote,
+      repoReader: reader,
+      relayUrls: RELAYS,
+    });
+
+    // The exact tag list the pre-cap implementation emitted: the merge, in
+    // merge order — prior hints first, then the uploads in upload order.
+    const expected = [
+      ...[...priorHints].map(([sha, txId]) => [sha, txId]),
+      ...publisher.uploads.map((u) => [u.sha, `tx-${u.sha}`]),
+    ];
+    expect(expected.length).toBeLessThan(MAX_ARWEAVE_TAGS_PER_EVENT);
+    expect(publishedArweaveTags(publisher)).toEqual(expected);
+  });
+
+  it('over the cap: publishes exactly the cap, always including this push', async () => {
+    const hints = ancientHints(MAX_ARWEAVE_TAGS_PER_EVENT + 500);
+    const remote = cannedRemote({
+      announced: true,
+      refs: new Map([['refs/heads/main', commit1]]),
+      headSymref: 'refs/heads/main',
+      shaToTxId: new Map([
+        ...hints,
+        ...commit1Objects.map((sha) => [sha, `old-${sha}`] as [string, string]),
+      ]),
+    });
+    const plan = await planPush({
+      repoReader: reader,
+      remoteState: remote,
+      feeRates: FEE_RATES,
+      repoId: REPO_ID,
+      refs: ['refs/heads/main'],
+    });
+    const publisher = new MockPublisher();
+    const result = await executePush({
+      plan,
+      publisher,
+      remoteState: remote,
+      repoReader: reader,
+      relayUrls: RELAYS,
+    });
+
+    const tags = publishedArweaveTags(publisher);
+    expect(tags).toHaveLength(MAX_ARWEAVE_TAGS_PER_EVENT);
+    expect(result.arweaveMap.size).toBe(MAX_ARWEAVE_TAGS_PER_EVENT);
+
+    // Every object this push uploaded survived the cap.
+    const published = new Map(tags.map(([sha, txId]) => [sha, txId]));
+    expect(publisher.uploads.length).toBeGreaterThan(0);
+    for (const upload of publisher.uploads) {
+      expect(published.get(upload.sha)).toBe(`tx-${upload.sha}`);
+    }
+    // No duplicate SHAs, and every tag is a well-formed pair.
+    expect(published.size).toBe(tags.length);
+    for (const tag of tags) expect(tag).toHaveLength(2);
+  });
+
+  it('priority: tips-reachable objects outrank unrelated hints, which fill the rest', async () => {
+    const hints = ancientHints(MAX_ARWEAVE_TAGS_PER_EVENT + 500);
+    const remote = cannedRemote({
+      announced: true,
+      refs: new Map([['refs/heads/main', commit1]]),
+      headSymref: 'refs/heads/main',
+      shaToTxId: new Map([
+        // Ancient hints come FIRST in merge order — under the old unbounded
+        // merge they would have crowded the reachable objects out.
+        ...hints,
+        ...commit1Objects.map((sha) => [sha, `old-${sha}`] as [string, string]),
+      ]),
+    });
+    const plan = await planPush({
+      repoReader: reader,
+      remoteState: remote,
+      feeRates: FEE_RATES,
+      repoId: REPO_ID,
+      refs: ['refs/heads/main'],
+    });
+    const publisher = new MockPublisher();
+    await executePush({
+      plan,
+      publisher,
+      remoteState: remote,
+      repoReader: reader,
+      relayUrls: RELAYS,
+    });
+
+    const tags = publishedArweaveTags(publisher);
+    const published = new Map(tags.map(([sha, txId]) => [sha, txId]));
+
+    // Tiers 1+2: everything reachable from the new tip is in, and the prior
+    // hints for the objects the push did not touch kept their txIds.
+    const reachable = reachableObjects([commit2], repoDir);
+    for (const sha of reachable) expect(published.has(sha)).toBe(true);
+    for (const sha of commit1Objects) {
+      expect(published.get(sha)).toBe(`old-${sha}`);
+    }
+
+    // Tier 3: the leftover room went to ancient hints, and the cap is full.
+    const ancientKept = tags
+      .map((t) => t[0] as string)
+      .filter((sha) => hints.has(sha));
+    expect(ancientKept).toHaveLength(
+      MAX_ARWEAVE_TAGS_PER_EVENT - reachable.length
+    );
+    // Tiers 1+2 are emitted before tier 3.
+    const firstAncientIdx = tags.findIndex(([sha]) => hints.has(sha as string));
+    for (const tag of tags.slice(0, firstAncientIdx)) {
+      expect(reachable).toContain(tag[0]);
+    }
+  });
+
+  it('never pays twice: objects absent from the map are resolved, not re-uploaded', async () => {
+    // The state event's map is EMPTY — as if the cap had evicted every one of
+    // this repo's entries. The objects are still on Arweave, so the GraphQL
+    // resolver finds them and nothing is uploaded or paid for again.
+    const onArweave = new Map(
+      allObjects.map((sha) => [sha, `tx-${sha}`] as [string, string])
+    );
+    const remote = cannedRemote(
+      {
+        announced: true,
+        refs: new Map([['refs/heads/main', commit1]]),
+        headSymref: 'refs/heads/main',
+        shaToTxId: new Map(), // capped away
+      },
+      onArweave // …but resolvable
+    );
+    const plan = await planPush({
+      repoReader: reader,
+      remoteState: remote,
+      feeRates: FEE_RATES,
+      repoId: REPO_ID,
+      refs: ['refs/heads/main'],
+    });
+
+    expect(plan.objects).toHaveLength(0);
+    expect(plan.estimate.uploadFee).toBe(0n);
+    expect(plan.estimate.totalFee).toBe(FEE_RATES.eventFee);
+
+    const publisher = new MockPublisher();
+    const result = await executePush({
+      plan,
+      publisher,
+      remoteState: remote,
+      repoReader: reader,
+      relayUrls: RELAYS,
+    });
+    expect(publisher.uploads).toHaveLength(0);
+    expect(result.totalFeePaid).toBe(FEE_RATES.eventFee);
+
+    // The resolver's finds are re-published, so an evicted entry heals on the
+    // next push that touches the object rather than costing another upload.
+    const published = new Map(
+      publishedArweaveTags(publisher).map(([sha, txId]) => [sha, txId])
+    );
+    expect(plan.knownShaToTxId.size).toBeGreaterThan(0);
+    for (const [sha, txId] of plan.knownShaToTxId) {
+      expect(published.get(sha)).toBe(txId);
+    }
+  });
+
+  it('crash-resume is unchanged when the cap is in force', async () => {
+    const hints = ancientHints(MAX_ARWEAVE_TAGS_PER_EVENT + 500);
+    const remote = cannedRemote({ announced: true, shaToTxId: new Map(hints) });
+    const plan = await planPush({
+      repoReader: reader,
+      remoteState: remote,
+      feeRates: FEE_RATES,
+      repoId: REPO_ID,
+      refs: ['refs/heads/main'],
+    });
+
+    // Crash after 3 uploads.
+    const crashing = new MockPublisher();
+    crashing.failOnUploadIndex = 3;
+    await expect(
+      executePush({
+        plan,
+        publisher: crashing,
+        remoteState: remote,
+        repoReader: reader,
+        relayUrls: RELAYS,
+      })
+    ).rejects.toThrow('simulated upload crash');
+    expect(crashing.published).toHaveLength(0);
+
+    // Resume: the 3 paid SHAs come back through the resolver — they were
+    // never in any published map, because the cap was already full.
+    const paid = new Map(
+      crashing.uploads.map((u) => [u.sha, `tx-${u.sha}`] as [string, string])
+    );
+    const freshRemote = cannedRemote(
+      { announced: true, shaToTxId: new Map(hints) },
+      paid
+    );
+    const replan = await planPush({
+      repoReader: reader,
+      remoteState: freshRemote,
+      feeRates: FEE_RATES,
+      repoId: REPO_ID,
+      refs: ['refs/heads/main'],
+    });
+    for (const sha of paid.keys()) {
+      expect(replan.objects.map((o) => o.sha)).not.toContain(sha);
+    }
+    expect(replan.objects).toHaveLength(plan.objects.length - 3);
+
+    const publisher = new MockPublisher();
+    const result = await executePush({
+      plan: replan,
+      publisher,
+      remoteState: freshRemote,
+      repoReader: reader,
+      relayUrls: RELAYS,
+    });
+    for (const sha of paid.keys()) {
+      expect(publisher.uploads.map((u) => u.sha)).not.toContain(sha);
+    }
+    expect(result.totalFeePaid).toBe(replan.estimate.totalFee);
+    expect(publishedArweaveTags(publisher)).toHaveLength(
+      MAX_ARWEAVE_TAGS_PER_EVENT
+    );
   });
 });

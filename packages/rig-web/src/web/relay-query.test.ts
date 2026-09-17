@@ -8,7 +8,7 @@ import {
   buildProfileFilter,
   buildRepoRefsFilter,
   buildIssueListFilter,
-  buildCommentFilter,
+  buildCommentFilters,
   buildPRListFilter,
   buildStatusFilter,
   buildEventByIdFilter,
@@ -101,16 +101,18 @@ describe('Issue Query Builder (8.5-UNIT-001)', () => {
 });
 
 describe('Comment Query Builder (8.5-UNIT-002)', () => {
-  it('[P1] buildCommentFilter returns filter with kind:1622 and #e tag', () => {
+  it('[P1] buildCommentFilters queries kind:1111 by #E and legacy kind:1622 by #e (#159)', () => {
     const eventIds = ['aaa', 'bbb'];
 
-    const filter = buildCommentFilter(eventIds);
+    const filters = buildCommentFilters(eventIds);
 
-    expect(filter).toEqual({
-      kinds: [1622],
-      '#e': eventIds,
-      limit: 500,
-    });
+    expect(filters).toEqual([
+      // NIP-22: the UPPERCASE root scope, so nested replies (whose lowercase
+      // `e` names their parent comment) are still in the thread.
+      { kinds: [1111], '#E': eventIds, limit: 500 },
+      // Legacy rig dialect: never written again, still read.
+      { kinds: [1622], '#e': eventIds, limit: 500 },
+    ]);
   });
 });
 
@@ -191,10 +193,13 @@ describe('Query Builders - NFR Edge Cases', () => {
     expect(filter['#a']).toEqual([`30617:${pubkey}:${repoId}`]);
   });
 
-  it('[P2] buildCommentFilter with empty array returns filter with empty #e', () => {
-    const filter = buildCommentFilter([]);
+  it('[P2] buildCommentFilters with an empty array returns empty tag filters', () => {
+    const filters = buildCommentFilters([]);
 
-    expect(filter).toEqual({ kinds: [1622], '#e': [], limit: 500 });
+    expect(filters).toEqual([
+      { kinds: [1111], '#E': [], limit: 500 },
+      { kinds: [1622], '#e': [], limit: 500 },
+    ]);
   });
 
   it('[P2] buildStatusFilter with empty array returns filter with empty #e', () => {

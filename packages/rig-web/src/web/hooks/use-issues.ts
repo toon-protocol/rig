@@ -2,7 +2,11 @@ import { useMemo } from 'react';
 import { useRigConfig } from './use-rig-config.js';
 import { useRelay } from './use-relay.js';
 import { npubToHex } from '../npub.js';
-import { parseIssue, resolveIssueStatus } from '../nip34-parsers.js';
+import {
+  parseIssue,
+  resolveIssueStatus,
+  withTargetAuthor,
+} from '../nip34-parsers.js';
 import {
   buildIssueListFilter,
   buildIssueCloseFilter,
@@ -72,7 +76,11 @@ export function useIssues(
       const issue = parseIssue(ev);
       if (issue) {
         // Override hardcoded 'open' status with resolved status
-        issue.status = resolveIssueStatus(issue.eventId, closeEvents, authorized);
+        issue.status = resolveIssueStatus(
+          issue.eventId,
+          closeEvents,
+          withTargetAuthor(authorized, issue.authorPubkey)
+        );
         parsed.push(issue);
       }
     }

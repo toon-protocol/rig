@@ -25,24 +25,38 @@ export {
 
 export {
   COMMENT_KIND,
+  LEGACY_COMMENT_KIND,
   MAINTAINERS_TAG,
+  MAX_ARWEAVE_TAGS_PER_EVENT,
   PAYOUT_TAG,
   REPOSITORY_STATE_KIND,
   authorizedStatusAuthors,
   buildComment,
   buildIssue,
   buildPatch,
-  buildRepoAnnouncement,
   buildRepoRefs,
   buildStatus,
+  commentBelongsToThread,
   isValidEvmPayoutAddress,
   parseMaintainers,
   parsePayout,
+  type CommentParent,
+  type CommentRoot,
   type PayoutChain,
   type PayoutPointer,
   type StatusKind,
   type UnsignedEvent,
 } from './nip34-events.js';
+
+export {
+  amendRepoAnnouncement,
+  buildRepoAnnouncement,
+  EARLIEST_UNIQUE_COMMIT_MARKER,
+  RELAYS_TAG,
+  WEB_TAG,
+  type AnnouncementEdits,
+  type ExistingAnnouncement,
+} from './repo-announcement.js';
 
 export {
   GitError,

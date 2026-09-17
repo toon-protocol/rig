@@ -321,7 +321,7 @@ describe('DaemonGitClient', () => {
   const RECEIPT: GitEventResponse = {
     eventId: 'ef'.repeat(32),
     feePaid: '5',
-    kind: 1622,
+    kind: 1111,
   };
 
   it('POSTs the request body to the matching /git/* route', async () => {
@@ -337,8 +337,9 @@ describe('DaemonGitClient', () => {
     const req = {
       repoAddr: { ownerPubkey: 'ab'.repeat(32), repoId: 'demo' },
       rootEventId: '12'.repeat(32),
+      rootKind: 1621,
+      rootAuthorPubkey: 'cd'.repeat(32),
       body: 'B',
-      marker: 'root' as const,
     };
     await expect(client.gitComment(req)).resolves.toEqual(RECEIPT);
     expect(seen).toEqual([

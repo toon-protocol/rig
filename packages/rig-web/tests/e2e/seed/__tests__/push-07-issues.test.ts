@@ -2,7 +2,7 @@
  * ATDD Tests: Story 10.7 -- Seed Script: Issues, Labels, Conversations (Push 7)
  *
  * Unit tests verify push-07-issues.ts publishes 2 kind:1621 issue events with
- * labels (t tags), 5 kind:1622 comment events across two threads,
+ * labels (t tags), 5 NIP-22 kind:1111 comment events across two threads,
  * three-client signing (Alice + Bob + Charlie), state passthrough from
  * Push06State, and the "no new git objects" constraint.
  * Integration tests (.todo) require live relay infrastructure.
@@ -118,10 +118,10 @@ describe('Story 10.7: Push 07 -- Issues, Labels, Conversations', () => {
   });
 
   // -------------------------------------------------------------------------
-  // AC-7.4: buildComment produces correct kind:1622 with e, a, and p tags
+  // AC-7.4: buildComment produces a NIP-22 kind:1111 with E/K/P, e/k/p and `a`
   // -------------------------------------------------------------------------
 
-  it('[P0] AC-7.4: buildComment produces kind:1622 with correct e tag (marker: reply), a tag, and p tag', async () => {
+  it('[P0] AC-7.4: buildComment produces kind:1111 with the NIP-22 root scope, parent, and a tag', async () => {
     const { buildComment } = await import('../lib/event-builders.js');
     const push01 = await import('../push-01-init.js');
 
@@ -132,26 +132,29 @@ describe('Story 10.7: Push 07 -- Issues, Labels, Conversations', () => {
     const event = buildComment(
       ownerPubkey,
       push01.REPO_ID,
-      issueEventId,
-      issueAuthorPubkey,
+      { eventId: issueEventId, kind: 1621, authorPubkey: issueAuthorPubkey },
       'Should we use exponential backoff?'
     );
 
-    // kind:1622
-    expect(event.kind).toBe(1622);
+    // NIP-22 kind:1111
+    expect(event.kind).toBe(1111);
 
     // a tag references repo
     const aTag = event.tags.find((t) => t[0] === 'a');
     expect(aTag).toBeDefined();
     expect(aTag![1]).toBe(`30617:${ownerPubkey}:${push01.REPO_ID}`);
 
-    // e tag references the issue event with 'reply' marker
+    // Uppercase root scope: the issue
+    const ETag = event.tags.find((t) => t[0] === 'E');
+    expect(ETag).toBeDefined();
+    expect(ETag![1]).toBe(issueEventId);
+
+    // Lowercase parent: a top-level comment repeats the root
     const eTag = event.tags.find((t) => t[0] === 'e');
     expect(eTag).toBeDefined();
     expect(eTag![1]).toBe(issueEventId);
-    expect(eTag![3]).toBe('reply');
 
-    // p tag = issue author pubkey (for threading)
+    // p tag = issue author pubkey (parent author)
     const pTag = event.tags.find((t) => t[0] === 'p');
     expect(pTag).toBeDefined();
     expect(pTag![1]).toBe(issueAuthorPubkey);
@@ -690,18 +693,18 @@ describe('Story 10.7: Push 07 -- Issues, Labels, Conversations', () => {
     expect(c2BuildIdx).toBeGreaterThan(-1);
     expect(c3BuildIdx).toBeGreaterThan(-1);
 
-    // Each comment's buildComment call should reference issue1EventId (appears before the body string)
+    // Each comment's buildComment call passes the Issue #1 NIP-22 root scope
+    // (`issue1Root` = { eventId: issue1EventId, kind, authorPubkey }).
     const c1Section = source.slice(c1BuildIdx - 200, c1BuildIdx);
     const c2Section = source.slice(c2BuildIdx - 200, c2BuildIdx);
     const c3Section = source.slice(c3BuildIdx - 200, c3BuildIdx);
-    expect(c1Section).toContain('issue1EventId');
-    expect(c2Section).toContain('issue1EventId');
-    expect(c3Section).toContain('issue1EventId');
+    expect(c1Section).toContain('issue1Root');
+    expect(c2Section).toContain('issue1Root');
+    expect(c3Section).toContain('issue1Root');
 
-    // Each Issue #1 comment should pass issue1Signed.pubkey for p tag threading
-    expect(c1Section).toContain('issue1Signed.pubkey');
-    expect(c2Section).toContain('issue1Signed.pubkey');
-    expect(c3Section).toContain('issue1Signed.pubkey');
+    // …and that root carries issue1EventId plus issue1Signed's kind and pubkey.
+    expect(source).toContain('eventId: issue1EventId');
+    expect(source).toContain('authorPubkey: issue1Signed.pubkey');
   });
 
   // -------------------------------------------------------------------------
@@ -725,15 +728,15 @@ describe('Story 10.7: Push 07 -- Issues, Labels, Conversations', () => {
     expect(c4BuildIdx).toBeGreaterThan(-1);
     expect(c5BuildIdx).toBeGreaterThan(-1);
 
-    // Each comment's buildComment call should reference issue2EventId
+    // Each comment's buildComment call passes the Issue #2 NIP-22 root scope.
     const c4Section = source.slice(c4BuildIdx - 200, c4BuildIdx);
     const c5Section = source.slice(c5BuildIdx - 200, c5BuildIdx);
-    expect(c4Section).toContain('issue2EventId');
-    expect(c5Section).toContain('issue2EventId');
+    expect(c4Section).toContain('issue2Root');
+    expect(c5Section).toContain('issue2Root');
 
-    // Each Issue #2 comment should pass issue2Signed.pubkey for p tag threading
-    expect(c4Section).toContain('issue2Signed.pubkey');
-    expect(c5Section).toContain('issue2Signed.pubkey');
+    // …and that root carries issue2EventId plus issue2Signed's kind and pubkey.
+    expect(source).toContain('eventId: issue2EventId');
+    expect(source).toContain('authorPubkey: issue2Signed.pubkey');
   });
 
   // -------------------------------------------------------------------------
@@ -751,12 +754,12 @@ describe('Story 10.7: Push 07 -- Issues, Labels, Conversations', () => {
     );
     const source = fs.readFileSync(sourceFile, 'utf-8');
 
-    // Count buildComment calls that pass issue1EventId
-    const issue1Matches = source.match(/buildComment\([^)]*issue1EventId/g);
+    // Count buildComment calls rooted at Issue #1
+    const issue1Matches = source.match(/buildComment\([^)]*issue1Root/g);
     expect(issue1Matches).toHaveLength(3);
 
-    // Count buildComment calls that pass issue2EventId
-    const issue2Matches = source.match(/buildComment\([^)]*issue2EventId/g);
+    // Count buildComment calls rooted at Issue #2
+    const issue2Matches = source.match(/buildComment\([^)]*issue2Root/g);
     expect(issue2Matches).toHaveLength(2);
   });
 
@@ -764,7 +767,7 @@ describe('Story 10.7: Push 07 -- Issues, Labels, Conversations', () => {
   // AC-7.4: buildComment default marker is 'reply' (all comments use default)
   // -------------------------------------------------------------------------
 
-  it('[P1] AC-7.4: source does not override buildComment marker (all comments use default reply marker)', async () => {
+  it('[P1] AC-7.4: every seeded comment is top-level (no NIP-22 parent comment)', async () => {
     const fs = await import('node:fs');
     const path = await import('node:path');
 
@@ -775,14 +778,12 @@ describe('Story 10.7: Push 07 -- Issues, Labels, Conversations', () => {
     );
     const source = fs.readFileSync(sourceFile, 'utf-8');
 
-    // buildComment's 6th parameter (marker) defaults to 'reply'
-    // Source should NOT pass 'root' as marker for any comment
-    // All 5 buildComment calls should use exactly 5 args (omitting marker for default 'reply')
+    // Five comments, all built with the 4-arg (top-level) form: the optional
+    // 5th `parent` argument would make one a nested reply, which this seed
+    // deliberately does not exercise.
     const buildCommentCalls = source.match(/buildComment\(/g);
     expect(buildCommentCalls).toHaveLength(5);
-
-    // No 'root' marker override
-    expect(source).not.toContain("'root'");
+    expect(source).not.toContain('parent:');
   });
 
   // -------------------------------------------------------------------------
@@ -790,7 +791,7 @@ describe('Story 10.7: Push 07 -- Issues, Labels, Conversations', () => {
   // -------------------------------------------------------------------------
 
   it.todo('[integration] should publish 2 kind:1621 issue events to live relay');
-  it.todo('[integration] should publish 5 kind:1622 comment events to live relay');
+  it.todo('[integration] should publish 5 kind:1111 comment events to live relay');
   it.todo('[integration] should return valid event IDs from relay for all 7 events');
   it.todo('[integration] should be queryable by relay after publish');
   it.todo('[integration] should filter issues by label (t tag) via relay query');

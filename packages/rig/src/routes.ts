@@ -47,8 +47,12 @@ export interface GitEstimateRequest {
    * (forward-compat); defaults to the daemon's config-seeded relay.
    */
   relayUrls?: string[];
-  /** Repo name/description for the first-push kind:30617 announcement. */
-  announcement?: { name?: string; description?: string };
+  /**
+   * Repo metadata for the first-push kind:30617 announcement. `web` is the
+   * repo's rig-web viewer URL for the NIP-34 `web` tag (#158); a daemon that
+   * predates it simply ignores the field.
+   */
+  announcement?: { name?: string; description?: string; web?: string };
 }
 
 /** Pre-push fee table (all fees in base/micro units, decimal strings). */
@@ -84,7 +88,17 @@ export interface GitEstimateResponse {
   knownShaToTxId: Record<string, string>;
   /** True when no kind:30617 exists yet — the push announces first. */
   announceNeeded: boolean;
-  announcement: { name: string; description: string };
+  /**
+   * What the first announcement will carry. `web` and `earliestUniqueCommit`
+   * are the NIP-34 conformance tags (#158) and are absent when the planner
+   * could not derive them (no relay resolved, or a repo with no commits).
+   */
+  announcement: {
+    name: string;
+    description: string;
+    web?: string;
+    earliestUniqueCommit?: string;
+  };
   estimate: GitFeeEstimate;
 }
 
@@ -153,20 +167,32 @@ export interface GitIssueRequest {
   labels?: string[];
 }
 
-/** `POST /git/comment` — publish a kind:1622 comment on an issue/patch. PAID. */
+/**
+ * `POST /git/comment` — publish a NIP-22 kind:1111 comment on an issue or
+ * patch. PAID.
+ *
+ * The root is the issue/patch being discussed, NEVER the repository: it
+ * becomes the comment's uppercase `E`/`K`/`P` scope. `parentComment` makes
+ * the comment a nested reply (lowercase `e`/`k`/`p`, `k` = 1111); omitted,
+ * the parent is the root itself. Legacy kind:1622 is never published (#159).
+ */
 export interface GitCommentRequest {
   repoAddr: GitRepoAddr;
-  /** Event id of the issue or patch being commented on. */
+  /** Event id of the issue or patch the thread hangs off (uppercase `E`). */
   rootEventId: string;
+  /** Kind of that root event, e.g. 1621 or 1617 (uppercase `K`). */
+  rootKind: number;
+  /** Pubkey of the root event's author (uppercase `P`). */
+  rootAuthorPubkey: string;
   /** Comment body (Markdown content). */
   body: string;
-  /**
-   * Pubkey of the TARGET event's author (NIP-34 `p` threading tag — not the
-   * comment author). Defaults to the repo owner.
-   */
-  parentAuthorPubkey?: string;
-  /** `e`-tag marker (default 'root': commenting directly on the issue/patch). */
-  marker?: 'root' | 'reply';
+  /** The kind:1111 comment being replied to — omit for a top-level comment. */
+  parentComment?: {
+    /** Event id of that comment (lowercase `e`). */
+    eventId: string;
+    /** Pubkey of its author (lowercase `p`). */
+    authorPubkey: string;
+  };
 }
 
 /**

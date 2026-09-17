@@ -194,6 +194,66 @@ describe('objectsBetweenWithPaths', () => {
   });
 });
 
+describe('reachableObjectsNewestFirst', () => {
+  it('lists the full closure, newest commit first, each commit before its own objects', async () => {
+    const shas = await reader.reachableObjectsNewestFirst([commit2]);
+    const full = await reader.objectsBetween([commit2], []);
+
+    expect(new Set(shas)).toEqual(new Set(full));
+    expect(new Set(shas).size).toBe(shas.length);
+    // Newest commit first, and its objects land before the older commit's.
+    expect(shas[0]).toBe(commit2);
+    expect(shas.indexOf(commit2)).toBeLessThan(shas.indexOf(commit1));
+    expect(shas.indexOf(binaryBlobSha)).toBeLessThan(shas.indexOf(commit1));
+  });
+
+  it('drops tips that do not resolve locally instead of failing', async () => {
+    const withGhost = await reader.reachableObjectsNewestFirst([
+      NON_EXISTENT_SHA,
+      commit2,
+    ]);
+    const without = await reader.reachableObjectsNewestFirst([commit2]);
+    expect(withGhost).toEqual(without);
+  });
+
+  it('returns [] when no tip resolves', async () => {
+    await expect(
+      reader.reachableObjectsNewestFirst([NON_EXISTENT_SHA])
+    ).resolves.toEqual([]);
+    await expect(reader.reachableObjectsNewestFirst([])).resolves.toEqual([]);
+  });
+
+  it('stops the walk at `limit`, keeping the newest-first prefix', async () => {
+    const full = await reader.reachableObjectsNewestFirst([commit2]);
+    expect(full.length).toBeGreaterThan(3);
+
+    const limited = await reader.reachableObjectsNewestFirst([commit2], 3);
+    expect(limited).toEqual(full.slice(0, 3));
+    await expect(
+      reader.reachableObjectsNewestFirst([commit2], 0)
+    ).resolves.toEqual([]);
+    // A limit past the end is simply the whole walk.
+    await expect(
+      reader.reachableObjectsNewestFirst([commit2], full.length + 100)
+    ).resolves.toEqual(full);
+  });
+});
+
+describe('listAllObjectShas', () => {
+  it('lists every object in the database, whatever any ref reaches', async () => {
+    const shas = await reader.listAllObjectShas();
+    const reachableFromMain = await reader.objectsBetween([commit2], []);
+
+    expect(new Set(shas).size).toBe(shas.length);
+    for (const sha of shas) expect(sha).toMatch(/^[0-9a-f]{40}$/);
+    for (const sha of reachableFromMain) expect(shas).toContain(sha);
+    // Objects only the feature branch and the annotated tag reach are in too.
+    expect(shas).toContain(featureCommit);
+    expect(shas).toContain(annotatedTagSha);
+    expect(shas).not.toContain(NON_EXISTENT_SHA);
+  });
+});
+
 describe('statObjects (cat-file --batch-check)', () => {
   it('returns type + body size without reading bodies, reports missing', async () => {
     const { objects, missing } = await reader.statObjects([
@@ -394,5 +454,59 @@ describe('injection safety', () => {
     } finally {
       rmSync(join(repoDir, 'main'));
     }
+  });
+});
+
+describe('rootCommits (#158 — the euc source)', () => {
+  it('reports the single root of a linear history', async () => {
+    expect(await reader.rootCommits()).toEqual([commit1]);
+    expect(await reader.rootCommits('HEAD')).toEqual([commit1]);
+  });
+
+  it('reports every root, and only those reachable from a rev', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'toon-roots-'));
+    try {
+      git(['init', '--initial-branch=main'], dir);
+      writeFileSync(join(dir, 'a.txt'), 'a\n');
+      git(['add', '.'], dir);
+      git(['commit', '-m', 'main root'], dir);
+      const mainRoot = git(['rev-parse', 'HEAD'], dir);
+
+      // An UNRELATED history: a second root reachable only from `orphan`.
+      git(['checkout', '--orphan', 'orphan'], dir);
+      git(['rm', '-rf', '.'], dir);
+      writeFileSync(join(dir, 'b.txt'), 'b\n');
+      git(['add', '.'], dir);
+      git(['commit', '-m', 'orphan root'], dir);
+      const orphanRoot = git(['rev-parse', 'HEAD'], dir);
+      git(['checkout', 'main'], dir);
+
+      const roots = new GitRepoReader(dir);
+      expect(new Set(await roots.rootCommits())).toEqual(
+        new Set([mainRoot, orphanRoot])
+      );
+      // HEAD is main: the orphan root is not reachable from it.
+      expect(await roots.rootCommits('HEAD')).toEqual([mainRoot]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports no roots for a repo with no commits (unborn HEAD)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'toon-empty-'));
+    try {
+      git(['init', '--initial-branch=main'], dir);
+      const empty = new GitRepoReader(dir);
+      expect(await empty.rootCommits()).toEqual([]);
+      expect(await empty.rootCommits('HEAD')).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an option/shell-shaped revision before spawning git', async () => {
+    await expect(reader.rootCommits('--all')).rejects.toThrow(
+      /not a valid git revision/
+    );
   });
 });
