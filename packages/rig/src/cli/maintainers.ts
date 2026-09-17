@@ -23,7 +23,8 @@
  */
 
 import { parseArgs } from 'node:util';
-import { buildRepoAnnouncement, parseMaintainers } from '../nip34-events.js';
+import { parseMaintainers } from '../nip34-events.js';
+import { amendRepoAnnouncement } from '../repo-announcement.js';
 import { ownerToHex } from '../npub.js';
 import { fetchRemoteState } from '../remote-state.js';
 import {
@@ -314,17 +315,15 @@ async function runMutate(
         ? [...current, pubkey]
         : current.filter((m) => m !== pubkey);
 
-    const name = remote.name ?? ctx.repoId;
-    const description = remote.description ?? '';
-    // Preserve the payout pointer (rig#92) — this republish must not
-    // silently wipe it out from under `rig payout`.
-    const event = buildRepoAnnouncement(
-      ctx.repoId,
-      name,
-      description,
-      next,
-      remote.payout
-    );
+    // Amend rather than rebuild (#154): `maintainers` is the ONLY field this
+    // command edits, so name, description, the payout pointer (rig#92) and
+    // every tag rig does not model — another client's role tags, `clone`,
+    // `blossoms`, … — ride along verbatim instead of being wiped by the
+    // replaceable write. Passing a field here would rewrite it.
+    const event = amendRepoAnnouncement(remote.announceEvent, {
+      repoId: ctx.repoId,
+      maintainers: next,
+    });
     const fee = (await standaloneCtx.publisher.getFeeRates()).eventFee.toString();
     const action = `kind:30617 maintainers ${op} ${pubkey.slice(0, 8)}…`;
 
