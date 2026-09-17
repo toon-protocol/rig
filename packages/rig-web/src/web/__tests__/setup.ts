@@ -19,7 +19,7 @@ if (!('ResizeObserver' in globalThis)) {
   });
 }
 
-// Polyfill matchMedia for jsdom (needed by ThemeToggle)
+// Polyfill matchMedia for jsdom (needed by the boot theme resolution)
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
   value: (query: string) => ({

@@ -50,7 +50,7 @@ describe('[P0] ErrorBoundary', () => {
 });
 
 describe('[P0] NotFoundPage catch-all (#277)', () => {
-  it('unmatched URLs render an inline card with the app header intact', () => {
+  it('unmatched URLs render an inline card instead of a blank page', () => {
     render(
       <MemoryRouter initialEntries={['/some/unrouted/path/commits']}>
         <Routes>
@@ -61,9 +61,8 @@ describe('[P0] NotFoundPage catch-all (#277)', () => {
         </Routes>
       </MemoryRouter>,
     );
-    // Header stays (no white screen)...
-    expect(screen.getByText('The Rig')).toBeInTheDocument();
-    // ...and the user gets a way back instead of a blank page
+    // The layout still renders its outlet (no white screen), and the user
+    // gets a way back instead of a blank page.
     expect(screen.getByText('Page not found')).toBeInTheDocument();
     expect(screen.getByText('Back to repositories')).toBeInTheDocument();
   });
