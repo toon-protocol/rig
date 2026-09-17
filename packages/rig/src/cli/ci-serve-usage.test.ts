@@ -26,4 +26,13 @@ describe('rig ci serve usage: operational defaults', () => {
       )
     );
   });
+
+  it('documents the runner image pull policy, including what a locally built image needs (#175)', () => {
+    expect(CI_SERVE_USAGE).toMatch(
+      /--pull\s+pull the runner image before each run \(act's default\)/
+    );
+    expect(CI_SERVE_USAGE).toMatch(/--no-pull\s+never pull/);
+    expect(CI_SERVE_USAGE).toContain('locally built');
+    expect(CI_SERVE_USAGE).toContain('--pull=false');
+  });
 });

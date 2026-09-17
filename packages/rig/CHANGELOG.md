@@ -1,5 +1,121 @@
 # @toon-protocol/rig
 
+## 4.6.0
+
+### Minor Changes
+
+- 8d033e2: Bound the kind:30618 object map at 2000 `arweave` tags, on write and on read (#162).
+
+  The sha→txId map was merged cumulatively into a single replaceable state event
+  and capped by nothing, so a large repository would eventually publish an event
+  relays reject. One constant, `MAX_ARWEAVE_TAGS_PER_EVENT`, now bounds it:
+
+  - **Write.** When the merged map exceeds the cap, entries are kept in priority
+    order — the objects this push introduced first, then objects reachable from
+    the new ref tips newest-first, then whatever merge-order hints still fit.
+    A repository under the cap publishes a byte-identical map to before.
+  - **Read.** `fetchRemoteState` (and rig-web's `parseRepoRefs`) ingest at most
+    the cap from one event, so a hostile relay cannot exhaust memory with a
+    giant state event.
+
+  Nothing becomes unreachable. A dropped entry's object is still on Arweave under
+  its `Git-SHA` / `Repo` tags and resolves through the GraphQL resolver, which was
+  already the documented fallback — so clone and fetch are unchanged from a user's
+  point of view. Push planning already treated "absent from the map" as "ask the
+  resolver", never as "needs upload"; resume safety and never-pay-twice are
+  unchanged, and are now covered by tests that run with the cap saturated.
+
+  `rig fetch` also stops deriving "objects I already have" from the remote's
+  `arweave` map — it reads the local object database instead — so a capped map
+  never causes it to re-download history the repository already holds. Both of
+  these object walks are streamed and bounded, so the code the cap added cannot
+  itself fail on the very large repositories the cap exists for.
+
+  Fixes a latent bug in rig-web's `parseRepoRefs`: hitting the 1000-ref cap used
+  to abandon the whole tag loop, so a state event with more than 1000 refs parsed
+  an empty object map.
+
+- dd9e62e: Write repository state refs in both NIP-34 and legacy shapes on push (rig#157).
+
+  A `rig push` now publishes every ref in the kind:30618 repository state event in the NIP-34 shape `[<refPath>, "<sha>"]` — the ref path as the tag name — alongside rig's legacy `["r", <refPath>, "<sha>"]`, with identical SHAs for each ref. `HEAD` and the `arweave` object map are unchanged.
+
+  This makes a rig-pushed repo's branches and tags visible to ngit, gitworkshop.dev and any other conformant NIP-34 client, while rig installs older than this release — which only read the legacy shape — keep fetching without any change on their end. An event produced by this writer parses to the same refs through rig's dual-shape reader (rig#156) and through a legacy-only reader.
+
+  The legacy `r` write is removed in a later, separately ticketed change once rig versions older than this release are no longer supported.
+
+- 1b7d7ef: Announcement republish is lossless: `rig maintainers` and `rig payout` no longer destroy tags rig does not model (#154).
+
+  A kind:30617 is replaceable, so republishing it replaces the whole event. Until now `rig maintainers add|remove` and `rig payout set|clear` rebuilt the announcement from the five fields rig models, silently deleting everything else — another client's maintainer role tags (`M`/`m`/`o`), `clone`, `blossoms`, `t`, `alt`, or any tag invented later.
+
+  A new module, `amendRepoAnnouncement`, now owns "current announcement + field edits → next unsigned announcement". Tags it knows are rewritten from the edits, in the place the current announcement kept them; **every other tag is carried over verbatim, in its original relative order**, and the event's `content` is preserved. Its edit set already has room for the `relays`, `web` and earliest-unique-commit fields that later NIP-34 conformance work will write.
+
+  Every kind:30617 rig publishes — first push, `rig maintainers`, `rig payout` — is now built through it. A first push publishes exactly the announcement it did before, and `buildRepoAnnouncement` is unchanged as a public export (it is `amendRepoAnnouncement` with nothing to amend). `amendRepoAnnouncement`, `AnnouncementEdits` and `ExistingAnnouncement` are new exports of `@toon-protocol/rig`.
+
+  One small behaviour change beyond preservation: each command now edits only its own field, so a republish no longer re-asserts `name` and `description`. On an announcement that carries neither tag (another client can keep its prose in the event's `content`), `rig maintainers` and `rig payout` used to inject `["name", "<repo-id>"]` and a `description` copied out of `content`; they now leave both alone.
+
+- a23444d: NIP-22 comments: rig writes kind:1111, and reads kind:1111 and legacy kind:1622 as one thread (#159).
+
+  NIP-34's "Replies" clause mandates NIP-22, which is kind:1111. rig wrote kind:1622 — a private dialect no other NIP-34 client queries — so no comment thread crossed the boundary in either direction. From this release:
+
+  - **Write.** `rig comment <target-event-id>` publishes a NIP-22 kind:1111. The root is the issue or patch being discussed, never the repository: root scope is uppercase (`E` root event id, `K` root kind, `P` root author), the parent lowercase (`e`, `k`, `p`). A top-level comment's parent equals its root; passing an existing kind:1111 comment as the target publishes a reply, whose lowercase parent is that comment with `k` = `1111` while the uppercase root stays the issue/patch. The repo coordinate rides along as an ordinary `a` tag for subscription filtering. The target is read off the relay first (a free read) so the root's kind and author come from the wire rather than being guessed — a target the relay does not have is an error and nothing is paid.
+  - **Read.** `rig issue show` and `rig pr show` query both kinds and merge them by `created_at`, so a thread mixing old and new comments reads as one conversation. For kind:1111, thread membership is decided by the uppercase `E` tag matched case-sensitively (the rule rig already applies to kind:1619): a kind:1111 whose only match is a lowercase `e` is a reply to something else and is not in the thread. A nested reply is now labelled with the comment it replies to.
+  - **kind:1622 is never written again.** It stays exported as `LEGACY_COMMENT_KIND`, a read-only legacy constant, so threads published before this release keep rendering.
+
+  **Visible behaviour change: new comments are invisible to rig versions older than this release.** Older rig and rig-web installs query only kind:1622 and will not show comments published by this version. Comments already published as kind:1622 are unaffected and still render everywhere. Upgrade collaborators before relying on new comment threads.
+
+  **Source-compatibility note for library and daemon callers.** Released as a minor per the spec, but callers of these exports must update: `buildComment(repoOwnerPubkey, repoId, root, body, parent?)` now takes the root event (`{ eventId, kind, authorPubkey }`) plus an optional parent comment, replacing the old `issueOrPrEventId` / `authorPubkey` / `root|reply` marker arguments; `COMMENT_KIND` is now `1111`; the `POST /git/comment` request carries `rootKind` and `rootAuthorPubkey` (and an optional `parentComment`) in place of `parentAuthorPubkey`/`marker`; and the retired `rig comment --marker` / `--parent-author` flags now exit 2 with a message pointing at the new form.
+
+  `@toon-protocol/rig-web` changes alongside (it is excluded from changesets): its relay client queries both kinds, its parser accepts kind:1111 and exposes each comment's root, parent and wire kind, and issue/PR conversations merge the two kinds in time order.
+
+- 3723587: A patch's branch is now visible instead of invisible-and-mislabeled (rig#161). rig used to write a `rig pr create --branch` value into a kind:1617 patch's `t` tag, while both of rig's own readers (`rig pr list`/`rig pr show` and rig-web's parser) looked for a tag named `branch` — so the branch never showed up as a branch and was misreported as a label instead.
+
+  `buildPatch` now writes the branch to `branch-name` — the tag name confirmed against the NIP-34 source at implementation time (it is the exact tag kind:1618 pull requests use; rig's kind:1617 patches now use the same spelling) — and never to `t`. Readers (`rig pr list`/`rig pr show` and rig-web) look for `branch-name` first, then fall back to the legacy `branch` tag for old events. A patch that only ever carried its branch in `t` is left exactly as it renders today: no heuristic guesses which `t` value was a branch, so it still shows as a label, not a branch.
+
+  `@toon-protocol/rig-web` picks up the same reader fix (`packages/rig-web/src/web/nip34-parsers.ts`) but is not independently versioned — it is excluded from changesets in this repo (`.changeset/config.json`) and ships from `main`.
+
+- 09c2200: Repository announcements (kind:30617) now carry the NIP-34 conformance tags, and `rig refresh` backfills them on an existing repo.
+
+  A repo's announcement gains three tags, so other NIP-34 clients (ngit, gitworkshop.dev) can find, browse and group it:
+
+  - `relays` — the relay URLs the publish is going to, as one multi-value tag: where the repo's issues, patches and state live.
+  - `web` — the repo's rig-web viewer URL, built from the same base URL and route shape the Rig pointer already uses (so ADR-0001's URL-permanence rules govern it).
+  - `["r", "<sha>", "euc"]` — the earliest unique commit, the repo's fork identity. It is computed from the local repo's root commits: one root wins outright; with several, only the roots reachable from the default branch are candidates, and a remaining tie is broken on the lexicographically lowest SHA. **Once an announcement carries an `euc`, a republish preserves it and never recomputes it** — a repo's fork identity must never change under its owner.
+
+  `clone` is never written: rig has no git-clonable URL and must not send other clients to a fetch that cannot succeed. An existing `clone` tag written by another client is preserved, like every other tag rig does not model.
+
+  New repos get all three on their first push. Existing repos are backfilled on any owner-initiated republish — `rig maintainers add|remove`, `rig payout set|clear`, or the new `rig refresh`. **A plain `rig push` still never republishes an existing announcement**, so it can never charge an event fee the owner did not confirm.
+
+  `rig refresh` is a new owner-only command that republishes the announcement with no field edit, purely to refresh those tags. It runs behind the same fee confirmation gate and the same `--json` contract as `rig maintainers`, lists the exact tags it would add, change or drop before asking, and publishes nothing and pays nothing when no tag would change.
+
+  `rig maintainers add|remove` and `rig payout set|clear` now show the same tag-level diff before their confirmation, and their `--json` envelopes gain a `changes: { added, removed }` field, so a machine consumer sees exactly what the fee buys.
+
+  Note for repos announced by another NIP-34 client: `relays` and `web` are **unioned**, never substituted — a republish adds rig's relay and viewer URL to whatever the announcement already declares and keeps that client's entries in their original order. A republish that adds nothing new changes no tag, so it publishes nothing and costs nothing. Every tag rig does not model — `clone`, the maintainer role tags, `blossoms`, `t`, `alt` and anything else — still rides along verbatim.
+
+- d7123bb: Read NIP-34-shaped ref tags from repository state events everywhere (rig#156).
+
+  NIP-34 puts the ref path in the kind:30618 tag _name_ (`["refs/heads/main", "<sha>"]`). rig has only ever read its own `["r", "refs/heads/main", "<sha>"]` spelling, so it parsed zero refs from a state event written by ngit, gitworkshop.dev or any other conformant client. Every reader now accepts both shapes, through one shared parser (`nip34-refs.ts`): the CLI's remote-state reader behind `rig clone` / `rig fetch`, and the CI Coordinator's push watcher and commit materialization.
+
+  - A tag is a NIP-shape ref when its name starts with `refs/heads/` or `refs/tags/`. Nothing else in that shape is read as a ref.
+  - A NIP-shape name ending in `^{}` is a peeled annotated tag: not a ref, not listed.
+  - When both shapes name the same ref with different SHAs, the NIP shape wins, whichever came first in tag order — so two rig versions can never silently disagree about an event.
+  - The existing refname-safety and full-SHA checks apply identically to both shapes; the new parse path is not a hostile-relay bypass.
+  - The 1000-ref cap counts distinct refs across both shapes combined, so a dual-written event cannot double the limit. The NIP shape gets first claim on those slots, so which refs survive an oversized event never depends on the order the two shapes were interleaved in.
+
+  Read-only: rig still writes the legacy `r` shape, and legacy-only state events behave exactly as before. The same dual-shape rules land in `@toon-protocol/rig-web`'s `parseRepoRefs` (a documented copy — rig-web cannot import this package), so the viewer renders any NIP-34 repo's branches and tags.
+
+- f898462: Status events (kinds 1630-1633) now carry the NIP-10 `root` marker on their `e` tag and the repo's `a` coordinate, so other NIP-34 clients (ngit, gitworkshop.dev) resolve and thread rig's issue/PR statuses correctly instead of failing on the old marker-less `["e", <id>]` shape. `buildStatus` takes the repo owner pubkey and repo id as its first two arguments to build the `a` tag; `rig pr status` is updated accordingly.
+
+  Readers (`rig issue`/`rig pr` list and show, and `@toon-protocol/rig-web`'s parsers and hooks) accept both this new marker form and the legacy bare form identically — an existing repo's already-published bare-form statuses keep applying with no migration needed. Status authority also now includes the target's own author (issue/PR author closing their own item) alongside the repo owner and declared maintainers, in both this package and `@toon-protocol/rig-web`; the maintainer acceptance handshake stays out of scope. A marker-form status from anyone outside that authorized set continues to be ignored, and the latest-wins tie-break is unchanged regardless of which form a given status used.
+
+### Patch Changes
+
+- c639fcc: Export real NIP-34 wire fixtures captured from `wss://relay.ngit.dev` (rig#153, rig#155) — a kind:30617 announcement with role tags and `clone`, a kind:30618 state event with peeled `^{}` tags, a kind:1111 comment thread with a nested reply, and a kind:1630-1633 status in NIP-10 marker form — so downstream NIP-34 conformance work in this package and `@toon-protocol/rig-web` can test against what the incumbent actually publishes. Additive only: no existing export changes behavior.
+- 519fd5b: Document the NIP-34 wire contract in `docs/nip34-wire-shapes.md` (rig#163, the last ticket of spec rig#153) and point at it from the builders and parsers.
+
+  Per event kind — 30617, 30618, 1617, 1618/1619 (read-only), 1621, 1111, legacy 1622, 1630-1633 — it records the tags rig writes, the NIP-34/NIP-22 clause each one follows, every legacy shape rig still reads and the end condition for each, and the places rig deliberately departs from the NIP (`payout`, `arweave`, `branch-name` on a kind:1617, and the never-written `clone`).
+
+  Source change is comments only: `nip34-events.ts`, `nip34-refs.ts` and rig-web's `nip34-parsers.ts` gain a module-header pointer to the document, so a tag-shape change is made with the contract in view. No behavior change.
+
 ## 4.5.0
 
 ### Minor Changes

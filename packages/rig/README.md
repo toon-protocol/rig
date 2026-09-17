@@ -459,9 +459,57 @@ rig ci serve --relay wss://<relay> --repo <owner-npub>/<repo-id> [--repo …]
 | `--gateway <url>` | `RIG_ARWEAVE_GATEWAY`, else rig's preferred Arweave gateway | the gateway that serves the store's raw bytes: prefix for log/artifact URLs (`<gateway>/raw/<txId>`) **and** the first gateway the coordinator reads a commit's objects from (same `/raw/` route), ahead of the shared public list — name a private or local gateway (the sandbox's) and the coordinator needs nothing else to read |
 | `--act-bin <path>` | `act` on PATH (or `RIG_ACT_BIN`) | the act binary |
 | `--platform <label>=<image>` | `ubuntu-latest=catthehacker/ubuntu:act-latest` | `runs-on` label → Docker image (repeatable) |
+| `--pull` / `--no-pull` | act's default (pull before each run) | whether act pulls the runner image named by `--platform` before each run |
 | `--workdir <dir>` | `<state-dir>/work` | where commits are materialized |
 | `--once` | | stop after the first run concludes (its 9842 and final 39842 are on the relay) — one `rig ci trigger` answered by one bounded serve; ignored or refused triggers do not count |
 | `--json` | | one JSON document with the coordinator, relay, repos and state dir on start |
+
+**Two act behaviours decide whether a real workflow passes**, and a workflow
+whose steps only `echo` hides both:
+
+- **Write `actions/checkout@v4`, exactly as you would on GitHub.** act copies
+  the materialized tree into the job container *at that step*, not when the
+  container starts, and short-circuits it to a local `docker cp` — so the step
+  needs no network and no node in the image. A workflow without it
+  runs its tools against an **empty** container — the steps execute, the files
+  are not there:
+
+  ```
+  error: could not find `Cargo.toml` in `/…/work/<repo>-<sha>-1` or any parent directory
+  ```
+
+  That path is the checkout the coordinator materialized under `--workdir`
+  (`<repo-id>-<short sha>-<n>`), as the job container sees it.
+- **The default image is not GitHub's hosted runner.** `ubuntu-latest` maps to
+  `catthehacker/ubuntu:act-latest`, which carries no language toolchain, so a
+  workflow that expects a preinstalled `cargo`, `go` or JDK fails at its first
+  step. Either point `--platform` at an image that has one
+  (`--platform ubuntu-latest=rust:1-bookworm`) or install it in a step. The
+  official `rust` images ship neither rustfmt nor clippy —
+  `rustup component add rustfmt clippy` is a step, not a given — and an image
+  you built locally needs `--no-pull` (below).
+
+A workflow that survives both, run by a coordinator started with
+`--platform ubuntu-latest=rust:1-bookworm`:
+
+```yaml
+# .github/workflows/ci.yml
+name: ci
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4 # act resolves this to the local copy
+      - run: rustup component add rustfmt clippy
+      - run: cargo fmt --check
+      - run: cargo clippy -- -D warnings
+      - run: cargo test
+```
+
+A runner image built or loaded on the coordinator host and never pushed to a
+registry needs `--no-pull`: without it act force-pulls the image named by
+`--platform` and every run fails in *Set up job* with `pull access denied`.
 
 On start the coordinator publishes an **Advertisement** (19843: runner family
 `act`, its selectors, admission `maintainer-request`, execution
@@ -510,9 +558,10 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v rig-ci-state:/st
 The entrypoint is `rig`, so every verb works (`docker run --rm rig-ci --version`),
 and every environment variable rig honours means the same inside the image
 (`TOON_CLIENT_HOME` is `/state`). act launches each job as a container on the
-daemon behind the mounted socket and copies the checkout in, so no host path
-has to match. Against the [sandbox](#dogfooding-rigs-own-ciyml-on-the-sandbox)
-on the same host, run on the host network with the sandbox's own `localhost`
+daemon behind the mounted socket and copies the checkout in at the
+`actions/checkout` step, so no host path has to match. Against the
+[sandbox](#dogfooding-rigs-own-ciyml-on-the-sandbox) on the same host, run on
+the host network with the sandbox's own `localhost`
 addresses — a client dials the endpoint a node **advertises**, and the sandbox
 hub advertises `http://127.0.0.1:3200/ilp` so host-run smokes can reach it
 (sandbox-only; a real connector advertises its public URL, which the default
