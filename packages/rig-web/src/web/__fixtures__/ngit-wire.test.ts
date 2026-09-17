@@ -1,15 +1,21 @@
 /**
  * rig-web's half of rig#155: proves the ngit wire fixtures captured for
- * rig#153 are importable from this package and that every event's id and
- * signature still verify here too — the same objects `@toon-protocol/rig`'s
- * own `ngit-fixtures.test.ts` checks, imported through the workspace
- * dependency this package already uses for other wire-level test fixtures
- * (see `tests/e2e/seed/lib/event-builders.ts`).
+ * rig#153 verify here too — the same events (byte-for-byte) that
+ * `@toon-protocol/rig`'s own `ngit-fixtures.test.ts` checks, from this
+ * package's own copy, `./ngit-wire.js`.
  *
- * Pure crypto over in-repo data — no network access. Requires
- * `@toon-protocol/rig` to have been built (`pnpm --filter @toon-protocol/rig
- * build`, or the workspace-wide `pnpm build`) so its `dist/` exports these
- * fixtures; the CI gate always builds before testing (`.github/workflows/ci.yml`).
+ * That file is a self-contained COPY of
+ * `packages/rig/src/nip34-fixtures/*.ts`, not an import of
+ * `@toon-protocol/rig`: this package's typecheck gate
+ * (`.sandcastle/gate/correctness.ts`, run by CI before `pnpm -r build`)
+ * type checks rig-web before `@toon-protocol/rig` is built, and that
+ * package resolves through its built `dist/` (a devDependency, not a
+ * source reference) — importing it here would fail typecheck exactly the
+ * way `tests/e2e/seed/**` already does today (excluded from this package's
+ * `tsconfig.json` for that reason). See `./ngit-wire.ts`'s header for the
+ * full rationale and prior art (`nip34-parsers.ts`, `gateway-preference.ts`).
+ *
+ * Pure crypto over in-repo data — no network access.
  *
  * `nostr-tools` is a `devDependency` here (package.json), matching how
  * `@toon-protocol/core`/`@toon-protocol/client` are already devDeps of this
@@ -31,9 +37,9 @@ import {
   NGIT_STATE_NGIT,
   NGIT_STATUS_NGIT,
   NGIT_STATUS_NGIT_TARGET,
-} from '@toon-protocol/rig';
+} from './ngit-wire.js';
 
-describe('ngit wire fixtures import into rig-web (rig#155)', () => {
+describe('ngit wire fixtures verify in rig-web (rig#155)', () => {
   it('every fixture event has a valid id and signature', () => {
     for (const event of ALL_NGIT_FIXTURE_EVENTS) {
       expect(verifyEvent(event)).toBe(true);

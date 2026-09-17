@@ -325,10 +325,13 @@ export {
 } from './cli/ci-status.js';
 
 // rig#155: real NIP-34 wire fixtures captured from wss://relay.ngit.dev, for
-// rig#153's conformance work. `@toon-protocol/rig-web` imports these from
-// this package (a workspace devDependency it already uses for other
-// wire-level test fixtures) so both packages' tests exercise the same
-// captured events.
+// rig#153's conformance work. `@toon-protocol/rig-web` keeps a
+// self-contained COPY of this same captured data
+// (packages/rig-web/src/web/__fixtures__/ngit-wire.ts) rather than
+// importing it from here — its typecheck gate runs before this package is
+// built, so an import resolved through this package's built `dist/` would
+// fail there. Both are produced by the same capture; re-run
+// scripts/capture-ngit-fixtures.mjs and update both when refreshing them.
 export {
   ALL_NGIT_FIXTURE_EVENTS,
   NGIT_ANNOUNCEMENT_WYRD,
