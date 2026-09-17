@@ -129,15 +129,21 @@ function tagValues(tags: string[][], name: string): string[] {
 /**
  * Derive the state of an issue/patch from its status events: consider only
  * kind:1630-1633 events whose `e` tag references the target AND whose author
- * is AUTHORIZED — the repo owner ∪ declared maintainers (#287). Among the
- * authorized events the LATEST wins (highest created_at, ties broken by lowest
- * event id — the same replaceable convention remote-state uses). Unauthorized
- * status events (any funded stranger) are IGNORED for state; they never move
- * it. No authorized status events ⇒ open.
+ * is AUTHORIZED — the repo owner ∪ declared maintainers ∪ the target's own
+ * author (#287, rig#160). The `e` tag match is on `tags[1]` only, so both the
+ * NIP-10 marker form (`["e", <id>, "", "root"]`) and the legacy bare form
+ * (`["e", <id>]`) are honored identically. Among the authorized events the
+ * LATEST wins (highest created_at, ties broken by lowest event id — the same
+ * replaceable convention remote-state uses), regardless of which form each
+ * used. Unauthorized status events (any funded stranger) are IGNORED for
+ * state; they never move it. No authorized status events ⇒ open.
  *
- * `authorized` is the lowercased-hex set from {@link authorizedStatusAuthors}.
- * When it is empty (the 30617 could not be resolved) NOTHING is authorized and
- * the state stays open — a safe, non-spoofable default.
+ * `authorized` is the caller's authority set for THIS target: the repo-wide
+ * {@link authorizedStatusAuthors} result (owner ∪ maintainers) unioned with
+ * the target event's own author pubkey — callers do that union per item,
+ * since the target author varies per target while the repo-wide set does
+ * not (see `fetchItems`/`fetchItem`). When it is empty NOTHING is authorized
+ * and the state stays open — a safe, non-spoofable default.
  */
 export function deriveStatus(
   targetEventId: string,
@@ -161,6 +167,19 @@ export function deriveStatus(
   return winner === null
     ? 'open'
     : (STATUS_BY_KIND[winner.kind] as TrackerStatus);
+}
+
+/**
+ * Union a target's own author into the repo-wide authorized set (rig#160):
+ * the target's own author is ALSO authorized to move its own status, on top
+ * of the repo-wide owner ∪ maintainers set (see {@link deriveStatus}'s doc
+ * comment). Returns a NEW Set; does not mutate `authorized`.
+ */
+export function withTargetAuthor(
+  authorized: ReadonlySet<string>,
+  targetAuthorPubkey: string
+): Set<string> {
+  return new Set([...authorized, targetAuthorPubkey.toLowerCase()]);
 }
 
 // ---------------------------------------------------------------------------
@@ -391,7 +410,13 @@ interface TrackerItem {
   content: string;
   /** kind:1617 only: `commit` tag SHAs. */
   commitShas?: string[];
-  /** kind:1617 only: `branch` tag. */
+  /**
+   * kind:1617 only: branch name, read from `branch-name` first (#161 — the
+   * tag new patches write), falling back to the legacy `branch` tag. Never
+   * read from `t`: a legacy patch that only carries the branch in `t` is not
+   * guessed at and renders as it always has (unlabeled branch, `t` as a
+   * label).
+   */
   branch?: string;
   /**
    * kind:1617 only: the PR body from the `description` tag (#280). Separate
@@ -418,7 +443,8 @@ function parseTrackerItem(
   };
   if (event.kind === PATCH_KIND) {
     item.commitShas = tagValues(event.tags, 'commit');
-    const branch = tagValue(event.tags, 'branch');
+    const branch =
+      tagValue(event.tags, 'branch-name') ?? tagValue(event.tags, 'branch');
     if (branch !== undefined) item.branch = branch;
     const description = tagValue(event.tags, 'description');
     if (description !== undefined) item.description = description;
@@ -477,7 +503,14 @@ async function fetchItems(
   const authorized = await authorizedPromise;
   return items
     .map((event) =>
-      parseTrackerItem(event, deriveStatus(event.id, statuses.values(), authorized))
+      parseTrackerItem(
+        event,
+        deriveStatus(
+          event.id,
+          statuses.values(),
+          withTargetAuthor(authorized, event.pubkey)
+        )
+      )
     )
     .sort((a, b) => b.createdAt - a.createdAt);
 }
@@ -578,7 +611,11 @@ async function fetchItem(
   return {
     item: parseTrackerItem(
       event,
-      deriveStatus(eventId, statusEvents.values(), authorized)
+      deriveStatus(
+        eventId,
+        statusEvents.values(),
+        withTargetAuthor(authorized, event.pubkey)
+      )
     ),
     comments,
     repoATag,
@@ -674,9 +711,11 @@ async function runList(
     for (const item of items) {
       const labels =
         item.labels.length > 0 ? `  [${item.labels.join(', ')}]` : '';
+      // #161: kind:1617 items only — issues never set `.branch`.
+      const branch = item.branch !== undefined ? `  → ${item.branch}` : '';
       io.out(
         `${item.status.padEnd(7)}  ${item.eventId.slice(0, 8)}  ${item.title}` +
-          `  (${item.authorPubkey.slice(0, 8)}, ${isoDate(item.createdAt)})${labels}`
+          `  (${item.authorPubkey.slice(0, 8)}, ${isoDate(item.createdAt)})${labels}${branch}`
       );
     }
     io.out(

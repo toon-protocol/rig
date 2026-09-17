@@ -214,7 +214,7 @@ describe('AC-1.6: Event Builders (event-builders.ts)', () => {
     expect(event.created_at).toBeLessThanOrEqual(after);
   });
 
-  it('[P1] should include subject and branch tag in buildPatch', async () => {
+  it('[P1] should include subject and branch-name tag in buildPatch (#161)', async () => {
     const builders = await import('../lib/event-builders.js');
 
     const ownerPubkey = '55c2a467881059a942fdc6908b041273885b8720bfa8fcf2f5f9c20a73b0964d';
@@ -226,17 +226,19 @@ describe('AC-1.6: Event Builders (event-builders.ts)', () => {
     expect(event.tags).toEqual(
       expect.arrayContaining([['subject', 'Fix readme']])
     );
-    // Should include branch as t tag
+    // #161: branch lives in branch-name, never in t (t is reserved for
+    // labels — a patch's branch used to be misreported as one).
     expect(event.tags).toEqual(
-      expect.arrayContaining([['t', 'feature/fix']])
+      expect.arrayContaining([['branch-name', 'feature/fix']])
     );
+    expect(event.tags.filter((t: string[]) => t[0] === 't')).toHaveLength(0);
     // Should include p tag for repo owner
     expect(event.tags).toEqual(
       expect.arrayContaining([['p', ownerPubkey]])
     );
   });
 
-  it('[P1] should omit branch tag when branchTag is not provided in buildPatch', async () => {
+  it('[P1] should omit branch-name tag when branchTag is not provided in buildPatch', async () => {
     const builders = await import('../lib/event-builders.js');
 
     const ownerPubkey = '55c2a467881059a942fdc6908b041273885b8720bfa8fcf2f5f9c20a73b0964d';
@@ -244,7 +246,9 @@ describe('AC-1.6: Event Builders (event-builders.ts)', () => {
 
     const event = builders.buildPatch(ownerPubkey, 'hello-toon', 'Fix readme', commits);
 
-    // Should NOT include a 't' tag when branchTag is undefined
+    // Should NOT include a 'branch-name' or 't' tag when branchTag is undefined
+    const branchNameTags = event.tags.filter((t: string[]) => t[0] === 'branch-name');
+    expect(branchNameTags).toHaveLength(0);
     const tTags = event.tags.filter((t: string[]) => t[0] === 't');
     expect(tTags).toHaveLength(0);
   });

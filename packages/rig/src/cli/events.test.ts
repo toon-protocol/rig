@@ -655,7 +655,10 @@ describe('rig pr create (real format-patch)', () => {
     expect(event.content).toContain('+the feature');
     expect(event.tags).toContainEqual(['commit', second]);
     expect(event.tags).toContainEqual(['parent-commit', first]);
-    expect(event.tags).toContainEqual(['t', 'feature']);
+    // #161: --branch writes the `branch-name` tag, never `t` — a patch's
+    // branch used to be misreported as a label.
+    expect(event.tags).toContainEqual(['branch-name', 'feature']);
+    expect(event.tags.filter((tag) => tag[0] === 't')).toHaveLength(0);
     expect(h.out.join('\n')).toContain('kind:1617');
   });
 
@@ -832,7 +835,7 @@ describe('rig pr create (real format-patch)', () => {
 });
 
 describe('rig pr status', () => {
-  it('publishes the mapped status kind with the repo a-tag', async () => {
+  it('publishes the mapped status kind with the root-marked e tag and the repo a-tag (rig#160)', async () => {
     const h = deps();
     const code = await runPr(
       ['status', ROOT_EVENT, 'applied', '--yes'],
@@ -841,7 +844,7 @@ describe('rig pr status', () => {
     expect(code).toBe(0);
     const { event } = fake.published[0] as FakeStandalone['published'][0];
     expect(event.kind).toBe(1631);
-    expect(event.tags).toContainEqual(['e', ROOT_EVENT]);
+    expect(event.tags).toContainEqual(['e', ROOT_EVENT, '', 'root']);
     expect(event.tags).toContainEqual(['a', `30617:${CONFIG_OWNER}:demo`]);
     const text = h.out.join('\n');
     expect(text).toContain('kind:1631');

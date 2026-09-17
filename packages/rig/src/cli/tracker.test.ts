@@ -13,6 +13,8 @@ import {
   NGIT_COMMENT_THREAD_NESTED_REPLY_PARENT_ID,
   NGIT_COMMENT_THREAD_ROOT,
   NGIT_COMMENT_THREAD_ROOT_EVENT_ID,
+  NGIT_STATUS_NGIT,
+  NGIT_STATUS_NGIT_TARGET_EVENT_ID,
 } from '../nip34-fixtures/index.js';
 import type { NostrEvent } from '../remote-state.js';
 import type { CliIo } from './output.js';
@@ -28,10 +30,16 @@ import {
   runIssueShow,
   runPrList,
   runPrShow,
+  withTargetAuthor,
 } from './tracker.js';
 
 const OWNER = 'ab'.repeat(32);
 const AUTHOR = 'cd'.repeat(32);
+// A genuine third party: never the owner, never declared as a maintainer,
+// and never the author of any fixture item below — used for spoof/ignored
+// scenarios so they are not accidentally satisfied by the rig#160 "target's
+// own author is authorized" rule (AUTHOR authors several fixture items).
+const STRANGER = 'ef'.repeat(32);
 const REPO = 'demo-repo';
 const A_TAG = `30617:${OWNER}:${REPO}`;
 const RELAY = 'wss://relay.test.example';
@@ -108,12 +116,14 @@ const EVENTS: NostrEvent[] = [
       ['a', A_TAG],
     ],
   }),
-  // SPOOF (#287): a funded NON-owner publishes a later re-open against the
-  // closed issue. It must be IGNORED — the issue stays closed for authority-
-  // honoring readers. (Author defaults to AUTHOR = a contributor, not owner.)
+  // SPOOF (#287): a funded stranger — NOT the owner, a maintainer, or the
+  // issue's own author (which defaults to AUTHOR, rig#160) — publishes a
+  // later re-open against the closed issue. It must be IGNORED — the issue
+  // stays closed for authority-honoring readers.
   event({
     id: 'de'.repeat(32),
     kind: 1630,
+    pubkey: STRANGER,
     created_at: 1400, // LATER than the owner's close
     tags: [
       ['e', ISSUE_CLOSED_ID],
@@ -225,14 +235,16 @@ describe('deriveStatus', () => {
 
   it('IGNORES an unauthorized later status — spoof regression (#287)', () => {
     // EVENTS already contains a later (created_at 1400) kind:1630 re-open on
-    // the closed issue signed by AUTHOR (a non-owner). It must NOT reopen the
-    // issue for an authority-honoring reader: owner-only ⇒ stays closed.
+    // the closed issue signed by STRANGER (not owner, not a maintainer, not
+    // the issue's own author). It must NOT reopen the issue for an
+    // authority-honoring reader: owner-only ⇒ stays closed.
     expect(deriveStatus(ISSUE_CLOSED_ID, EVENTS, AUTHZ)).toBe('closed');
-    // But if that author WERE authorized (owner ∪ maintainers), the re-open
-    // would win — proving the author filter is what protects the state.
-    expect(deriveStatus(ISSUE_CLOSED_ID, EVENTS, new Set([OWNER, AUTHOR]))).toBe(
-      'open'
-    );
+    // But if that author WERE authorized (owner ∪ maintainers ∪ target's own
+    // author), the re-open would win — proving the author filter is what
+    // protects the state.
+    expect(
+      deriveStatus(ISSUE_CLOSED_ID, EVENTS, new Set([OWNER, STRANGER]))
+    ).toBe('open');
   });
 
   it('an empty authority set moves NOTHING (safe fallback, #287)', () => {
@@ -275,6 +287,124 @@ describe('deriveStatus', () => {
 
   it('ignores statuses that reference other events', () => {
     expect(deriveStatus(PR_OPEN_ID, EVENTS, AUTHZ)).toBe('open');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// rig#160 — status root marker (NIP-10) + repo a tag: both read forms
+// ---------------------------------------------------------------------------
+
+describe('deriveStatus honors the NIP-10 marker form identically to the legacy bare form (rig#160)', () => {
+  const TARGET_ID = 'f0'.repeat(32);
+
+  it('a marker-form e tag (["e", id, "", "root"]) resolves state', () => {
+    const markerClose = event({
+      id: 'f1'.repeat(32),
+      kind: 1632,
+      pubkey: OWNER,
+      created_at: 1000,
+      tags: [
+        ['e', TARGET_ID, '', 'root'],
+        ['a', A_TAG],
+      ],
+    });
+    expect(deriveStatus(TARGET_ID, [markerClose], new Set([OWNER]))).toBe(
+      'closed'
+    );
+  });
+
+  it('the winner is the LATEST authorized status regardless of which form each event uses', () => {
+    const bareOpen = event({
+      id: 'f2'.repeat(32),
+      kind: 1630,
+      pubkey: OWNER,
+      created_at: 1000,
+      tags: [['e', TARGET_ID]], // legacy bare form
+    });
+    const markerClose = event({
+      id: 'f3'.repeat(32),
+      kind: 1632,
+      pubkey: OWNER,
+      created_at: 1100,
+      tags: [['e', TARGET_ID, '', 'root']], // NIP-10 marker form
+    });
+    expect(
+      deriveStatus(TARGET_ID, [bareOpen, markerClose], new Set([OWNER]))
+    ).toBe('closed');
+    // Same result independent of iteration order.
+    expect(
+      deriveStatus(TARGET_ID, [markerClose, bareOpen], new Set([OWNER]))
+    ).toBe('closed');
+    // And with the forms' roles swapped — a LATER bare-form status beats an
+    // earlier marker-form one, proving form never influences the winner.
+    const markerOpenEarlier = event({
+      id: 'f4'.repeat(32),
+      kind: 1630,
+      pubkey: OWNER,
+      created_at: 1000,
+      tags: [['e', TARGET_ID, '', 'root']],
+    });
+    const bareCloseLater = event({
+      id: 'f5'.repeat(32),
+      kind: 1632,
+      pubkey: OWNER,
+      created_at: 1100,
+      tags: [['e', TARGET_ID]],
+    });
+    expect(
+      deriveStatus(
+        TARGET_ID,
+        [markerOpenEarlier, bareCloseLater],
+        new Set([OWNER])
+      )
+    ).toBe('closed');
+  });
+
+  it('a marker-form status from an unauthorized pubkey is ignored, same as the bare form', () => {
+    const spoofMarker = event({
+      id: 'f6'.repeat(32),
+      kind: 1632,
+      pubkey: STRANGER,
+      created_at: 1000,
+      tags: [['e', TARGET_ID, '', 'root']],
+    });
+    expect(deriveStatus(TARGET_ID, [spoofMarker], new Set([OWNER]))).toBe(
+      'open'
+    );
+  });
+});
+
+describe('the captured ngit marker-form status (rig#155 fixtures) changes its target state (rig#160)', () => {
+  it('resolves the real captured kind:1618 PR to "applied", authorized by the marker-form status’s real owner signature', () => {
+    const authorized = new Set([NGIT_STATUS_NGIT.pubkey.toLowerCase()]);
+    expect(
+      deriveStatus(
+        NGIT_STATUS_NGIT_TARGET_EVENT_ID,
+        [NGIT_STATUS_NGIT],
+        authorized
+      )
+    ).toBe('applied');
+  });
+
+  it('is ignored when the signer is not in the authorized set', () => {
+    expect(
+      deriveStatus(
+        NGIT_STATUS_NGIT_TARGET_EVENT_ID,
+        [NGIT_STATUS_NGIT],
+        new Set([STRANGER])
+      )
+    ).toBe('open');
+  });
+});
+
+describe('withTargetAuthor (rig#160)', () => {
+  it('adds the target author to a copy of the authorized set, without mutating the input', () => {
+    const authorized = new Set([OWNER]);
+    const result = withTargetAuthor(authorized, AUTHOR.toUpperCase()); // mixed case
+
+    expect(result).toEqual(new Set([OWNER, AUTHOR])); // lowercased
+    expect(authorized).toEqual(new Set([OWNER])); // original untouched
+    expect(result).not.toBe(authorized); // a new Set, not the same object
   });
 });
 
@@ -398,8 +528,10 @@ describe('rig issue list', () => {
 
   it('IGNORES a maintainer-status once the 30617 no longer lists them (#287)', async () => {
     const ISSUE_ID = '88'.repeat(32);
-    // Same as above but the 30617 declares NO maintainers → AUTHOR is a
-    // stranger → their close is ignored, the issue stays open.
+    // Same as above but the 30617 declares NO maintainers → the closer is a
+    // stranger (not the owner, not a declared maintainer, and — rig#160 —
+    // not the issue's own author either, since the issue is authored by
+    // AUTHOR here, not STRANGER) → their close is ignored, stays open.
     const events: NostrEvent[] = [
       event({
         id: '9a'.repeat(32),
@@ -423,10 +555,109 @@ describe('rig issue list', () => {
       event({
         id: 'ba'.repeat(32),
         kind: 1632,
-        pubkey: AUTHOR,
+        pubkey: STRANGER,
         created_at: 1200,
         tags: [
           ['e', ISSUE_ID],
+          ['a', A_TAG],
+        ],
+      }),
+    ];
+    const io = makeTestIo();
+    const code = await runIssueList(
+      [...ADDR_FLAGS, '--json'],
+      makeDeps(io, 'object', events)
+    );
+    expect(code).toBe(0);
+    const doc = io.jsonDocs[0] as {
+      issues: { eventId: string; status: string }[];
+    };
+    expect(doc.issues).toEqual([
+      expect.objectContaining({ eventId: ISSUE_ID, status: 'open' }),
+    ]);
+  });
+
+  it("HONORS the issue's own author closing it, even without maintainer status (rig#160)", async () => {
+    const ISSUE_ID = 'f7'.repeat(32);
+    const REPORTER = 'c1'.repeat(32); // not owner, not a declared maintainer
+    const events: NostrEvent[] = [
+      event({
+        id: '9d'.repeat(32),
+        kind: 30617,
+        pubkey: OWNER,
+        created_at: 1000,
+        tags: [
+          ['d', REPO],
+          ['name', 'demo'],
+          // No maintainers tag — REPORTER's only authority is target-author.
+        ],
+      }),
+      event({
+        id: ISSUE_ID,
+        kind: 1621,
+        pubkey: REPORTER,
+        created_at: 1100,
+        tags: [
+          ['a', A_TAG],
+          ['subject', 'Filed and closed by its own author'],
+        ],
+      }),
+      event({
+        id: 'f8'.repeat(32),
+        kind: 1632,
+        pubkey: REPORTER, // the issue's own author, closing in marker form
+        created_at: 1200,
+        tags: [
+          ['e', ISSUE_ID, '', 'root'],
+          ['a', A_TAG],
+        ],
+      }),
+    ];
+    const io = makeTestIo();
+    const code = await runIssueList(
+      [...ADDR_FLAGS, '--json'],
+      makeDeps(io, 'object', events)
+    );
+    expect(code).toBe(0);
+    const doc = io.jsonDocs[0] as {
+      issues: { eventId: string; status: string }[];
+    };
+    expect(doc.issues).toEqual([
+      expect.objectContaining({ eventId: ISSUE_ID, status: 'closed' }),
+    ]);
+  });
+
+  it('IGNORES a marker-form status from a pubkey that is neither owner, maintainer, nor the target author (rig#160)', async () => {
+    const ISSUE_ID = 'f9'.repeat(32);
+    const REPORTER = 'c1'.repeat(32);
+    const events: NostrEvent[] = [
+      event({
+        id: '9e'.repeat(32),
+        kind: 30617,
+        pubkey: OWNER,
+        created_at: 1000,
+        tags: [
+          ['d', REPO],
+          ['name', 'demo'],
+        ],
+      }),
+      event({
+        id: ISSUE_ID,
+        kind: 1621,
+        pubkey: REPORTER,
+        created_at: 1100,
+        tags: [
+          ['a', A_TAG],
+          ['subject', 'Should stay open'],
+        ],
+      }),
+      event({
+        id: 'fa'.repeat(32),
+        kind: 1632,
+        pubkey: STRANGER, // not owner, not maintainer, not the reporter
+        created_at: 1200,
+        tags: [
+          ['e', ISSUE_ID, '', 'root'],
           ['a', A_TAG],
         ],
       }),
@@ -583,6 +814,20 @@ describe('rig pr list/show', () => {
     ]);
   });
 
+  // #161: rig pr list (text mode) must display the branch too, not just
+  // pr show and rig-web.
+  it('renders a human table with the branch for patches that carry one', async () => {
+    const io = makeTestIo();
+    const code = await runPrList([...ADDR_FLAGS], makeDeps(io));
+    expect(code).toBe(0);
+    const text = io.outLines.join('\n');
+    expect(text).toContain('→ feature'); // PR_APPLIED_ID's branch tag
+    // The open PR carries no branch tag — no arrow for it.
+    const openLine = io.outLines.find((l) => l.includes('Pending patch'));
+    expect(openLine).toBeDefined();
+    expect(openLine).not.toContain('→');
+  });
+
   it('filters by --state applied', async () => {
     const io = makeTestIo();
     const code = await runPrList(
@@ -636,6 +881,120 @@ describe('rig pr list/show', () => {
         description: 'Why: the feature was missing.',
       }),
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #161: patch branch name round-trips (branch-name tag, with legacy fallback)
+// ---------------------------------------------------------------------------
+
+describe('rig pr show — branch-name round-trip (#161)', () => {
+  const NEW_PATCH_ID = '61'.repeat(32);
+  const LEGACY_BRANCH_TAG_ID = '62'.repeat(32);
+  const LEGACY_T_ONLY_ID = '63'.repeat(32);
+  const BOTH_TAGS_ID = '64'.repeat(32);
+
+  const branchEvents: NostrEvent[] = [
+    // A patch published under the fix: branch lives in `branch-name`.
+    event({
+      id: NEW_PATCH_ID,
+      kind: 1617,
+      created_at: 1000,
+      tags: [
+        ['a', A_TAG],
+        ['subject', 'New-style patch'],
+        ['branch-name', 'feature/new'],
+        ['t', 'real-label'],
+      ],
+      content: 'patch text',
+    }),
+    // A pre-fix patch that already carried the branch in the legacy `branch`
+    // tag (never actually written by buildPatch, but readers have always
+    // looked for it — must keep working).
+    event({
+      id: LEGACY_BRANCH_TAG_ID,
+      kind: 1617,
+      created_at: 1100,
+      tags: [
+        ['a', A_TAG],
+        ['subject', 'Legacy branch-tag patch'],
+        ['branch', 'feature/legacy'],
+      ],
+      content: 'patch text',
+    }),
+    // The actual historical bug: the branch was written to `t` (and nowhere
+    // else). No heuristic recovers it — it renders exactly as it does today,
+    // i.e. as a label, with no Branch: line.
+    event({
+      id: LEGACY_T_ONLY_ID,
+      kind: 1617,
+      created_at: 1200,
+      tags: [
+        ['a', A_TAG],
+        ['subject', 'Legacy t-only patch'],
+        ['t', 'feature/was-a-branch'],
+      ],
+      content: 'patch text',
+    }),
+    // Both shapes present, disagreeing — branch-name must win.
+    event({
+      id: BOTH_TAGS_ID,
+      kind: 1617,
+      created_at: 1300,
+      tags: [
+        ['a', A_TAG],
+        ['subject', 'Both tags patch'],
+        ['branch-name', 'feature/wins'],
+        ['branch', 'feature/loses'],
+      ],
+      content: 'patch text',
+    }),
+  ];
+
+  it('reads the branch from branch-name on a new patch, and t stays a real label', async () => {
+    const io = makeTestIo();
+    const code = await runPrShow(
+      [NEW_PATCH_ID, '--relay', RELAY],
+      makeDeps(io, 'object', branchEvents)
+    );
+    expect(code).toBe(0);
+    const text = io.outLines.join('\n');
+    expect(text).toContain('Branch:  feature/new');
+    expect(text).toContain('Labels:  real-label');
+  });
+
+  it('falls back to the legacy branch tag when branch-name is absent', async () => {
+    const io = makeTestIo();
+    const code = await runPrShow(
+      [LEGACY_BRANCH_TAG_ID, '--relay', RELAY],
+      makeDeps(io, 'object', branchEvents)
+    );
+    expect(code).toBe(0);
+    expect(io.outLines.join('\n')).toContain('Branch:  feature/legacy');
+  });
+
+  it('a legacy patch with the branch only in t renders exactly as it does today: no Branch line, t as a label', async () => {
+    const io = makeTestIo();
+    const code = await runPrShow(
+      [LEGACY_T_ONLY_ID, '--relay', RELAY],
+      makeDeps(io, 'object', branchEvents)
+    );
+    expect(code).toBe(0);
+    const text = io.outLines.join('\n');
+    expect(text).not.toContain('Branch:');
+    expect(text).toContain('Labels:  feature/was-a-branch');
+  });
+
+  it('prefers branch-name over a disagreeing legacy branch tag', async () => {
+    const io = makeTestIo();
+    const code = await runPrShow(
+      [BOTH_TAGS_ID, '--relay', RELAY],
+      makeDeps(io, 'object', branchEvents)
+    );
+    expect(code).toBe(0);
+    const text = io.outLines.join('\n');
+    expect(text).toContain('Branch:  feature/wins');
+    expect(text).not.toContain('feature/loses');
   });
 });
 
