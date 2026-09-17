@@ -365,6 +365,36 @@ describe('rig clone reads both kind:30618 ref tag shapes', () => {
       expect(clonedRefs(dest)).toEqual(clonedRefs(world.srcDir));
     }
   });
+
+  it('rejects a non-40-hex sha in the NIP shape exactly as in the r shape', async () => {
+    const outcomes: { code: number; err: string; left: boolean }[] = [];
+
+    for (const tag of [
+      ['refs/heads/short', 'abc123'],
+      ['r', 'refs/heads/short', 'abc123'],
+    ]) {
+      const world = makeWorld({ refShape: 'nip' });
+      (world.events[1] as NostrEvent).tags.push(tag);
+      const code = await runClone([RELAY, `${OWNER}/${REPO}`], world.deps);
+      outcomes.push({
+        code,
+        err: world.io.errLines.join('\n'),
+        left: existsSync(join(world.cwd, REPO)),
+      });
+    }
+
+    // Byte-for-byte the same outcome, whichever shape carried the bad sha:
+    // the tip is unfetchable, the clone fails, and nothing is written. (The
+    // `assertFullSha` gate in updateRef stands behind this, but the download
+    // step rejects first — which is exactly the point: one path, not two.)
+    const [nip, legacy] = outcomes;
+    expect(nip).toEqual(legacy);
+    expect(nip?.code).toBe(1);
+    expect(nip?.err).toContain('could not be downloaded');
+    expect(nip?.err).toContain('abc123');
+    // A rejected clone leaves no half-built repository behind.
+    expect(nip?.left).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -8,11 +8,7 @@
 
 import { describe, it, expect } from 'vitest';
 
-import {
-  MAX_REFS_PER_EVENT,
-  isNipRefTagName,
-  parseStateRefTags,
-} from './nip34-refs.js';
+import { MAX_REFS_PER_EVENT, parseStateRefTags } from './nip34-refs.js';
 import { NGIT_STATE_NGIT } from './nip34-fixtures/index.js';
 
 const SHA_A = '1a'.repeat(20);
@@ -140,6 +136,24 @@ describe('parseStateRefTags: the 1000-ref cap', () => {
     expect(refs.has('refs/heads/l400')).toBe(false);
   });
 
+  it('gives the NIP shape first claim on the cap, whatever the tag order', () => {
+    // 1000 legacy refs FIRST, then one NIP-shape ref. Under a single-pass
+    // parser the NIP ref would arrive to a full map and be dropped, making
+    // the surviving set depend on how a writer (or a hostile relay) chose to
+    // interleave the shapes. It must not.
+    const tags: string[][] = [];
+    for (let i = 0; i < MAX_REFS_PER_EVENT; i += 1) {
+      tags.push(['r', `refs/heads/l${i}`, SHA_B]);
+    }
+    tags.push(['refs/heads/late-nip', SHA_A]);
+
+    const { refs } = parseStateRefTags(tags);
+    expect(refs.size).toBe(MAX_REFS_PER_EVENT);
+    expect(refs.get('refs/heads/late-nip')).toBe(SHA_A);
+    // One legacy ref gave up its slot — the last one, not an arbitrary one.
+    expect(refs.has(`refs/heads/l${MAX_REFS_PER_EVENT - 1}`)).toBe(false);
+  });
+
   it('does not let a dual-written event double the limit', () => {
     const tags: string[][] = [];
     for (let i = 0; i < MAX_REFS_PER_EVENT; i += 1) {
@@ -171,16 +185,6 @@ describe('parseStateRefTags: hostile input is passed through, not blessed', () =
     const legacy = parseStateRefTags([['r', 'refs/heads/main', 'abc123']]);
 
     expect([...nip.refs]).toEqual([...legacy.refs]);
-  });
-});
-
-describe('isNipRefTagName', () => {
-  it('accepts refs/heads and refs/tags only', () => {
-    expect(isNipRefTagName('refs/heads/main')).toBe(true);
-    expect(isNipRefTagName('refs/tags/v1')).toBe(true);
-    expect(isNipRefTagName('refs/notes/commits')).toBe(false);
-    expect(isNipRefTagName('r')).toBe(false);
-    expect(isNipRefTagName('HEAD')).toBe(false);
   });
 });
 

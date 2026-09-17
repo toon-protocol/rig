@@ -33,7 +33,11 @@
  *    wins**, whichever came first in tag order — so two rig versions reading
  *    the same event can never silently disagree.
  *  - {@link MAX_REFS_PER_EVENT} caps DISTINCT refs across both shapes
- *    combined, so a dual-written event cannot double the limit.
+ *    combined, so a dual-written event cannot double the limit. The NIP shape
+ *    also gets FIRST CLAIM on those slots: each shape is collected on its own
+ *    and the two are merged NIP-first, so which refs survive a >1000-ref
+ *    event never depends on the order a writer (or a hostile relay) happened
+ *    to interleave the two shapes in.
  *
  * What this parser deliberately does NOT do is validate. Refname safety
  * (`isSafeRefname`, ./materialize.ts) and full-SHA checks live at the
@@ -59,11 +63,29 @@ const PEELED_SUFFIX = '^{}';
 
 /**
  * Is this tag NAME a NIP-34-shaped ref path? True for `refs/heads/…` and
- * `refs/tags/…`, including the peeled `^{}` spellings — callers that want
- * only real refs go through {@link parseStateRefTags}, which drops those.
+ * `refs/tags/…`, including the peeled `^{}` spellings — {@link
+ * parseStateRefTags} drops those separately.
  */
-export function isNipRefTagName(name: string): boolean {
+function isNipRefTagName(name: string): boolean {
   return NIP_REF_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
+/**
+ * Merge the two shapes' refs into one map: NIP shape first, so it both wins
+ * every same-ref disagreement and takes first claim on the cap's slots;
+ * legacy refs fill whatever remains.
+ */
+function mergeShapes(
+  nip: Map<string, string>,
+  legacy: Map<string, string>
+): Map<string, string> {
+  const refs = new Map([...nip].slice(0, MAX_REFS_PER_EVENT));
+  for (const [refname, sha] of legacy) {
+    if (refs.size >= MAX_REFS_PER_EVENT) break;
+    if (nip.has(refname)) continue;
+    refs.set(refname, sha);
+  }
+  return refs;
 }
 
 /** Refs and the HEAD symref read out of one kind:30618 event's tags. */
@@ -83,17 +105,12 @@ export interface ParsedStateRefs {
  * ref state, and each caller handles them itself.
  */
 export function parseStateRefTags(tags: string[][]): ParsedStateRefs {
-  const refs = new Map<string, string>();
-  /** Refs already read from the NIP shape — a legacy tag never overrides one. */
-  const fromNipShape = new Set<string>();
+  // Each shape is staged on its own, then merged NIP-first (see mergeShapes).
+  // Both staging maps are themselves bounded, so a relay that serves a
+  // million ref tags costs bounded memory, not a million entries.
+  const nip = new Map<string, string>();
+  const legacy = new Map<string, string>();
   let headSymref: string | null = null;
-
-  const record = (refname: string, sha: string, nipShape: boolean): void => {
-    if (!refs.has(refname) && refs.size >= MAX_REFS_PER_EVENT) return;
-    if (!nipShape && fromNipShape.has(refname)) return;
-    refs.set(refname, sha);
-    if (nipShape) fromNipShape.add(refname);
-  };
 
   for (const tag of tags) {
     const [name, v1, v2] = tag;
@@ -105,7 +122,9 @@ export function parseStateRefTags(tags: string[][]): ParsedStateRefs {
         headSymref = v2.slice(SYMREF_PREFIX.length);
         continue;
       }
-      record(v1, v2, false);
+      if (legacy.size < MAX_REFS_PER_EVENT || legacy.has(v1)) {
+        legacy.set(v1, v2);
+      }
       continue;
     }
 
@@ -117,9 +136,9 @@ export function parseStateRefTags(tags: string[][]): ParsedStateRefs {
 
     if (v1 && isNipRefTagName(name) && !name.endsWith(PEELED_SUFFIX)) {
       // NIP-34 ref tag: ["refs/heads/main", "<sha>"]
-      record(name, v1, true);
+      if (nip.size < MAX_REFS_PER_EVENT || nip.has(name)) nip.set(name, v1);
     }
   }
 
-  return { refs, headSymref };
+  return { refs: mergeShapes(nip, legacy), headSymref };
 }

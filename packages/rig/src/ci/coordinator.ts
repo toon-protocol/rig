@@ -338,20 +338,6 @@ export function movedRefs(
   return moved;
 }
 
-/**
- * Ref state out of a kind:30618, through the shared dual-shape parser
- * (`../nip34-refs.ts`) — so a coordinator serves repos whose state was
- * written by ngit or any other conformant NIP-34 client exactly as it serves
- * rig's own (rig#156).
- */
-function parseRefsTags(ev: NostrEvent): {
-  refs: Record<string, string>;
-  head: string | null;
-} {
-  const { refs, headSymref } = parseStateRefTags(ev.tags);
-  return { refs: Object.fromEntries(refs), head: headSymref };
-}
-
 function tagValues(tags: string[][], name: string): string[] {
   return tags
     .filter((t) => t[0] === name)
@@ -1203,8 +1189,12 @@ export async function startCoordinator(
   ): Promise<void> => {
     const cursor = repo.cursor as RepoCursor;
     if (repoSeen(repo, ev) || ev.created_at < cursor.lastCreatedAt) return;
-    const { refs, head } = parseRefsTags(ev);
-    if (head) repo.defaultBranch = head;
+    // Both ref tag shapes, through the shared parser (`../nip34-refs.ts`), so
+    // a coordinator serves repos whose state was written by ngit or any other
+    // conformant NIP-34 client exactly as it serves rig's own (rig#156).
+    const { refs: refMap, headSymref } = parseStateRefTags(ev.tags);
+    const refs = Object.fromEntries(refMap);
+    if (headSymref) repo.defaultBranch = headSymref;
     const moved = movedRefs(cursor.refs, refs);
     cursor.refs = refs;
     markRepoProcessed(repo, ev);

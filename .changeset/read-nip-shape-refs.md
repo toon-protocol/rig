@@ -10,6 +10,6 @@ NIP-34 puts the ref path in the kind:30618 tag *name* (`["refs/heads/main", "<sh
 - A NIP-shape name ending in `^{}` is a peeled annotated tag: not a ref, not listed.
 - When both shapes name the same ref with different SHAs, the NIP shape wins, whichever came first in tag order — so two rig versions can never silently disagree about an event.
 - The existing refname-safety and full-SHA checks apply identically to both shapes; the new parse path is not a hostile-relay bypass.
-- The 1000-ref cap counts distinct refs across both shapes combined, so a dual-written event cannot double the limit.
+- The 1000-ref cap counts distinct refs across both shapes combined, so a dual-written event cannot double the limit. The NIP shape gets first claim on those slots, so which refs survive an oversized event never depends on the order the two shapes were interleaved in.
 
 Read-only: rig still writes the legacy `r` shape, and legacy-only state events behave exactly as before. The same dual-shape rules land in `@toon-protocol/rig-web`'s `parseRepoRefs` (a documented copy — rig-web cannot import this package), so the viewer renders any NIP-34 repo's branches and tags.

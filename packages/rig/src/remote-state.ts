@@ -37,7 +37,7 @@ import {
   parsePayout,
   type PayoutPointer,
 } from './nip34-events.js';
-import { parseStateRefTags } from './nip34-refs.js';
+import { parseStateRefTags, type ParsedStateRefs } from './nip34-refs.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -335,9 +335,7 @@ function getTagValue(tags: string[][], name: string): string | undefined {
   return tag?.[1];
 }
 
-interface ParsedRefs {
-  refs: Map<string, string>;
-  headSymref: string | null;
+interface ParsedRefs extends ParsedStateRefs {
   shaToTxId: Map<string, string>;
 }
 
@@ -354,8 +352,7 @@ function parseRefsEvent(event: NostrEvent): ParsedRefs {
   const shaToTxId = new Map<string, string>();
 
   for (const tag of event.tags) {
-    const [tagName, v1, v2] = tag;
-    if (tagName === 'arweave' && v1 && v2) shaToTxId.set(v1, v2);
+    if (tag[0] === 'arweave' && tag[1] && tag[2]) shaToTxId.set(tag[1], tag[2]);
   }
 
   return { refs, headSymref, shaToTxId };

@@ -154,6 +154,24 @@ function isNipRefTagName(name: string): boolean {
   return NIP_REF_PREFIXES.some((prefix) => name.startsWith(prefix));
 }
 
+/**
+ * Merge the two shapes' refs into one map: NIP shape first, so it both wins
+ * every same-ref disagreement and takes first claim on the cap's slots;
+ * legacy refs fill whatever remains.
+ */
+function mergeRefShapes(
+  nip: Map<string, string>,
+  legacy: Map<string, string>
+): Map<string, string> {
+  const refs = new Map([...nip].slice(0, MAX_REFS_PER_EVENT));
+  for (const [refname, sha] of legacy) {
+    if (refs.size >= MAX_REFS_PER_EVENT) break;
+    if (nip.has(refname)) continue;
+    refs.set(refname, sha);
+  }
+  return refs;
+}
+
 /** Parsed repository refs from a kind:30618 event. */
 export interface RepoRefs {
   repoId: string;
@@ -180,9 +198,15 @@ export interface RepoRefs {
  * This is a deliberate COPY of `@toon-protocol/rig`'s `nip34-refs.ts`, which
  * rig-web cannot import — see this file's header for why, and keep the two in
  * step. Both are tested against the same captured ngit events
- * (`./__fixtures__/ngit-wire.ts`). Unlike the rig-side parser, this one keeps
- * rig-web's existing `r`-tag handling verbatim (no `HEAD` symref extraction:
- * {@link RepoRefs} has no field for one).
+ * (`./__fixtures__/ngit-wire.ts`).
+ *
+ * ONE deliberate divergence from the rig-side parser: {@link RepoRefs} has no
+ * field for a `HEAD` symref, so symref tags are not extracted here. A NIP-34
+ * `["HEAD", "ref: refs/heads/main"]` is simply ignored (`HEAD` is not a
+ * ref-path prefix), while rig's legacy `["r", "HEAD", …]` keeps landing in
+ * `refs` under the key `HEAD` exactly as it did before rig#156 — rig-web's
+ * callers (`ref-resolver.ts`) already look for that key, so changing it would
+ * be a view-model change this read-only ticket does not ask for.
  */
 export function parseRepoRefs(event: NostrEvent): RepoRefs | null {
   if (event.kind !== 30618) return null;
@@ -190,23 +214,20 @@ export function parseRepoRefs(event: NostrEvent): RepoRefs | null {
   const dTag = getTagValue(event.tags, 'd');
   if (!dTag) return null;
 
-  const refs = new Map<string, string>();
-  /** Refs already read from the NIP shape — a legacy tag never overrides one. */
-  const fromNipShape = new Set<string>();
+  // Each shape is staged on its own, then merged NIP-first (see
+  // mergeRefShapes). Both staging maps are themselves bounded, so a relay
+  // that serves a million ref tags costs bounded memory.
+  const nip = new Map<string, string>();
+  const legacy = new Map<string, string>();
   const arweaveMap = new Map<string, string>();
-
-  const record = (refname: string, sha: string, nipShape: boolean): void => {
-    if (!refs.has(refname) && refs.size >= MAX_REFS_PER_EVENT) return;
-    if (!nipShape && fromNipShape.has(refname)) return;
-    refs.set(refname, sha);
-    if (nipShape) fromNipShape.add(refname);
-  };
 
   for (const tag of event.tags) {
     const name = tag[0];
     if (name === undefined) continue;
     if (name === 'r' && tag[1] && tag[2]) {
-      record(tag[1], tag[2], false);
+      if (legacy.size < MAX_REFS_PER_EVENT || legacy.has(tag[1])) {
+        legacy.set(tag[1], tag[2]);
+      }
     } else if (name === 'arweave' && tag[1] && tag[2]) {
       arweaveMap.set(tag[1], tag[2]);
     } else if (
@@ -214,11 +235,11 @@ export function parseRepoRefs(event: NostrEvent): RepoRefs | null {
       isNipRefTagName(name) &&
       !name.endsWith(PEELED_SUFFIX)
     ) {
-      record(name, tag[1], true);
+      if (nip.size < MAX_REFS_PER_EVENT || nip.has(name)) nip.set(name, tag[1]);
     }
   }
 
-  return { repoId: dTag, refs, arweaveMap };
+  return { repoId: dTag, refs: mergeRefShapes(nip, legacy), arweaveMap };
 }
 
 /** Parse a kind:30617 repository announcement event into RepoMetadata. */
@@ -231,9 +252,7 @@ export function parseRepoAnnouncement(event: NostrEvent): RepoMetadata | null {
   const name = getTagValue(event.tags, 'name') ?? dTag;
   const description = getTagValue(event.tags, 'description') ?? event.content;
 
-  const refTag = event.tags.find(
-    (t) => t[0] === 'r' && t[1] === 'HEAD' && t[2]
-  );
+  const refTag = event.tags.find((t) => t[0] === 'r' && t[1] === 'HEAD' && t[2]);
   const defaultBranch = refTag?.[2] ?? 'main';
 
   const cloneUrls = getTagValues(event.tags, 'clone');
@@ -478,13 +497,12 @@ export function parseComment(event: NostrEvent): CommentMetadata | null {
 }
 
 /** kind:1630-1633 → the PR status each one sets. */
-const KIND_STATUS_MAP: Record<number, 'open' | 'applied' | 'closed' | 'draft'> =
-  {
-    1630: 'open',
-    1631: 'applied',
-    1632: 'closed',
-    1633: 'draft',
-  };
+const KIND_STATUS_MAP: Record<number, 'open' | 'applied' | 'closed' | 'draft'> = {
+  1630: 'open',
+  1631: 'applied',
+  1632: 'closed',
+  1633: 'draft',
+};
 
 /**
  * Resolve the status of a PR from status events (kind:1630-1633), honoring
@@ -506,10 +524,7 @@ export function resolvePRStatus(
   const latest = latestAuthorizedEvent(
     statusEvents,
     authorized,
-    (evt) =>
-      evt.kind >= 1630 &&
-      evt.kind <= 1633 &&
-      getTagValue(evt.tags, 'e') === prEventId
+    (evt) => evt.kind >= 1630 && evt.kind <= 1633 && getTagValue(evt.tags, 'e') === prEventId
   );
   if (latest === null) return 'open';
   return KIND_STATUS_MAP[latest.kind] ?? 'open';
