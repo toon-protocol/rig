@@ -188,7 +188,7 @@ Options:
   --patch-file <path>  literal patch text to publish
   --body <text>        PR description (Markdown; description tag)
   --body-file <path>   read the PR description from a file
-  --branch <name>      branch name (t tag)
+  --branch <name>      branch name (branch-name tag)
 ${COMMON_FLAGS_USAGE}`;
 
 export const PR_STATUS_USAGE = `Usage: rig pr status <target-event-id> <open|applied|closed|draft> [options]
