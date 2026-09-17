@@ -8,6 +8,7 @@
 
 import { describe, it, expect } from 'vitest';
 import type { NostrEvent } from './nip34-parsers.js';
+import type { CiJobResult } from './nip-c1-parsers.js';
 import {
   CI_ADVERTISEMENT_KIND,
   CI_JOB_RESULT_KIND,
@@ -18,6 +19,7 @@ import {
   aggregateRunStatus,
   buildCiRuns,
   controlOrder,
+  deriveRunJobs,
   deriveTrustLevel,
   parseCiAdvertisement,
   parseCiJobResult,
@@ -498,7 +500,8 @@ describe('parseCiJobResult (9841)', () => {
       name: 'Unit tests',
       conclusion: 'success',
       logsUrl: 'http://localhost:3000/raw/tx1',
-      logTail: '[log-tail omitted=1200]\nnpm test\nok',
+      logTail: 'npm test\nok',
+      logOmittedBytes: 1200,
       artifacts: [
         {
           url: 'http://localhost:3000/raw/tx2',
@@ -510,6 +513,23 @@ describe('parseCiJobResult (9841)', () => {
       startedAt: 1710,
       exitCode: 0,
       runsOn: ['ubuntu-latest'],
+    });
+  });
+
+  it('reads a tail with no omitted-bytes header as a whole log', () => {
+    const ev = event({
+      kind: CI_JOB_RESULT_KIND,
+      content: 'npm test\nok',
+      tags: [
+        ...COMMON_PUSH_TAGS,
+        ['q', `39842:${COORD}:${RUN_ID}`, RELAY],
+        ['job', 'test'],
+        ['conclusion', 'success'],
+      ],
+    });
+    expect(parseCiJobResult(ev)).toMatchObject({
+      logTail: 'npm test\nok',
+      logOmittedBytes: 0,
     });
   });
 
@@ -769,6 +789,97 @@ describe('buildCiRuns + aggregateRunStatus', () => {
       aggregateRunStatus([mk('concluded', 'failure'), mk('in_progress')])
     ).toBe('pending');
     expect(aggregateRunStatus([mk('concluded', 'neutral')])).toBe('neutral');
+  });
+});
+
+describe('deriveRunJobs (rig#190)', () => {
+  const quote = (jobId: string) => ({
+    eventId: `${jobId}-evt`,
+    relayUrl: RELAY,
+    pubkey: COORD,
+    jobId,
+  });
+  const result = (jobId: string) =>
+    ({
+      eventId: `${jobId}-evt`,
+      pubkey: COORD,
+      createdAt: 1800,
+      progressAddress: `39842:${COORD}:${RUN_ID}`,
+      coordinator: COORD,
+      runId: RUN_ID,
+      jobId,
+      name: `${jobId} job`,
+      conclusion: 'success',
+      logTail: 'ok',
+      logOmittedBytes: 0,
+      artifacts: [],
+      runsOn: [],
+    }) as unknown as CiJobResult;
+
+  it('lists every job of a run that has published no job result yet', () => {
+    const jobs = deriveRunJobs({
+      status: 'in_progress',
+      inProgress: ['build', 'test', 'lint'],
+      jobs: [],
+    });
+    expect(jobs.map((j) => j.jobId)).toEqual(['build', 'test', 'lint']);
+  });
+
+  it('a queued run has started nothing, even though its jobs are in the in-progress tag', () => {
+    const jobs = deriveRunJobs({
+      status: 'queued',
+      inProgress: ['build', 'test'],
+      jobs: [],
+    });
+    expect(jobs.map((j) => j.state)).toEqual(['pending', 'pending']);
+  });
+
+  it('an executing run is running the jobs it has not concluded', () => {
+    const jobs = deriveRunJobs(
+      { status: 'in_progress', inProgress: ['test'], jobs: [quote('build')] },
+      [result('build')]
+    );
+    expect(jobs).toMatchObject([
+      { jobId: 'build', state: 'concluded', label: 'build job' },
+      { jobId: 'test', state: 'running', label: 'test' },
+    ]);
+  });
+
+  it('per-job evidence of execution tells a started job from one that has not', () => {
+    const jobs = deriveRunJobs(
+      { status: 'in_progress', inProgress: ['build', 'test'], jobs: [] },
+      [],
+      { startedJobIds: ['build'] }
+    );
+    expect(jobs.map((j) => [j.jobId, j.state])).toEqual([
+      ['build', 'running'],
+      ['test', 'pending'],
+    ]);
+  });
+
+  it('a quote alone concludes a job whose result event is not in hand', () => {
+    const jobs = deriveRunJobs({
+      status: 'concluded',
+      inProgress: [],
+      jobs: [quote('build')],
+    });
+    expect(jobs).toMatchObject([{ jobId: 'build', state: 'concluded' }]);
+    expect(jobs[0]?.result).toBeUndefined();
+  });
+
+  it('a job the run never reached is pending once the run is over, and ids are listed once', () => {
+    const jobs = deriveRunJobs(
+      {
+        status: 'concluded',
+        inProgress: ['deploy', 'build'],
+        jobs: [quote('build')],
+      },
+      [result('build')]
+    );
+    expect(jobs.map((j) => [j.jobId, j.state])).toEqual([
+      ['build', 'concluded'],
+      ['deploy', 'pending'],
+    ]);
   });
 });
 

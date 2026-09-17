@@ -8,96 +8,124 @@ import {
   TrustBadge,
   workflowLabel,
 } from '@/app/pages/actions-page';
-import {
-  conclusionBadgeClass,
-  describeRunState,
-} from '@/components/ci-status-dot';
-import { Badge } from '@/components/ui/badge';
+import { describeRunState } from '@/components/ci-status-dot';
+import { JobStateBadge } from '@/components/job-state-badge';
+import { jobPageHref } from '@/app/pages/job-detail-page';
 import { Skeleton } from '@/components/ui/skeleton';
-import { formatRelativeDate } from '../../date-utils.js';
+import {
+  formatClock,
+  formatDuration,
+  formatRelativeDate,
+} from '../../date-utils.js';
 import { hexToNpub } from '../../npub.js';
 import { shortRefName } from '@/lib/ref-utils';
 import { storeLinkHref } from '../../gateway-preference.js';
-import type { CiJobResult, CiRun } from '../../nip-c1-parsers.js';
+import {
+  deriveRunJobs,
+  type CiRun,
+  type CiRunJob,
+} from '../../nip-c1-parsers.js';
 
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  if (m < 60) return `${m}m ${s}s`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
-}
-
-function formatClock(ts: number): string {
-  return new Date(ts * 1000).toLocaleString();
-}
-
-/** One finished job: its Job Result with timings, log tail, logs + artifacts. */
-function JobCard({ job }: { job: CiJobResult }) {
+/** One job of the run: linked to its own page, whatever state it is in. */
+function JobCard({
+  job,
+  owner,
+  repo,
+  runId,
+}: {
+  job: CiRunJob;
+  owner: string;
+  repo: string;
+  runId: string;
+}) {
+  const result = job.result;
   const duration =
-    job.startedAt !== undefined && job.createdAt >= job.startedAt
-      ? formatDuration(job.createdAt - job.startedAt)
+    result &&
+    result.startedAt !== undefined &&
+    result.createdAt >= result.startedAt
+      ? formatDuration(result.createdAt - result.startedAt)
       : null;
   return (
-    <section className="rounded-md border">
+    <section
+      data-job-id={job.jobId}
+      className={`rounded-md border ${job.state === 'pending' ? 'border-dashed' : ''}`}
+    >
       <header className="flex flex-wrap items-center gap-2 border-b bg-muted/40 px-4 py-2">
         <h3 className="font-semibold text-foreground">
-          {job.name ?? job.jobId}
+          <Link
+            to={jobPageHref(owner, repo, runId, job.jobId)}
+            className="hover:text-primary hover:underline"
+          >
+            {job.label}
+          </Link>
         </h3>
-        {job.name && job.name !== job.jobId && (
+        {job.label !== job.jobId && (
           <span className="font-mono text-xs text-muted-foreground">
             {job.jobId}
           </span>
         )}
-        <Badge
-          className={`text-[10px] ${conclusionBadgeClass('concluded', job.conclusion)}`}
-        >
-          {job.conclusion.replace(/_/g, ' ')}
-        </Badge>
-        {job.exitCode !== undefined && (
+        <JobStateBadge job={job} />
+        {result?.exitCode !== undefined && (
           <span className="text-xs text-muted-foreground">
-            exit code {job.exitCode}
+            exit code {result.exitCode}
           </span>
         )}
-        {job.runsOn.length > 0 && (
+        {result && result.runsOn.length > 0 && (
           <span className="text-xs text-muted-foreground">
-            on {job.runsOn.join(', ')}
+            on {result.runsOn.join(', ')}
           </span>
         )}
         <span className="ml-auto text-xs text-muted-foreground">
-          {job.queuedAt !== undefined && (
-            <span title={formatClock(job.queuedAt)}>
-              queued {formatRelativeDate(job.queuedAt)} ·{' '}
+          {result?.queuedAt !== undefined && (
+            <span title={formatClock(result.queuedAt)}>
+              queued {formatRelativeDate(result.queuedAt)} ·{' '}
             </span>
           )}
-          {job.startedAt !== undefined && (
-            <span title={formatClock(job.startedAt)}>
-              started {formatRelativeDate(job.startedAt)}
+          {result?.startedAt !== undefined && (
+            <span title={formatClock(result.startedAt)}>
+              started {formatRelativeDate(result.startedAt)}
             </span>
           )}
           {duration && <span> · {duration}</span>}
         </span>
       </header>
-      <pre className="max-h-96 overflow-auto bg-muted/20 p-4 font-mono text-xs leading-relaxed text-foreground">
-        {job.logTail || '(no log tail)'}
-      </pre>
+      {result ? (
+        <pre className="max-h-96 overflow-auto bg-muted/20 p-4 font-mono text-xs leading-relaxed text-foreground">
+          {result.logTail || '(no log tail)'}
+        </pre>
+      ) : (
+        <p className="px-4 py-3 text-sm text-muted-foreground">
+          {job.state === 'running'
+            ? 'Running — its job log is published when the run concludes.'
+            : job.state === 'pending'
+              ? 'Not started yet.'
+              : 'Concluded; waiting for its job result to arrive on the relay.'}
+        </p>
+      )}
       <footer className="flex flex-wrap items-center gap-3 border-t px-4 py-2 text-xs">
-        {job.logsUrl ? (
-          <a
-            href={storeLinkHref(job.logsUrl)}
-            target="_blank"
-            rel="noreferrer"
-            className="text-primary underline-offset-2 hover:underline"
-          >
-            Full log
-          </a>
-        ) : (
-          <span className="text-muted-foreground">No full log uploaded</span>
-        )}
-        {job.artifacts.length > 0 && (
+        <Link
+          to={jobPageHref(owner, repo, runId, job.jobId)}
+          className="text-primary underline-offset-2 hover:underline"
+        >
+          Job details
+        </Link>
+        {result &&
+          (result.logsUrl ? (
+            <a
+              href={storeLinkHref(result.logsUrl)}
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary underline-offset-2 hover:underline"
+            >
+              Full log
+            </a>
+          ) : (
+            <span className="text-muted-foreground">No full log uploaded</span>
+          ))}
+        {result && result.artifacts.length > 0 && (
           <span className="text-muted-foreground">
             Artifacts:{' '}
-            {job.artifacts.map((artifact, i) => (
+            {result.artifacts.map((artifact, i) => (
               <span key={artifact.url}>
                 {i > 0 && ', '}
                 <a
@@ -116,20 +144,6 @@ function JobCard({ job }: { job: CiJobResult }) {
           </span>
         )}
       </footer>
-    </section>
-  );
-}
-
-/** A job named by the progress marker whose Job Result has not arrived yet. */
-function PendingJob({ jobId, running }: { jobId: string; running: boolean }) {
-  return (
-    <section className="flex items-center gap-2 rounded-md border border-dashed px-4 py-3">
-      <span className="font-semibold text-foreground">{jobId}</span>
-      <Badge
-        className={`text-[10px] ${conclusionBadgeClass(running ? 'in_progress' : 'queued', undefined)}`}
-      >
-        {running ? 'in progress' : 'pending'}
-      </Badge>
     </section>
   );
 }
@@ -256,11 +270,10 @@ export function RunDetailPage() {
     return <div className="text-muted-foreground">Run not found.</div>;
   }
 
-  const resulted = new Set(jobs.map((j) => j.jobId));
-  const pendingIds = [
-    ...run.inProgress,
-    ...run.jobs.map((q) => q.jobId),
-  ].filter((id, i, all) => !resulted.has(id) && all.indexOf(id) === i);
+  // Every job of the run, from its first in_progress marker onward — the
+  // `in-progress` tag lists a job that has not started as readily as one that
+  // is executing, so the state comes from deriveRunJobs, not from the tag.
+  const runJobs = deriveRunJobs(run, jobs);
 
   return (
     <div className="space-y-4">
@@ -272,17 +285,16 @@ export function RunDetailPage() {
       </Link>
       <RunHeader run={run} owner={owner} repo={repo} />
       <div className="space-y-3">
-        {jobs.map((job) => (
-          <JobCard key={job.eventId} job={job} />
-        ))}
-        {pendingIds.map((id) => (
-          <PendingJob
-            key={id}
-            jobId={id}
-            running={run.inProgress.includes(id)}
+        {runJobs.map((job) => (
+          <JobCard
+            key={job.jobId}
+            job={job}
+            owner={owner}
+            repo={repo}
+            runId={run.runId}
           />
         ))}
-        {jobs.length === 0 && pendingIds.length === 0 && (
+        {runJobs.length === 0 && (
           <div className="rounded-md border bg-muted/30 p-6 text-center text-sm text-muted-foreground">
             {run.status === 'concluded'
               ? `The run concluded ${describeRunState(run)} without publishing any job results.`
