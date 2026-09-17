@@ -323,3 +323,34 @@ export {
   type CiStatusRun,
   type CiStatusSummary,
 } from './cli/ci-status.js';
+
+// rig#155: real NIP-34 wire fixtures captured from wss://relay.ngit.dev, for
+// rig#153's conformance work. `@toon-protocol/rig-web` imports these from
+// this package (a workspace devDependency it already uses for other
+// wire-level test fixtures) so both packages' tests exercise the same
+// captured events.
+export {
+  ALL_NGIT_FIXTURE_EVENTS,
+  NGIT_ANNOUNCEMENT_WYRD,
+  NGIT_ANNOUNCEMENT_WYRD_CAPTURED_AT,
+  NGIT_ANNOUNCEMENT_WYRD_EVENT_ID,
+  NGIT_ANNOUNCEMENT_WYRD_RELAY,
+  NGIT_COMMENT_THREAD_CAPTURED_AT,
+  NGIT_COMMENT_THREAD_COMMENTS,
+  NGIT_COMMENT_THREAD_COMMENT_EVENT_IDS,
+  NGIT_COMMENT_THREAD_NESTED_REPLY_ID,
+  NGIT_COMMENT_THREAD_NESTED_REPLY_PARENT_ID,
+  NGIT_COMMENT_THREAD_RELAY,
+  NGIT_COMMENT_THREAD_ROOT,
+  NGIT_COMMENT_THREAD_ROOT_EVENT_ID,
+  NGIT_STATE_NGIT,
+  NGIT_STATE_NGIT_CAPTURED_AT,
+  NGIT_STATE_NGIT_EVENT_ID,
+  NGIT_STATE_NGIT_RELAY,
+  NGIT_STATUS_NGIT,
+  NGIT_STATUS_NGIT_CAPTURED_AT,
+  NGIT_STATUS_NGIT_EVENT_ID,
+  NGIT_STATUS_NGIT_RELAY,
+  NGIT_STATUS_NGIT_TARGET,
+  NGIT_STATUS_NGIT_TARGET_EVENT_ID,
+} from './nip34-fixtures/index.js';
