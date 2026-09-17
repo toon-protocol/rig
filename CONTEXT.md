@@ -53,3 +53,9 @@ _Avoid_: deployment, hosting
 **Pointer**:
 The per-repo HTML page uploaded on push that boots rig-web from Arweave for that repo.
 _Avoid_: landing page, redirect
+
+### NIP-34 events
+
+**Earliest unique commit**:
+In NIP-34's own wording, the commit that identifies a repo "among forks" and groups it "with other repositories hosted elsewhere that may represent essentially the same project" — usually the repo's root commit. Written as `["r", "<sha>", "euc"]` on the kind:30617 announcement; full NIP-34 text and how rig computes it are in `docs/nip34-wire-shapes.md`.
+_Avoid_: root commit (as a synonym — most repos' earliest unique commit IS their root commit, but the two are not defined identically)
