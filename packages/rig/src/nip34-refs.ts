@@ -44,6 +44,11 @@
  * git-invoking boundary, where they apply to every ref regardless of which
  * tag shape carried it — so the NIP shape is not a hostile-relay bypass, and
  * stays byte-for-byte as strict as the `r` shape it joins.
+ *
+ * See `docs/nip34-wire-shapes.md` for the full kind:30618 wire contract,
+ * including the dual-write end condition and the object-map (`arweave` tag)
+ * cap. Where the two disagree, this file's actual code is the ground
+ * truth.
  */
 
 /**

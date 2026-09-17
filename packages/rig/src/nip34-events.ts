@@ -5,6 +5,12 @@
  * All builders return UnsignedEvent — the caller signs with their keypair
  * via finalizeEvent() and publishes through a Publisher (#226). Tag
  * structures follow the NIP-34 spec and `@toon-protocol/core/nip34`.
+ *
+ * The wire contract — every tag each builder writes, the NIP-34 clause it
+ * follows, and any legacy shape still read (with its end condition) — is
+ * `docs/nip34-wire-shapes.md`. Read that before changing a tag shape here;
+ * update it after. Where the two disagree, this file's actual builders are
+ * the ground truth and the document is the bug.
  */
 
 import { getAddress, isAddress } from 'viem';

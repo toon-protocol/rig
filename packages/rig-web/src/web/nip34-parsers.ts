@@ -17,6 +17,11 @@
  * Ported from `@toon-protocol/views@0.36.9` `src/parsers/nip34.ts`, which
  * includes the kind:1618 pull-request and kind:1619 PR-update parsing that
  * `^0.20.5` never carried (rig#40).
+ *
+ * The wire contract these parsers read — every tag, its NIP-34 clause, and
+ * any legacy shape still accepted, with its end condition — is documented in
+ * `docs/nip34-wire-shapes.md` at the repo root. Where the two disagree,
+ * this file's actual parsers are the ground truth.
  */
 
 // -------------------------------------------------------------------------
