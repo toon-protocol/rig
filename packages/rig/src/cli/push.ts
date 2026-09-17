@@ -599,6 +599,22 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
       );
     }
 
+    // #158: a FIRST announcement links to the repo's rig-web viewer — the SAME
+    // URL the Rig pointer falls back to, under the ACTIVE identity, which is
+    // the pubkey the announcement is addressed by on both paths. It needs a
+    // relay, so a push with none resolved announces without a `web` tag.
+    const announcement =
+      relaysUsed[0] === undefined
+        ? undefined
+        : {
+            web: repoWebUrl({
+              env: deps.env,
+              relay: relaysUsed[0],
+              ownerPubkey: identity.pubkey,
+              repoId,
+            }),
+          };
+
     // ── Estimate ────────────────────────────────────────────────────────────
     // Standalone plans locally; the daemon path delegates the plan to
     // `POST /git/estimate` (same wire shape — ../routes.ts).
@@ -614,18 +630,6 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
         relayUrls: relaysUsed,
       });
       const feeRates = await ctx.publisher.getFeeRates();
-      // #158: the first announcement links to the repo's rig-web viewer —
-      // the SAME URL the Rig pointer falls back to. It needs a relay, so a
-      // push with none resolved simply announces without a `web` tag.
-      const announcementWeb =
-        relaysUsed[0] === undefined
-          ? undefined
-          : repoWebUrl({
-              env: deps.env,
-              relay: relaysUsed[0],
-              ownerPubkey: ctx.ownerPubkey,
-              repoId,
-            });
       const pushPlan = await planPush({
         repoReader: reader,
         remoteState,
@@ -633,7 +637,7 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
         repoId,
         refs: refspecs,
         force: flags.force,
-        ...(announcementWeb ? { announcement: { web: announcementWeb } } : {}),
+        ...(announcement ? { announcement } : {}),
       });
       plan = serializePushPlan(pushPlan);
       execute = async () =>
@@ -673,6 +677,7 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
         refspecs,
         force: flags.force,
         relayUrls: relaysUsed,
+        ...(announcement ? { announcement } : {}),
       });
       execute = () =>
         client.gitPush({
@@ -682,6 +687,7 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
           force: flags.force,
           relayUrls: relaysUsed,
           confirm: true,
+          ...(announcement ? { announcement } : {}),
         });
       // The delegated daemon owns the paid pipeline but exposes no raw-blob
       // upload route yet — the pointer refreshes on the next standalone push.

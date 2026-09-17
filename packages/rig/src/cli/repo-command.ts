@@ -1,14 +1,19 @@
 /**
  * Shared scaffolding for the rig-owned commands that read or republish a
- * repo's kind:30617 announcement (`rig maintainers`, `rig payout`): the
- * common flag set (`--repo-id/--owner/--remote/--relay/--yes/--json`), and
- * the resolution of the repo address + relays from those flags plus the
- * repo's `toon.*` git config.
+ * repo's kind:30617 announcement (`rig maintainers`, `rig payout`,
+ * `rig refresh`): the common flag set
+ * (`--repo-id/--owner/--remote/--relay/--yes/--json`), the resolution of the
+ * repo address + relays from those flags plus the repo's `toon.*` git config,
+ * and the whole prologue a PAID republish must clear before it may spend
+ * anything ({@link openAnnouncementRepublish}).
  *
  * These commands are deliberately identical at the edges — same flags, same
- * repo-address resolution, same relay rules — and differ only in WHICH tag of
- * the announcement they touch. Keeping the edges in one place is what makes
- * that sameness real rather than aspirational.
+ * repo-address resolution, same relay rules, same owner-only and
+ * unannounced-repo refusals — and differ only in WHICH tag of the
+ * announcement they touch. Keeping the edges in one place is what makes that
+ * sameness real rather than aspirational: a money-safety refusal fixed here is
+ * fixed for every one of them, instead of in whichever copy someone
+ * remembered.
  */
 
 import { ownerToHex } from '../npub.js';
@@ -18,13 +23,21 @@ import {
 } from '../repo-announcement.js';
 import { GitRepoReader } from '../repo-reader.js';
 import { repoWebUrl } from '../rig-pointer.js';
+import { fetchRemoteState, type RemoteState } from '../remote-state.js';
 import type { EventCommandDeps } from './events.js';
-import { UnconfiguredRepoAddressError } from './errors.js';
+import { InvalidRelayUrlError, UnconfiguredRepoAddressError } from './errors.js';
 import { readToonConfig, resolveRepoRoot } from './git-config.js';
 import {
+  defaultLoadStandalone,
+  identityReport,
+  type IdentityReport,
+} from './push.js';
+import {
   resolveRelays,
+  singleRelayRefusal,
   type ResolvedRelays,
 } from './remote.js';
+import type { StandaloneContext } from './standalone-context.js';
 
 /** Relay URLs rig can actually talk to (reads and paid publishes alike). */
 export const WS_URL_RE = /^wss?:\/\//i;
@@ -150,14 +163,140 @@ export async function conformanceFactsFor(options: {
       euc = null;
     }
   }
-  return {
-    relays: [relayUrl],
-    web: repoWebUrl({
+  let web: string | null = null;
+  try {
+    web = repoWebUrl({
       env: deps.env,
       relay: relayUrl,
       ownerPubkey: ctx.owner,
       repoId: ctx.repoId,
-    }),
-    earliestUniqueCommit: euc,
+    });
+  } catch {
+    // An owner pubkey that will not encode to an npub means no viewer URL —
+    // never a reason to refuse the announcement edit the user actually asked
+    // for, the same rule the euc lookup follows above.
+    web = null;
+  }
+  return { relays: [relayUrl], web, earliestUniqueCommit: euc };
+}
+
+// ---------------------------------------------------------------------------
+// The paid-republish prologue
+// ---------------------------------------------------------------------------
+
+/** A paid kind:30617 republish that has cleared every refusal and may proceed. */
+export interface OpenedRepublish {
+  ok: true;
+  ctx: RepoContext;
+  /** The single relay this republish reads from and publishes to. */
+  relayUrl: string;
+  /** The loaded standalone context — the caller MUST stop it when done. */
+  standalone: StandaloneContext;
+  identity: IdentityReport;
+  /** The repo's current state, including the announcement being amended. */
+  remote: RemoteState;
+  /** The #158 conformance backfill for this republish. */
+  facts: ConformanceFacts;
+}
+
+/** A republish that must not happen; the command returns `exitCode` as-is. */
+export interface RefusedRepublish {
+  ok: false;
+  exitCode: number;
+  /** Loaded before the refusal, when it was — the caller still stops it. */
+  standalone?: StandaloneContext;
+}
+
+/**
+ * Everything a paid kind:30617 republish must clear BEFORE it may spend
+ * anything, in one place: exactly one ws/wss relay, the embedded standalone
+ * publisher (the daemon has no announcement route), the owner-only check, the
+ * current announcement read off the relay, and the refusal to republish a repo
+ * that has never been announced.
+ *
+ * The last two are money-safety rules, not conveniences:
+ *
+ *   - only the OWNER's kind:30617 is authoritative, so a non-owner republish
+ *     would pay to write that identity's own, ignored announcement;
+ *   - republishing an UNANNOUNCED repo would mint a phantom announcement with
+ *     a placeholder name for real money, and `rig push` only announces a repo
+ *     that is not already announced — so the placeholder would permanently
+ *     shadow the real name and description the first push intended.
+ *
+ * @param what - Verb phrase for the owner-only refusal, e.g. `change the
+ *   maintainer set`.
+ * @param before - Verb phrase for the unannounced refusal, e.g. `before
+ *   managing maintainers`.
+ * @returns The opened republish, or the exit code the command must return.
+ *   Either way, `standalone` (when present) is the caller's to stop.
+ */
+export async function openAnnouncementRepublish(options: {
+  deps: EventCommandDeps;
+  flags: RepoCommandFlags;
+  what: string;
+  before: string;
+}): Promise<OpenedRepublish | RefusedRepublish> {
+  const { deps, flags, what, before } = options;
+  const { io } = deps;
+
+  const ctx = await resolveRepoContext(flags, deps);
+  // A single relay for a paid publish (mirrors push/events guard).
+  if (ctx.relays.length > 1) {
+    io.err(singleRelayRefusal(ctx.resolved, 'Nothing was published or paid.'));
+    return { ok: false, exitCode: 1 };
+  }
+  const relayUrl = ctx.relays[0];
+  if (relayUrl === undefined || !WS_URL_RE.test(relayUrl)) {
+    throw new InvalidRelayUrlError(
+      relayUrl ?? '',
+      'a paid publish needs a ws:// or wss:// relay'
+    );
+  }
+
+  // Standalone only: the daemon has no announcement route.
+  const load = deps.loadStandalone ?? defaultLoadStandalone;
+  const standalone = await load({
+    env: deps.env,
+    cwd: deps.cwd,
+    warn: (line) => io.err(line),
+    relayUrl,
+  });
+  const identity = identityReport(standalone);
+
+  if (identity.pubkey.toLowerCase() !== ctx.owner.toLowerCase()) {
+    io.err(
+      `rig: only the repo owner (${ctx.owner.slice(0, 8)}…) can ${what} — the ` +
+        `active identity is ${identity.pubkey.slice(0, 8)}…. ` +
+        'A non-owner republish would write your own (ignored) announcement. ' +
+        'Nothing was published or paid.'
+    );
+    return { ok: false, exitCode: 1, standalone };
+  }
+
+  const remote = await fetchRemoteState({
+    relayUrls: [relayUrl],
+    ownerPubkey: ctx.owner,
+    repoId: ctx.repoId,
+    ...(deps.webSocketFactory
+      ? { webSocketFactory: deps.webSocketFactory }
+      : {}),
+  });
+  if (!remote.announced) {
+    io.err(
+      `rig: 30617:${ctx.owner.slice(0, 8)}…:${ctx.repoId} has no announcement ` +
+        'yet — run `rig push` to publish the repo (with its real ' +
+        `name/description) ${before}. Nothing was published or paid.`
+    );
+    return { ok: false, exitCode: 1, standalone };
+  }
+
+  return {
+    ok: true,
+    ctx,
+    relayUrl,
+    standalone,
+    identity,
+    remote,
+    facts: await conformanceFactsFor({ ctx, relayUrl, deps }),
   };
 }

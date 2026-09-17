@@ -27,6 +27,7 @@ import {
 } from './rig-pointer-record.js';
 import { runPush, selectRefspecs, type CliIo, type PushDeps } from './push.js';
 import { GitRepoReader } from '../repo-reader.js';
+import { repoWebUrl } from '../rig-pointer.js';
 import type {
   StandaloneContext,
   StandaloneLoadOptions,
@@ -1068,6 +1069,18 @@ describe('daemon delegation (#279)', () => {
     expect(posts[0]?.body['refspecs']).toEqual(['refs/heads/main']);
     expect(posts[0]?.body['relayUrls']).toEqual(['wss://origin-relay.example']);
     expect(posts[1]?.body['confirm']).toBe(true);
+    // #158: the announcement's `web` URL rides along on BOTH calls, so a
+    // daemon-delegated first push announces as conformantly as a local one.
+    for (const post of posts) {
+      expect(post.body['announcement']).toEqual({
+        web: repoWebUrl({
+          env: {},
+          relay: 'wss://origin-relay.example',
+          ownerPubkey: SELF,
+          repoId: 'demo',
+        }),
+      });
+    }
 
     const doc = JSON.parse(h.out.join('\n')) as Record<string, unknown>;
     expect(doc['path']).toBe('daemon');

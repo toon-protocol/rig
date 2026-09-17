@@ -45,20 +45,12 @@ export {
 
 export {
   amendRepoAnnouncement,
-  announcedEuc,
   buildRepoAnnouncement,
-  conformanceEdits,
-  describeAnnouncementDiff,
-  diffAnnouncementTags,
-  earliestUniqueCommit,
   EARLIEST_UNIQUE_COMMIT_MARKER,
   RELAYS_TAG,
   WEB_TAG,
-  type AnnouncementDiff,
   type AnnouncementEdits,
-  type ConformanceFacts,
   type ExistingAnnouncement,
-  type RootCommitSource,
 } from './repo-announcement.js';
 
 export {

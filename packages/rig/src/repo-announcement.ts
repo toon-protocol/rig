@@ -310,10 +310,18 @@ export interface RootCommitSource {
  * the rule is total and has no dependence on rev-list ordering:
  *
  * 1. One root commit → that root.
- * 2. Several roots → only the roots reachable from the default branch
- *    (`HEAD`) are candidates; a repo whose `HEAD` resolves to nothing falls
- *    back to all roots.
+ * 2. Several roots → only the roots reachable from the default branch are
+ *    candidates; a repo whose default branch resolves to nothing falls back
+ *    to all roots.
  * 3. Still several candidates → the lexicographically lowest SHA.
+ *
+ * "The default branch" is read as `HEAD`, because a local git repository has
+ * no other notion of one — `HEAD` IS the branch a clone lands on, and it is
+ * what ngit reads for the same tag. The residual ambiguity is narrow (a
+ * multi-root repo whose first push is made from a checked-out branch that
+ * reaches a different root than the default one does) and it closes after
+ * that first push: once an announcement carries an `euc`, every republish
+ * preserves it rather than recomputing, so the value can never drift.
  *
  * @returns The chosen SHA, or `null` for a repo with no commits.
  */
@@ -370,12 +378,20 @@ export interface ConformanceFacts {
  * call — the backfill every owner-initiated republish performs.
  *
  * `relays` and `web` are rig's own statement of where this publish went and
- * where the repo can be browsed, so they track the current publish. The `euc`
- * is written only when the announcement does not already declare one: a
- * repo's fork identity must never change under its owner, even if the local
- * root commit differs (a shallow clone, a rewritten history, a different
- * worktree). Omitted slots are left exactly as they are, which is what makes
- * this composable with a `maintainers` or `payout` edit.
+ * where the repo can be browsed, so they are REWRITTEN to track the current
+ * publish rather than merged with what is there. That is what #158 asks for
+ * ("the relay URLs the publish is going to"), and it has a cost worth naming:
+ * on a repo whose announcement was last written by another client, a rig
+ * republish replaces that client's `relays` list and `web` URL with rig's.
+ * Both are slots rig models, so #154's carry-over guarantee does not cover
+ * them — it covers `clone`, the role tags, `blossoms`, `t`, `alt` and
+ * everything rig has never heard of, which survive untouched.
+ *
+ * The `euc` is written only when the announcement does not already declare
+ * one: a repo's fork identity must never change under its owner, even if the
+ * local root commit differs (a shallow clone, a rewritten history, a
+ * different worktree). Omitted slots are left exactly as they are, which is
+ * what makes this composable with a `maintainers` or `payout` edit.
  *
  * `clone` is deliberately absent: rig has no git-clonable URL, and emitting
  * one would send other clients to a fetch that cannot succeed. An existing
@@ -407,7 +423,11 @@ export interface AnnouncementDiff {
   added: string[][];
   /** Tags the republish drops (or changes away from). */
   removed: string[][];
-  /** True when the republish would change nothing on the wire. */
+  /**
+   * True when the republish would change nothing on the wire — derived from
+   * `added`/`removed`, and named because "is this republish worth paying for?"
+   * is the question every caller actually asks.
+   */
   unchanged: boolean;
 }
 
@@ -450,12 +470,4 @@ export function diffAnnouncementTags(
     removed,
     unchanged: added.length === 0 && removed.length === 0,
   };
-}
-
-/** One human-readable line per changed tag, for a confirmation gate. */
-export function describeAnnouncementDiff(diff: AnnouncementDiff): string[] {
-  return [
-    ...diff.removed.map((tag) => `  - ${tag.join(' ')}`),
-    ...diff.added.map((tag) => `  + ${tag.join(' ')}`),
-  ];
 }

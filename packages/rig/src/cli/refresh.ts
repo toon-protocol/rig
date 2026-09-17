@@ -31,26 +31,17 @@ import { parseArgs } from 'node:util';
 import {
   amendRepoAnnouncement,
   conformanceEdits,
-  describeAnnouncementDiff,
   diffAnnouncementTags,
 } from '../repo-announcement.js';
-import { fetchRemoteState } from '../remote-state.js';
 import { serializeEventReceipt, type GitEventResponse } from '../routes.js';
 import type { EventCommandDeps } from './events.js';
-import { emitCliError, InvalidRelayUrlError } from './errors.js';
+import { emitCliError } from './errors.js';
+import type { IdentityReport } from './push.js';
+import { describeAnnouncementDiff, feeLabel } from './render.js';
 import {
-  defaultLoadStandalone,
-  identityReport,
-  type IdentityReport,
-} from './push.js';
-import { feeLabel } from './render.js';
-import { singleRelayRefusal } from './remote.js';
-import {
-  conformanceFactsFor,
+  openAnnouncementRepublish,
   pickRepoCommandFlags,
   REPO_COMMAND_OPTIONS,
-  resolveRepoContext,
-  WS_URL_RE,
   type RepoCommandFlags,
 } from './repo-command.js';
 import type { StandaloneContext } from './standalone-context.js';
@@ -128,62 +119,17 @@ export async function runRefresh(
 
   let standaloneCtx: StandaloneContext | undefined;
   try {
-    const ctx = await resolveRepoContext(flags, deps);
-    // A single relay for a paid publish (mirrors maintainers/payout/push).
-    if (ctx.relays.length > 1) {
-      io.err(singleRelayRefusal(ctx.resolved, 'Nothing was published or paid.'));
-      return 1;
-    }
-    const relayUrl = ctx.relays[0];
-    if (relayUrl === undefined || !WS_URL_RE.test(relayUrl)) {
-      throw new InvalidRelayUrlError(
-        relayUrl ?? '',
-        'a paid publish needs a ws:// or wss:// relay'
-      );
-    }
-
-    // Standalone only: the daemon has no announcement route.
-    const load = deps.loadStandalone ?? defaultLoadStandalone;
-    standaloneCtx = await load({
-      env: deps.env,
-      cwd: deps.cwd,
-      warn: (line) => io.err(line),
-      relayUrl,
+    const opened = await openAnnouncementRepublish({
+      deps,
+      flags,
+      what: 'refresh the announcement',
+      before: 'before refreshing it',
     });
-    const identity = identityReport(standaloneCtx);
-
-    if (identity.pubkey.toLowerCase() !== ctx.owner.toLowerCase()) {
-      io.err(
-        `rig: only the repo owner (${ctx.owner.slice(0, 8)}…) can refresh the ` +
-          `announcement — the active identity is ${identity.pubkey.slice(0, 8)}…. ` +
-          'A non-owner republish would write your own (ignored) announcement. ' +
-          'Nothing was published or paid.'
-      );
-      return 1;
-    }
-
-    const remote = await fetchRemoteState({
-      relayUrls: [relayUrl],
-      ownerPubkey: ctx.owner,
-      repoId: ctx.repoId,
-      ...(deps.webSocketFactory
-        ? { webSocketFactory: deps.webSocketFactory }
-        : {}),
-    });
-    // Refuse on an unannounced repo, exactly as maintainers/payout do: a
-    // republish here would MINT a phantom kind:30617 with a placeholder name,
-    // for real money, and `rig push` would then never announce the real one.
-    if (!remote.announced) {
-      io.err(
-        `rig: 30617:${ctx.owner.slice(0, 8)}…:${ctx.repoId} has no announcement ` +
-          'yet — run `rig push` to publish the repo (with its real ' +
-          'name/description) before refreshing it. Nothing was published or paid.'
-      );
-      return 1;
-    }
+    standaloneCtx = opened.standalone;
+    if (!opened.ok) return opened.exitCode;
+    const { ctx, relayUrl, identity, remote, facts } = opened;
 
     // No field edit: the ONLY changes are the conformance backfill (#158).
-    const facts = await conformanceFactsFor({ ctx, relayUrl, deps });
     const event = amendRepoAnnouncement(remote.announceEvent, {
       repoId: ctx.repoId,
       ...conformanceEdits(remote.announceEvent, facts),
@@ -212,7 +158,9 @@ export async function runRefresh(
       return 0;
     }
 
-    const fee = (await standaloneCtx.publisher.getFeeRates()).eventFee.toString();
+    const fee = (
+      await opened.standalone.publisher.getFeeRates()
+    ).eventFee.toString();
     const changes = { added: diff.added, removed: diff.removed };
 
     // ── Confirm gate ────────────────────────────────────────────────────────
@@ -253,7 +201,7 @@ export async function runRefresh(
     }
 
     // ── Execute ─────────────────────────────────────────────────────────────
-    const receipt = await standaloneCtx.publisher.publishEvent(event, [
+    const receipt = await opened.standalone.publisher.publishEvent(event, [
       relayUrl,
     ]);
     const result = serializeEventReceipt(event.kind, receipt);

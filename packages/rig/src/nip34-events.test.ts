@@ -25,10 +25,10 @@ import {
   announcedEuc,
   buildRepoAnnouncement,
   conformanceEdits,
-  describeAnnouncementDiff,
   diffAnnouncementTags,
   earliestUniqueCommit,
 } from './repo-announcement.js';
+import { describeAnnouncementDiff } from './cli/render.js';
 
 const OWNER_PUBKEY =
   '55c2a467881059a942fdc6908b041273885b8720bfa8fcf2f5f9c20a73b0964d';
