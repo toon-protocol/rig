@@ -168,7 +168,11 @@ export function parseRepoRefs(event: NostrEvent): RepoRefs | null {
   const arweaveMap = new Map<string, string>();
   for (const tag of event.tags) {
     if (tag[0] === 'r' && tag[1] && tag[2]) {
-      if (refs.size >= MAX_REFS_PER_EVENT) break;
+      // `continue`, not `break`: hitting the ref cap must skip the surplus
+      // ref, not abandon the event — a `break` here dropped every `arweave`
+      // tag that followed, emptying the object map (#162). This matches
+      // `parseRefsEvent` in @toon-protocol/rig, which has always continued.
+      if (refs.size >= MAX_REFS_PER_EVENT) continue;
       refs.set(tag[1], tag[2]);
     } else if (tag[0] === 'arweave' && tag[1] && tag[2]) {
       if (arweaveMap.size >= MAX_ARWEAVE_TAGS_PER_EVENT) continue;

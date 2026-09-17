@@ -222,6 +222,21 @@ describe('reachableObjectsNewestFirst', () => {
     ).resolves.toEqual([]);
     await expect(reader.reachableObjectsNewestFirst([])).resolves.toEqual([]);
   });
+
+  it('stops the walk at `limit`, keeping the newest-first prefix', async () => {
+    const full = await reader.reachableObjectsNewestFirst([commit2]);
+    expect(full.length).toBeGreaterThan(3);
+
+    const limited = await reader.reachableObjectsNewestFirst([commit2], 3);
+    expect(limited).toEqual(full.slice(0, 3));
+    await expect(
+      reader.reachableObjectsNewestFirst([commit2], 0)
+    ).resolves.toEqual([]);
+    // A limit past the end is simply the whole walk.
+    await expect(
+      reader.reachableObjectsNewestFirst([commit2], full.length + 100)
+    ).resolves.toEqual(full);
+  });
 });
 
 describe('listAllObjectShas', () => {

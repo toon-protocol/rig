@@ -504,10 +504,16 @@ const READ_BATCH_SIZE = 100;
  * as every release before the cap published it. Over the cap, entries are
  * kept in priority order —
  *
- *   1. objects this push introduced (they are what a reader wants next);
+ *   1. the objects this push uploaded (they are what a reader wants next);
  *   2. objects reachable from the new ref tips, newest first (the common
  *      clone / shallow-history path);
  *   3. whatever merge-order hints still fit, so a spare slot is never wasted.
+ *
+ * Tier 1 is `plan.objects`, which is the objects this push had to UPLOAD. An
+ * object the push introduced but did not upload — one a resumed attempt had
+ * already paid for, or one the resolver found on Arweave — is not in tier 1,
+ * and does not need to be: it is reachable from the new tips and therefore
+ * near the front of tier 2.
  *
  * Dropping an entry costs a GraphQL `Git-SHA` lookup on read and nothing
  * else — the object is on Arweave either way. It NEVER costs a re-upload:
@@ -531,10 +537,17 @@ async function boundObjectMap(
   // 1. This push's own objects, first and unconditionally.
   for (const object of plan.objects) take(object.sha);
 
-  // 2. Reachable from the new ref tips, newest commit first.
+  // 2. Reachable from the new ref tips, newest commit first. The walk stops
+  //    after a cap's worth of SHAs: no ordering beyond that can change which
+  //    entries fit, and on a repo large enough to be here, walking the whole
+  //    object graph is the work worth not doing.
   if (kept.size < MAX_ARWEAVE_TAGS_PER_EVENT) {
     const tips = [...new Set(Object.values(plan.newRefs))];
-    for (const sha of await repoReader.reachableObjectsNewestFirst(tips)) {
+    const reachable = await repoReader.reachableObjectsNewestFirst(
+      tips,
+      MAX_ARWEAVE_TAGS_PER_EVENT
+    );
+    for (const sha of reachable) {
       if (kept.size >= MAX_ARWEAVE_TAGS_PER_EVENT) break;
       take(sha);
     }

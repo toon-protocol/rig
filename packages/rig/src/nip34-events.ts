@@ -232,24 +232,35 @@ export function buildRepoAnnouncement(
  * merged cumulatively on every push and bounded by nothing, so a large repo
  * eventually produced an event relays reject (#162).
  *
- * WHY 2000 — the arithmetic, worst case, in the event's JSON serialization:
+ * WHY 2000 — the arithmetic, in the event's JSON serialization:
  *
  *   one arweave tag  `["arweave","<40-hex sha>","<43-char txId>"]`
  *                    = 1 + 9 + 1 + 42 + 1 + 45 + 1 = 100 bytes, +1 comma = 101
  *   2000 of them     = 202,000 bytes ≈ 197 KiB   ← the map's whole budget
  *
- *   the rest of the same event, at ITS caps:
- *   1000 ref tags    (MAX_REFS_PER_EVENT) `["r","<refname>","<sha>"]`, and
- *                    `isSafeRefname` admits refnames up to 1024 bytes
- *                    → ≤ 1076 bytes each ≈ 1.03 MiB
- *   HEAD + d + id/pubkey/sig/kind/created_at/content   ≈ 1.5 KiB
+ * Which limit is that 197 KiB measured against? rig's own relay
+ * (`relay-ws.devnet.toonprotocol.dev`) advertises no `limitation` in its
+ * NIP-11 document — probed 2026-09-17, the HTTPS origin answers `Upgrade
+ * Required` rather than a relay-information document — so there is no
+ * self-declared number to size against. The smallest limit any relay surveyed
+ * for #153 declares is `relay.ngit.dev`'s 5 MiB message cap (probed the same
+ * day), and that is the figure used here: the map is capped at under 4% of
+ * it. That leaves the rest of the budget to the refs, which are the other
+ * term in the same event:
  *
- *   worst-case event ≈ 1.03 MiB + 197 KiB ≈ 1.23 MiB
+ *   `["r","<refname>","<sha>"]`, and `isSafeRefname` admits refnames up to
+ *   1024 bytes → ≤ 1076 bytes each. Every rig reader ingests at most
+ *   MAX_REFS_PER_EVENT = 1000 of them, and 1000 at that adversarial width is
+ *   ≈ 1.03 MiB, so a readable event tops out near 1.23 MiB — a quarter of the
+ *   5 MiB limit. With realistic refnames (≤ 64 bytes) a full-cap event is
+ *   ≈ 260 KiB.
  *
- * The strictest relay surveyed for #153 (relay.ngit.dev, 2026-09-17) accepts
- * 5 MiB messages, so even that adversarial event sits at ~25% of the smallest
- * known limit, and the object map is only ~16% of the event. With realistic
- * refnames (≤ 64 bytes) a full-cap event is ≈ 260 KiB.
+ * NOTE the asymmetry: the 1000-ref cap is a READ-side constant. `buildRepoRefs`
+ * still writes every ref it is given, so a repo with more than 1000 refs can
+ * publish an event past the figures above — that is the ref tags' problem, not
+ * the map's, and it is the ref shape work's to fix (#153 §Repository state).
+ * This cap's job is to stop the OBJECT MAP being the term that grows without
+ * limit, which it was: it grew with the object count, not the ref count.
  *
  * Dropping an entry loses nothing: the object is still on Arweave under its
  * `Git-SHA` / `Repo` tags and resolves through the GraphQL resolver, which is
@@ -290,11 +301,12 @@ export function buildRepoRefs(
   }
 
   // Add arweave SHA-to-txId mapping tags, bounded (#162).
-  let arweaveTagCount = 0;
-  for (const [sha, txId] of Object.entries(arweaveMap)) {
-    if (arweaveTagCount >= MAX_ARWEAVE_TAGS_PER_EVENT) break;
+  const mapped = Object.entries(arweaveMap).slice(
+    0,
+    MAX_ARWEAVE_TAGS_PER_EVENT
+  );
+  for (const [sha, txId] of mapped) {
     tags.push(['arweave', sha, txId]);
-    arweaveTagCount++;
   }
 
   return {

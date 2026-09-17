@@ -974,6 +974,30 @@ describe('NIP-34 Parsers - 8.6-UNIT-005b: arweaveMap from kind:30618', () => {
     expect(result!.refs.get('main')).toBe('aaa111');
   });
 
+  it('[P1] parseRepoRefs still reads arweave tags past the 1000-ref cap (#162)', () => {
+    // Regression: the ref cap used to `break` the whole tag loop, so an event
+    // with more than 1000 `r` tags yielded an EMPTY object map.
+    const refFlood = Array.from({ length: 1200 }, (_, i) => [
+      'r',
+      `branch-${i}`,
+      i.toString(16).padStart(40, '0'),
+    ]);
+    const sha = 'ab'.repeat(20);
+    const event = createMockRefsEvent({
+      tags: [
+        ['d', 'my-repo'],
+        ...refFlood,
+        ['arweave', sha, 'txAfterTheRefCap'],
+      ],
+    });
+
+    const result = parseRepoRefs(event);
+
+    expect(result).not.toBeNull();
+    expect(result!.refs.size).toBe(1000);
+    expect(result!.arweaveMap.get(sha)).toBe('txAfterTheRefCap');
+  });
+
   it('[P1] parseRepoRefs returns empty arweaveMap when no arweave tags', () => {
     const event = createMockRefsEvent({
       tags: [

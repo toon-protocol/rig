@@ -25,4 +25,10 @@ unchanged, and are now covered by tests that run with the cap saturated.
 
 `rig fetch` also stops deriving "objects I already have" from the remote's
 `arweave` map — it reads the local object database instead — so a capped map
-never causes it to re-download history the repository already holds.
+never causes it to re-download history the repository already holds. Both of
+these object walks are streamed and bounded, so the code the cap added cannot
+itself fail on the very large repositories the cap exists for.
+
+Fixes a latent bug in rig-web's `parseRepoRefs`: hitting the 1000-ref cap used
+to abandon the whole tag loop, so a state event with more than 1000 refs parsed
+an empty object map.
