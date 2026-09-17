@@ -23,7 +23,8 @@
  */
 
 import { parseArgs } from 'node:util';
-import { buildRepoAnnouncement, parseMaintainers } from '../nip34-events.js';
+import { parseMaintainers } from '../nip34-events.js';
+import { amendRepoAnnouncement } from '../repo-announcement.js';
 import { ownerToHex } from '../npub.js';
 import { fetchRemoteState } from '../remote-state.js';
 import {
@@ -316,15 +317,16 @@ async function runMutate(
 
     const name = remote.name ?? ctx.repoId;
     const description = remote.description ?? '';
-    // Preserve the payout pointer (rig#92) — this republish must not
-    // silently wipe it out from under `rig payout`.
-    const event = buildRepoAnnouncement(
-      ctx.repoId,
+    // Amend rather than rebuild (#154): the maintainers tag is the only thing
+    // this command edits, so the payout pointer (rig#92) and every tag rig
+    // does not model — another client's role tags, `clone`, `blossoms`, … —
+    // ride along untouched instead of being wiped by the replaceable write.
+    const event = amendRepoAnnouncement(remote.announceEvent, {
+      repoId: ctx.repoId,
       name,
       description,
-      next,
-      remote.payout
-    );
+      maintainers: next,
+    });
     const fee = (await standaloneCtx.publisher.getFeeRates()).eventFee.toString();
     const action = `kind:30617 maintainers ${op} ${pubkey.slice(0, 8)}…`;
 

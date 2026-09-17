@@ -32,10 +32,10 @@
 import { parseArgs } from 'node:util';
 import { getAddress } from 'viem';
 import {
-  buildRepoAnnouncement,
   isValidEvmPayoutAddress,
   type PayoutPointer,
 } from '../nip34-events.js';
+import { amendRepoAnnouncement } from '../repo-announcement.js';
 import { fetchRemoteState } from '../remote-state.js';
 import { serializeEventReceipt, type GitEventResponse } from '../routes.js';
 import type { EventCommandDeps } from './events.js';
@@ -325,13 +325,15 @@ async function runMutate(
 
     const name = remote.name ?? ctx.repoId;
     const description = remote.description ?? '';
-    const event = buildRepoAnnouncement(
-      ctx.repoId,
+    // Amend rather than rebuild (#154): the payout tag is the only thing this
+    // command edits, so the maintainers tag and every tag rig does not model
+    // survive the replaceable write instead of being destroyed by it.
+    const event = amendRepoAnnouncement(remote.announceEvent, {
+      repoId: ctx.repoId,
       name,
       description,
-      remote.maintainers,
-      nextPayout
-    );
+      payout: nextPayout,
+    });
     const fee = (await standaloneCtx.publisher.getFeeRates()).eventFee.toString();
     const action = nextPayout
       ? `kind:30617 payout set ${nextPayout.chain} ${nextPayout.address}`

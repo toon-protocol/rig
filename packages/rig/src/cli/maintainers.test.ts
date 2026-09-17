@@ -77,6 +77,36 @@ function makeStandalone(identity = OWNER): Fake {
   };
 }
 
+/**
+ * Tags an announcement can carry that rig does not model: another client's
+ * maintainer role tags (nips PR #2324), `clone`, `blossoms`, `t`, `alt`, and
+ * one rig has never heard of. A republish must carry all of them over
+ * verbatim, in this order (#154).
+ */
+const FOREIGN_TAGS: string[][] = [
+  ['clone', 'https://relay.ngit.dev/npub1abc/demo.git'],
+  ['M', OWNER],
+  ['m', M2],
+  ['o', M2],
+  ['blossoms', 'https://blossom.example'],
+  ['t', 'rust'],
+  ['alt', 'git repository: demo'],
+  ['x-rig-knows-nothing', 'keep', 'me'],
+];
+
+const FOREIGN_NAMES = FOREIGN_TAGS.map((t) => t[0]);
+
+/** The foreign tags as they survived a republish, in published order. */
+function survivingForeignTags(event: UnsignedEvent): string[][] {
+  return event.tags.filter((t) => FOREIGN_NAMES.includes(t[0]));
+}
+
+/** An announcement as another NIP-34 client (ngit) wrote it. */
+function foreignAnnouncement(maintainers: string[]): NostrEvent {
+  const base = announcement(OWNER, maintainers);
+  return { ...base, tags: [...base.tags, ...FOREIGN_TAGS] };
+}
+
 function announcement(
   owner: string,
   maintainers: string[],
@@ -194,6 +224,37 @@ describe('rig maintainers add/remove (paid, owner-only)', () => {
     expect(code).toBe(0);
     expect(fake.published).toHaveLength(1);
     expect(parseMaintainers(fake.published[0]!.event.tags)).toEqual([M2]);
+  });
+
+  it('add preserves every tag rig does not model, in order (#154)', async () => {
+    const io = makeIo();
+    const fake = makeStandalone();
+    const code = await runMaintainers(
+      ['add', M1, ...ADDR, '--yes'],
+      makeDeps(io, fake, [foreignAnnouncement([])])
+    );
+    expect(code).toBe(0);
+    const published = fake.published[0];
+    if (!published) throw new Error('expected a published event');
+    expect(survivingForeignTags(published.event)).toEqual(FOREIGN_TAGS);
+    // …and the field being edited is the only thing that changed.
+    expect(parseMaintainers(published.event.tags)).toEqual([M1]);
+    expect(published.event.tags).toContainEqual(['name', 'Demo Repo']);
+    expect(published.event.tags).toContainEqual(['description', 'A demo']);
+  });
+
+  it('remove preserves every tag rig does not model, in order (#154)', async () => {
+    const io = makeIo();
+    const fake = makeStandalone();
+    const code = await runMaintainers(
+      ['remove', M1, ...ADDR, '--yes'],
+      makeDeps(io, fake, [foreignAnnouncement([M1, M2])])
+    );
+    expect(code).toBe(0);
+    const published = fake.published[0];
+    if (!published) throw new Error('expected a published event');
+    expect(survivingForeignTags(published.event)).toEqual(FOREIGN_TAGS);
+    expect(parseMaintainers(published.event.tags)).toEqual([M2]);
   });
 
   it('add is a no-op (nothing published) when already a maintainer', async () => {

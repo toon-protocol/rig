@@ -32,7 +32,6 @@ export {
   buildComment,
   buildIssue,
   buildPatch,
-  buildRepoAnnouncement,
   buildRepoRefs,
   buildStatus,
   isValidEvmPayoutAddress,
@@ -43,6 +42,16 @@ export {
   type StatusKind,
   type UnsignedEvent,
 } from './nip34-events.js';
+
+export {
+  EARLIEST_UNIQUE_COMMIT_MARKER,
+  RELAYS_TAG,
+  WEB_TAG,
+  amendRepoAnnouncement,
+  buildRepoAnnouncement,
+  type AnnouncementEdits,
+  type ExistingAnnouncement,
+} from './repo-announcement.js';
 
 export {
   GitError,
