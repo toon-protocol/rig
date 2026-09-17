@@ -12,6 +12,12 @@
  */
 
 import { ownerToHex } from '../npub.js';
+import {
+  earliestUniqueCommit,
+  type ConformanceFacts,
+} from '../repo-announcement.js';
+import { GitRepoReader } from '../repo-reader.js';
+import { repoWebUrl } from '../rig-pointer.js';
 import type { EventCommandDeps } from './events.js';
 import { UnconfiguredRepoAddressError } from './errors.js';
 import { readToonConfig, resolveRepoRoot } from './git-config.js';
@@ -104,5 +110,54 @@ export async function resolveRepoContext(
     relays: resolved.relays,
     resolved,
     ...(repoRoot !== undefined ? { repoRoot } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Conformance tags (#158)
+// ---------------------------------------------------------------------------
+
+/**
+ * The NIP-34 conformance facts (#158) for an owner-initiated republish:
+ * the relay this publish goes to, the repo's rig-web viewer URL, and the
+ * `euc` computed from the LOCAL repository.
+ *
+ * Every owner-initiated republish backfills these, so a repo announced before
+ * #158 becomes conformant on the next `rig maintainers`, `rig payout` or
+ * `rig refresh` with no special step. A command run OUTSIDE a git repo (all of
+ * them accept `--repo-id`/`--owner`) still backfills `relays` and `web`; the
+ * `euc` needs local history, and reporting none is honest — the announcement
+ * keeps whatever it already declares.
+ */
+export async function conformanceFactsFor(options: {
+  ctx: RepoContext;
+  relayUrl: string;
+  deps: EventCommandDeps;
+}): Promise<ConformanceFacts> {
+  const { ctx, relayUrl, deps } = options;
+  const repoRoot = ctx.repoRoot;
+  const rootCommits =
+    deps.rootCommits ??
+    (repoRoot === undefined
+      ? undefined
+      : (rev?: string) => new GitRepoReader(repoRoot).rootCommits(rev));
+  let euc: string | null = null;
+  if (rootCommits !== undefined) {
+    try {
+      euc = await earliestUniqueCommit({ rootCommits });
+    } catch {
+      // An unreadable local repo is no reason to refuse an announcement edit.
+      euc = null;
+    }
+  }
+  return {
+    relays: [relayUrl],
+    web: repoWebUrl({
+      env: deps.env,
+      relay: relayUrl,
+      ownerPubkey: ctx.owner,
+      repoId: ctx.repoId,
+    }),
+    earliestUniqueCommit: euc,
   };
 }

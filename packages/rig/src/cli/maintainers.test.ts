@@ -13,6 +13,7 @@ import { parseMaintainers } from '../nip34-events.js';
 import type { CliIo } from './output.js';
 import type { EventCommandDeps } from './events.js';
 import { runMaintainers } from './maintainers.js';
+import { repoWebUrl } from '../rig-pointer.js';
 import type { StandaloneContext } from './standalone-context.js';
 import {
   filterEvents,
@@ -130,6 +131,11 @@ function makeDeps(
 }
 
 const ADDR = ['--repo-id', REPO, '--owner', OWNER, '--relay', RELAY];
+
+/** The `web` tag value #158 backfills — the Pointer's own route shape. */
+function webUrl(): string {
+  return repoWebUrl({ env: {}, relay: RELAY, ownerPubkey: OWNER, repoId: REPO });
+}
 
 describe('rig maintainers list (free)', () => {
   it('prints the owner + declared maintainers', async () => {
@@ -271,6 +277,9 @@ describe('rig maintainers add/remove (paid, owner-only)', () => {
       ['d', REPO],
       ...FOREIGN_TAGS,
       ['maintainers', M1],
+      // …and the #158 conformance backfill, which is the ONLY other addition.
+      ['relays', RELAY],
+      ['web', webUrl()],
     ]);
     expect(published.event.content).toBe(prose);
   });
@@ -343,6 +352,89 @@ describe('rig maintainers add/remove (paid, owner-only)', () => {
       executed: false,
       maintainers: [M1],
     });
+  });
+
+  it('backfills relays/web/euc on a repo announced before #158', async () => {
+    const io = makeIo();
+    const fake = makeStandalone();
+    const LOCAL_ROOT = 'a1'.repeat(20);
+    const deps = {
+      ...makeDeps(io, fake, [announcement(OWNER, [])]),
+      // The local checkout's history, at the injectable git seam.
+      rootCommits: async () => [LOCAL_ROOT],
+    };
+    const code = await runMaintainers(['add', M1, ...ADDR, '--yes'], deps);
+    expect(code).toBe(0);
+    const published = fake.published[0];
+    expect(published).toBeDefined();
+    const tags = published?.event.tags ?? [];
+    expect(tags).toContainEqual(['relays', RELAY]);
+    expect(tags).toContainEqual(['web', webUrl()]);
+    expect(tags).toContainEqual(['r', LOCAL_ROOT, 'euc']);
+    // …and the edit it was actually asked to make still happened.
+    expect(parseMaintainers(tags)).toEqual([M1]);
+  });
+
+  it('NEVER recomputes an announced euc, even when local git disagrees', async () => {
+    // A repo's fork identity must not change under its owner.
+    const ANNOUNCED_EUC = 'be'.repeat(20);
+    const io = makeIo();
+    const fake = makeStandalone();
+    const base = announcement(OWNER, []);
+    const deps = {
+      ...makeDeps(io, fake, [
+        { ...base, tags: [...base.tags, ['r', ANNOUNCED_EUC, 'euc']] },
+      ]),
+      rootCommits: async () => ['ff'.repeat(20)], // a DIFFERENT local root
+    };
+    const code = await runMaintainers(['add', M1, ...ADDR, '--yes'], deps);
+    expect(code).toBe(0);
+    const tags = fake.published[0]?.event.tags ?? [];
+    expect(tags.filter((t) => t[0] === 'r' && t[2] === 'euc')).toEqual([
+      ['r', ANNOUNCED_EUC, 'euc'],
+    ]);
+  });
+
+  it('backfills relays/web without an euc when run outside a git repo', async () => {
+    const io = makeIo();
+    const fake = makeStandalone();
+    const code = await runMaintainers(
+      ['add', M1, ...ADDR, '--yes'],
+      makeDeps(io, fake, [announcement(OWNER, [])]) // cwd is not a repo
+    );
+    expect(code).toBe(0);
+    const tags = fake.published[0]?.event.tags ?? [];
+    expect(tags).toContainEqual(['relays', RELAY]);
+    expect(tags).toContainEqual(['web', webUrl()]);
+    expect(tags.some((t) => t[0] === 'r' && t[2] === 'euc')).toBe(false);
+  });
+
+  it('never writes a clone tag, and never removes one', async () => {
+    const io = makeIo();
+    const fake = makeStandalone();
+    const code = await runMaintainers(
+      ['add', M1, ...ADDR, '--yes'],
+      makeDeps(io, fake, [foreignAnnouncement([])])
+    );
+    expect(code).toBe(0);
+    const tags = fake.published[0]?.event.tags ?? [];
+    expect(tags.filter((t) => t[0] === 'clone')).toEqual([
+      ['clone', 'https://relay.ngit.dev/npub1abc/demo.git'],
+    ]);
+  });
+
+  it('lists the tags being added or changed before the confirm gate', async () => {
+    const io = makeIo(true, true);
+    const fake = makeStandalone();
+    const code = await runMaintainers(
+      ['add', M1, ...ADDR],
+      makeDeps(io, fake, [announcement(OWNER, [])])
+    );
+    expect(code).toBe(0);
+    const printed = io.out.join('\n');
+    expect(printed).toContain('Tags changed:');
+    expect(printed).toContain(`+ relays ${RELAY}`);
+    expect(printed).toContain('+ web ');
   });
 
   it('validates the pubkey and subcommand (exit 2)', async () => {

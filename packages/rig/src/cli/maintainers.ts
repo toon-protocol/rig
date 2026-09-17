@@ -24,7 +24,12 @@
 
 import { parseArgs } from 'node:util';
 import { parseMaintainers } from '../nip34-events.js';
-import { amendRepoAnnouncement } from '../repo-announcement.js';
+import {
+  amendRepoAnnouncement,
+  conformanceEdits,
+  describeAnnouncementDiff,
+  diffAnnouncementTags,
+} from '../repo-announcement.js';
 import { ownerToHex } from '../npub.js';
 import { fetchRemoteState } from '../remote-state.js';
 import {
@@ -41,6 +46,7 @@ import {
 import { feeLabel } from './render.js';
 import { singleRelayRefusal } from './remote.js';
 import {
+  conformanceFactsFor,
   pickRepoCommandFlags,
   REPO_COMMAND_OPTIONS,
   resolveRepoContext,
@@ -320,10 +326,16 @@ async function runMutate(
     // every tag rig does not model — another client's role tags, `clone`,
     // `blossoms`, … — ride along verbatim instead of being wiped by the
     // replaceable write. Passing a field here would rewrite it.
+    // #158: an owner-initiated republish also BACKFILLS the conformance tags
+    // (`relays`, `web`, and the `euc` when the announcement has none), so a
+    // repo announced before #158 becomes conformant without a special step.
+    const facts = await conformanceFactsFor({ ctx, relayUrl, deps });
     const event = amendRepoAnnouncement(remote.announceEvent, {
       repoId: ctx.repoId,
       maintainers: next,
+      ...conformanceEdits(remote.announceEvent, facts),
     });
+    const diff = diffAnnouncementTags(remote.announceEvent, event);
     const fee = (await standaloneCtx.publisher.getFeeRates()).eventFee.toString();
     const action = `kind:30617 maintainers ${op} ${pubkey.slice(0, 8)}…`;
 
@@ -332,6 +344,10 @@ async function runMutate(
       io.out(`Republish ${action}`);
       io.out(`Repo: 30617:${ctx.owner}:${ctx.repoId}`);
       io.out(`Maintainers after: ${next.length === 0 ? '(none)' : next.join(', ')}`);
+      if (!diff.unchanged) {
+        io.out('Tags changed:');
+        for (const line of describeAnnouncementDiff(diff)) io.out(line);
+      }
       io.out(`Fee: ${feeLabel(fee)}. Writes are permanent and non-refundable.`);
     }
     if (!flags.yes) {

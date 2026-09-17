@@ -35,7 +35,12 @@ import {
   isValidEvmPayoutAddress,
   type PayoutPointer,
 } from '../nip34-events.js';
-import { amendRepoAnnouncement } from '../repo-announcement.js';
+import {
+  amendRepoAnnouncement,
+  conformanceEdits,
+  describeAnnouncementDiff,
+  diffAnnouncementTags,
+} from '../repo-announcement.js';
 import { fetchRemoteState } from '../remote-state.js';
 import { serializeEventReceipt, type GitEventResponse } from '../routes.js';
 import type { EventCommandDeps } from './events.js';
@@ -48,6 +53,7 @@ import {
 import { feeLabel } from './render.js';
 import { singleRelayRefusal } from './remote.js';
 import {
+  conformanceFactsFor,
   pickRepoCommandFlags,
   REPO_COMMAND_OPTIONS,
   resolveRepoContext,
@@ -327,10 +333,15 @@ async function runMutate(
     // command edits, so name, description, the maintainers tag and every tag
     // rig does not model survive the replaceable write verbatim instead of
     // being destroyed by it. Passing a field here would rewrite it.
+    // #158: an owner-initiated republish also BACKFILLS the conformance tags
+    // (`relays`, `web`, and the `euc` when the announcement has none).
+    const facts = await conformanceFactsFor({ ctx, relayUrl, deps });
     const event = amendRepoAnnouncement(remote.announceEvent, {
       repoId: ctx.repoId,
       payout: nextPayout,
+      ...conformanceEdits(remote.announceEvent, facts),
     });
+    const diff = diffAnnouncementTags(remote.announceEvent, event);
     const fee = (await standaloneCtx.publisher.getFeeRates()).eventFee.toString();
     const action = nextPayout
       ? `kind:30617 payout set ${nextPayout.chain} ${nextPayout.address}`
@@ -343,6 +354,10 @@ async function runMutate(
       io.out(
         `Payout after: ${nextPayout ? `${nextPayout.chain} ${nextPayout.address}` : '(none)'}`
       );
+      if (!diff.unchanged) {
+        io.out('Tags changed:');
+        for (const line of describeAnnouncementDiff(diff)) io.out(line);
+      }
       io.out(`Fee: ${feeLabel(fee)}. Writes are permanent and non-refundable.`);
     }
     if (!flags.yes) {

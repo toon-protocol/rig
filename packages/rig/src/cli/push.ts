@@ -46,6 +46,7 @@ import {
   RIG_WEB_TX_ENV,
   RIG_WEB_URL_ENV,
   generateRigPointerHtml,
+  repoWebUrl,
 } from '../rig-pointer.js';
 import { PREFERRED_GATEWAY, mirrorGatewaysFor } from '../gateway-preference.js';
 import { hexToNpub } from '../npub.js';
@@ -613,6 +614,18 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
         relayUrls: relaysUsed,
       });
       const feeRates = await ctx.publisher.getFeeRates();
+      // #158: the first announcement links to the repo's rig-web viewer —
+      // the SAME URL the Rig pointer falls back to. It needs a relay, so a
+      // push with none resolved simply announces without a `web` tag.
+      const announcementWeb =
+        relaysUsed[0] === undefined
+          ? undefined
+          : repoWebUrl({
+              env: deps.env,
+              relay: relaysUsed[0],
+              ownerPubkey: ctx.ownerPubkey,
+              repoId,
+            });
       const pushPlan = await planPush({
         repoReader: reader,
         remoteState,
@@ -620,6 +633,7 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
         repoId,
         refs: refspecs,
         force: flags.force,
+        ...(announcementWeb ? { announcement: { web: announcementWeb } } : {}),
       });
       plan = serializePushPlan(pushPlan);
       execute = async () =>

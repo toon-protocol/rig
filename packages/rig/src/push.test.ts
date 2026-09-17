@@ -256,9 +256,13 @@ describe('planPush', () => {
     expect(plan.estimate.eventCount).toBe(2);
     expect(plan.estimate.eventFees).toBe(1000n);
     expect(plan.estimate.totalFee).toBe(uploadFees + 1000n);
+    // #158: the plan also carries the conformance facts a first announcement
+    // needs. The fixture has TWO roots (main's, plus the `emptytree` orphan),
+    // so the euc is the one reachable from the default branch.
     expect(plan.announcement).toEqual({
       name: 'Push Fixture',
       description: 'a test repo',
+      earliestUniqueCommit: commit1,
     });
 
     // Sizes are real: the README blob's size matches its content.
@@ -538,13 +542,16 @@ describe('executePush', () => {
     ]);
     expect(publisher.published[0]!.relayUrls).toEqual(RELAYS);
     const announce = publisher.published[0]!.event;
-    // A first push announces exactly d/name/description — routing it through
-    // the amendment module (#154) must not add a tag or change the order.
+    // A first push announces d/name/description plus the #158 conformance
+    // tags. No `web` here: the planner was given none (the CLI supplies it).
     expect(announce.tags).toEqual([
       ['d', REPO_ID],
       ['name', 'Push Fixture'],
       ['description', 'a test repo'],
+      ['relays', ...RELAYS],
+      ['r', commit1, 'euc'],
     ]);
+    expect(announce.tags.some((t) => t[0] === 'clone')).toBe(false);
     expect(announce.content).toBe('');
 
     const refsEvent = publisher.published[1]!.event;
@@ -721,6 +728,138 @@ describe('executePush', () => {
     expect(publisher.published.map((p) => p.event.kind)).toEqual([30618]);
     expect(result.announceReceipt).toBeNull();
     expect(result.totalFeePaid).toBe(FEE_RATES.eventFee); // one event only
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Announcement conformance tags (#158)
+// ---------------------------------------------------------------------------
+
+describe('first-push announcement conformance tags (#158)', () => {
+  const WEB = 'https://toon-protocol.github.io/rig/#/npub1demo/push-fixture';
+
+  it('carries relays, web and the euc, and never a clone tag', async () => {
+    const remote = cannedRemote();
+    const plan = await planPush({
+      repoReader: reader,
+      remoteState: remote,
+      feeRates: FEE_RATES,
+      repoId: REPO_ID,
+      refs: ['refs/heads/main'],
+      announcement: { name: 'Push Fixture', description: 'a test repo', web: WEB },
+    });
+    const publisher = new MockPublisher();
+    await executePush({
+      plan,
+      publisher,
+      remoteState: remote,
+      repoReader: reader,
+      relayUrls: RELAYS,
+    });
+
+    const announce = publisher.published.find((p) => p.event.kind === 30617);
+    expect(announce).toBeDefined();
+    expect(announce?.event.tags).toEqual([
+      ['d', REPO_ID],
+      ['name', 'Push Fixture'],
+      ['description', 'a test repo'],
+      ['relays', ...RELAYS],
+      ['web', WEB],
+      ['r', commit1, 'euc'],
+    ]);
+  });
+
+  it('names every relay the publish goes to in ONE relays tag', async () => {
+    const remote = cannedRemote();
+    const manyRelays = ['wss://relay.one.test', 'wss://relay.two.test'];
+    const plan = await planPush({
+      repoReader: reader,
+      remoteState: remote,
+      feeRates: FEE_RATES,
+      repoId: REPO_ID,
+      refs: ['refs/heads/main'],
+    });
+    const publisher = new MockPublisher();
+    await executePush({
+      plan,
+      publisher,
+      remoteState: remote,
+      repoReader: reader,
+      relayUrls: manyRelays,
+    });
+
+    const announce = publisher.published.find((p) => p.event.kind === 30617);
+    expect(announce?.event.tags.filter((t) => t[0] === 'relays')).toEqual([
+      ['relays', ...manyRelays],
+    ]);
+  });
+
+  it('picks the SAME euc on every run of a multi-root repo', async () => {
+    const plans = await Promise.all(
+      [0, 1, 2].map(() =>
+        planPush({
+          repoReader: reader,
+          remoteState: cannedRemote(),
+          feeRates: FEE_RATES,
+          repoId: REPO_ID,
+          refs: ['refs/heads/main'],
+        })
+      )
+    );
+    // The fixture has two roots; the answer is stable and is main's root.
+    expect(await reader.rootCommits()).toHaveLength(2);
+    expect(plans.map((p) => p.announcement.earliestUniqueCommit)).toEqual([
+      commit1,
+      commit1,
+      commit1,
+    ]);
+  });
+
+  it('a push to an ALREADY-ANNOUNCED repo publishes no kind:30617 at all', async () => {
+    // The no-surprise-fee guarantee: a plain push never republishes an
+    // announcement, so it never charges an event fee the owner did not
+    // confirm — not even to backfill the #158 conformance tags.
+    const remote = cannedRemote({
+      announced: true,
+      announceEvent: {
+        id: '30'.repeat(32),
+        pubkey: 'ab'.repeat(32),
+        created_at: 1000,
+        kind: 30617,
+        tags: [
+          ['d', REPO_ID],
+          ['name', 'Push Fixture'],
+        ],
+        content: '',
+        sig: '0'.repeat(128),
+      },
+      refs: new Map([['refs/heads/main', commit1]]),
+      headSymref: 'refs/heads/main',
+    });
+    const plan = await planPush({
+      repoReader: reader,
+      remoteState: remote,
+      feeRates: FEE_RATES,
+      repoId: REPO_ID,
+      refs: ['refs/heads/main'],
+      announcement: { name: 'Push Fixture', description: 'a test repo', web: WEB },
+    });
+    expect(plan.announceNeeded).toBe(false);
+    // Not even computed: an announced repo's euc is never recomputed.
+    expect(plan.announcement.earliestUniqueCommit).toBeUndefined();
+    expect(plan.estimate.eventCount).toBe(1);
+
+    const publisher = new MockPublisher();
+    const result = await executePush({
+      plan,
+      publisher,
+      remoteState: remote,
+      repoReader: reader,
+      relayUrls: RELAYS,
+    });
+
+    expect(publisher.published.map((p) => p.event.kind)).toEqual([30618]);
+    expect(result.announceReceipt).toBeNull();
   });
 });
 

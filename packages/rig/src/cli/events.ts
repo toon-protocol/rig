@@ -101,6 +101,13 @@ import {
 export interface EventCommandDeps extends PushDeps, ReadSeams {
   /** Read all of stdin as UTF-8 (default: the real process stdin). */
   readStdin?: () => Promise<string>;
+  /**
+   * Local root-commit lookup for the announcement's `euc` tag (#158) —
+   * defaults to the resolved repo root's `GitRepoReader.rootCommits`, and is
+   * absent when the command runs outside a git repo. Injectable so
+   * announcement tests need no fixture repository.
+   */
+  rootCommits?: (rev?: string) => Promise<string[]>;
 }
 
 const defaultReadStdin = async (): Promise<string> => {

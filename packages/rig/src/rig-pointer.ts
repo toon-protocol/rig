@@ -23,6 +23,8 @@
  * those inputs changes (../cli/rig-pointer-record.ts).
  */
 
+import { hexToNpub } from './npub.js';
+
 /** One released Arweave deployment of rig-web (manifest + entry assets). */
 export interface RigWebBundle {
   /** The ar.io path-manifest txId (`https://<gateway>/<tx>/` serves the app). */
@@ -100,6 +102,34 @@ export function rigWebRoute(
   options: Pick<RigPointerOptions, 'rigWebUrl' | 'relay' | 'ownerNpub' | 'repoId'>
 ): string {
   return `${options.rigWebUrl.replace(/\/+$/, '')}/${repoHashRoute(options)}`;
+}
+
+/**
+ * The repo's rig-web viewer URL for the kind:30617 `web` tag (#158).
+ *
+ * THE SAME base URL and route shape the Rig pointer bakes into its no-JS
+ * fallback link ({@link rigWebRoute}) — so ADR-0001's URL-permanence rules
+ * govern the `web` tag too, and a reader following either link lands in the
+ * same place. Re-deriving the shape here instead of reusing it is how the two
+ * drift apart.
+ *
+ * @param env - Process env; `RIG_WEB_URL` overrides {@link DEFAULT_RIG_WEB_URL}.
+ * @param relay - The relay the repo's events are published to.
+ * @param ownerPubkey - Repo owner, 64-char hex (encoded to npub for the route).
+ * @param repoId - Repository id (NIP-34 `d` tag).
+ */
+export function repoWebUrl(options: {
+  env: NodeJS.ProcessEnv;
+  relay: string;
+  ownerPubkey: string;
+  repoId: string;
+}): string {
+  return rigWebRoute({
+    rigWebUrl: options.env[RIG_WEB_URL_ENV] ?? DEFAULT_RIG_WEB_URL,
+    relay: options.relay,
+    ownerNpub: hexToNpub(options.ownerPubkey),
+    repoId: options.repoId,
+  });
 }
 
 /** Escape a string for safe embedding in an HTML attribute/text position. */
