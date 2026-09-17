@@ -623,7 +623,7 @@ describe('NIP-34 Parsers - parsePR', () => {
     const result = parsePR(event);
 
     expect(result).not.toBeNull();
-    expect(result!.baseBranch).toBe('feature/new');
+    expect(result?.baseBranch).toBe('feature/new');
   });
 
   it('[P1] prefers branch-name over a disagreeing legacy branch tag', () => {
@@ -636,7 +636,7 @@ describe('NIP-34 Parsers - parsePR', () => {
     const result = parsePR(event);
 
     expect(result).not.toBeNull();
-    expect(result!.baseBranch).toBe('feature/wins');
+    expect(result?.baseBranch).toBe('feature/wins');
   });
 
   it('[P1] a legacy patch with the branch only in t does not surface it as baseBranch', () => {
@@ -651,7 +651,7 @@ describe('NIP-34 Parsers - parsePR', () => {
     // No branch-name, no branch tag: falls back to the 'main' default, same
     // as if the patch carried no branch info at all — no heuristic reads it
     // out of t.
-    expect(result!.baseBranch).toBe('main');
+    expect(result?.baseBranch).toBe('main');
   });
 });
 
