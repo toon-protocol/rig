@@ -138,6 +138,20 @@ export function repoAuthorizedAuthors(repo: RepoMetadata): Set<string> {
 }
 
 /**
+ * Union a target's own author into the repo-wide authorized set (rig#160):
+ * the target's own author is ALSO authorized to move its own status, on top
+ * of the repo-wide {@link repoAuthorizedAuthors} set (see
+ * {@link resolvePRStatus} / {@link resolveIssueStatus}'s doc comments).
+ * Returns a NEW Set; does not mutate `authorized`.
+ */
+export function withTargetAuthor(
+  authorized: ReadonlySet<string>,
+  targetAuthorPubkey: string
+): Set<string> {
+  return new Set([...authorized, targetAuthorPubkey.toLowerCase()]);
+}
+
+/**
  * Maximum number of DISTINCT refs parsed from a single kind:30618 event,
  * counted across both tag shapes combined (see {@link parseRepoRefs}).
  */
@@ -514,10 +528,17 @@ const KIND_STATUS_MAP: Record<number, 'open' | 'applied' | 'closed' | 'draft'> =
 /**
  * Resolve the status of a PR from status events (kind:1630-1633), honoring
  * ONLY events signed by an AUTHORIZED author — the repo owner ∪ declared
- * maintainers (#287; see {@link repoAuthorizedAuthors}). The relay is
- * permissionless, so any funded stranger can PUBLISH a kind:163x against a PR;
- * this consumer-side filter ensures such spoofed events NEVER move the
- * displayed state. Among authorized events the latest (by created_at) wins.
+ * maintainers ∪ the PR's own author (#287, rig#160; see
+ * {@link repoAuthorizedAuthors} — callers union in the target's own author
+ * per-PR, since it varies per target while the repo-wide set does not; see
+ * `use-prs.ts`). The `e` tag match is on `tags[1]` only via
+ * {@link getTagValue}, so both the NIP-10 marker form
+ * (`["e", <id>, "", "root"]`) and the legacy bare form (`["e", <id>]`) are
+ * honored identically. The relay is permissionless, so any funded stranger
+ * can PUBLISH a kind:163x against a PR; this consumer-side filter ensures
+ * such spoofed events NEVER move the displayed state. Among authorized
+ * events the latest (by created_at) wins, regardless of which form each
+ * used.
  *
  * `authorized` is the lowercased-hex author set. When empty (the 30617 was not
  * resolved) nothing is authoritative and the PR resolves to open — a safe,
@@ -539,9 +560,12 @@ export function resolvePRStatus(
 
 /**
  * Resolve the status of an issue from close events (kind:1632), honoring ONLY
- * events signed by an AUTHORIZED author (owner ∪ maintainers, #287). An
- * unauthorized close event does NOT close the issue. `authorized` is the
- * lowercased-hex author set (see {@link repoAuthorizedAuthors}).
+ * events signed by an AUTHORIZED author (owner ∪ maintainers ∪ the issue's
+ * own author, #287, rig#160). An unauthorized close event does NOT close the
+ * issue. The `e` tag match is on `tags[1]` only, so both the NIP-10 marker
+ * form and the legacy bare form are honored identically. `authorized` is the
+ * lowercased-hex author set (see {@link repoAuthorizedAuthors} — callers
+ * union in the target's own author per-issue; see `use-issues.ts`).
  */
 export function resolveIssueStatus(
   issueEventId: string,

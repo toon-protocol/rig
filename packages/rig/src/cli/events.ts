@@ -38,7 +38,6 @@
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import {
-  REPOSITORY_ANNOUNCEMENT_KIND,
   STATUS_APPLIED_KIND,
   STATUS_CLOSED_KIND,
   STATUS_DRAFT_KIND,
@@ -952,17 +951,17 @@ async function runPrStatus(
     flags,
     deps,
     actionLabel: `status ${status} on ${targetEventId.slice(0, 8)}…`,
-    buildEvent: async (addr) => {
-      const event = buildStatus(targetEventId, STATUS_KIND_BY_VALUE[status]);
-      // NIP-34 status events also carry the repo `a` tag so readers can scope
-      // a status stream to the repository without resolving the target first
-      // (mirrors the daemon's gitStatus).
-      event.tags.push([
-        'a',
-        `${REPOSITORY_ANNOUNCEMENT_KIND}:${addr.ownerPubkey}:${addr.repoId}`,
-      ]);
-      return event;
-    },
+    buildEvent: async (addr) =>
+      // buildStatus (rig#160) now emits the root-marked `e` tag and the repo
+      // `a` tag itself, so readers can scope a status stream to the
+      // repository without resolving the target first (mirrors the
+      // daemon's gitStatus).
+      buildStatus(
+        addr.ownerPubkey,
+        addr.repoId,
+        targetEventId,
+        STATUS_KIND_BY_VALUE[status]
+      ),
     // Authority warning (#287): a status event only moves an issue/PR's
     // resolved state for repo-authority-honoring clients if its author is the
     // owner or a declared maintainer. Warn clearly when the active identity is
@@ -1011,14 +1010,18 @@ async function warnIfNotMaintainer(
       `warning: you (${identity.pubkey.slice(0, 8)}…) are not a maintainer of ` +
         `30617:${addr.ownerPubkey.slice(0, 8)}…:${addr.repoId} — clients honoring ` +
         'repo authority (rig, rig-web) will IGNORE this status when resolving the ' +
-        "issue/PR's state. Publishing anyway (the relay is permissionless); ask the " +
-        'owner to `rig maintainers add` you if this should stick.'
+        "issue/PR's state, UNLESS you are also the target event's own author " +
+        '(rig#160: an issue/PR author may move their own item’s status even ' +
+        'without maintainer standing — this check cannot tell from here, since it ' +
+        "does not know the target's author without a second relay read). " +
+        'Publishing anyway (the relay is permissionless); ask the owner to ' +
+        '`rig maintainers add` you if this should stick for OTHER items too.'
     );
   } catch {
     io.err(
       'warning: could not read the repo announcement to verify your maintainer ' +
-        'status — if you are not the owner or a declared maintainer, ' +
-        'authority-honoring clients will ignore this status.'
+        'status — if you are not the owner, a declared maintainer, or the target ' +
+        "event's own author, authority-honoring clients will ignore this status."
     );
   }
 }
