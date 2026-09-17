@@ -539,8 +539,14 @@ describe('executePush', () => {
     ]);
     expect(publisher.published[0]!.relayUrls).toEqual(RELAYS);
     const announce = publisher.published[0]!.event;
-    expect(tagValues(announce, 'd')[0]).toEqual([REPO_ID]);
-    expect(tagValues(announce, 'name')[0]).toEqual(['Push Fixture']);
+    // A first push announces exactly d/name/description — routing it through
+    // the amendment module (#154) must not add a tag or change the order.
+    expect(announce.tags).toEqual([
+      ['d', REPO_ID],
+      ['name', 'Push Fixture'],
+      ['description', 'a test repo'],
+    ]);
+    expect(announce.content).toBe('');
 
     const refsEvent = publisher.published[1]!.event;
     expect(tagValues(refsEvent, 'd')[0]).toEqual([REPO_ID]);

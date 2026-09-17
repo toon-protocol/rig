@@ -14,7 +14,12 @@ import type { CliIo } from './output.js';
 import type { EventCommandDeps } from './events.js';
 import { runMaintainers } from './maintainers.js';
 import type { StandaloneContext } from './standalone-context.js';
-import { filterEvents, makeMockRelayFactory } from './read-testkit.js';
+import {
+  filterEvents,
+  foreignAnnouncementTags,
+  makeMockRelayFactory,
+  survivingForeignTags,
+} from './read-testkit.js';
 
 const OWNER = 'ab'.repeat(32);
 const M1 = 'cd'.repeat(32);
@@ -75,6 +80,14 @@ function makeStandalone(identity = OWNER): Fake {
       stop: async () => undefined,
     },
   };
+}
+
+const FOREIGN_TAGS = foreignAnnouncementTags(OWNER, M2);
+
+/** An announcement as another NIP-34 client (ngit) wrote it. */
+function foreignAnnouncement(maintainers: string[]): NostrEvent {
+  const base = announcement(OWNER, maintainers);
+  return { ...base, tags: [...base.tags, ...FOREIGN_TAGS] };
 }
 
 function announcement(
@@ -194,6 +207,72 @@ describe('rig maintainers add/remove (paid, owner-only)', () => {
     expect(code).toBe(0);
     expect(fake.published).toHaveLength(1);
     expect(parseMaintainers(fake.published[0]!.event.tags)).toEqual([M2]);
+  });
+
+  it('add preserves every tag rig does not model, in order (#154)', async () => {
+    const io = makeIo();
+    const fake = makeStandalone();
+    const code = await runMaintainers(
+      ['add', M1, ...ADDR, '--yes'],
+      makeDeps(io, fake, [foreignAnnouncement([])])
+    );
+    expect(code).toBe(0);
+    const published = fake.published[0];
+    if (!published) throw new Error('expected a published event');
+    expect(survivingForeignTags(published.event.tags, FOREIGN_TAGS)).toEqual(
+      FOREIGN_TAGS
+    );
+    // …and the field being edited is the only thing that changed.
+    expect(parseMaintainers(published.event.tags)).toEqual([M1]);
+    expect(published.event.tags).toContainEqual(['name', 'Demo Repo']);
+    expect(published.event.tags).toContainEqual(['description', 'A demo']);
+  });
+
+  it('remove preserves every tag rig does not model, in order (#154)', async () => {
+    const io = makeIo();
+    const fake = makeStandalone();
+    const code = await runMaintainers(
+      ['remove', M1, ...ADDR, '--yes'],
+      makeDeps(io, fake, [foreignAnnouncement([M1, M2])])
+    );
+    expect(code).toBe(0);
+    const published = fake.published[0];
+    if (!published) throw new Error('expected a published event');
+    expect(survivingForeignTags(published.event.tags, FOREIGN_TAGS)).toEqual(
+      FOREIGN_TAGS
+    );
+    expect(parseMaintainers(published.event.tags)).toEqual([M2]);
+  });
+
+  it('invents no name/description on an announcement that has none (#154)', async () => {
+    // ngit writes prose into `content` and may omit both tags. The old
+    // rebuild injected ["name", <repoId>] + ["description", <content>] — a
+    // field the user never edited, and the prose duplicated on the wire.
+    const prose = 'prose that lives in content, not a description tag';
+    const bare: NostrEvent = {
+      id: '30'.repeat(32),
+      pubkey: OWNER,
+      created_at: 1000,
+      kind: 30617,
+      tags: [['d', REPO], ...FOREIGN_TAGS],
+      content: prose,
+      sig: '0'.repeat(128),
+    };
+    const io = makeIo();
+    const fake = makeStandalone();
+    const code = await runMaintainers(
+      ['add', M1, ...ADDR, '--yes'],
+      makeDeps(io, fake, [bare])
+    );
+    expect(code).toBe(0);
+    const published = fake.published[0];
+    if (!published) throw new Error('expected a published event');
+    expect(published.event.tags).toEqual([
+      ['d', REPO],
+      ...FOREIGN_TAGS,
+      ['maintainers', M1],
+    ]);
+    expect(published.event.content).toBe(prose);
   });
 
   it('add is a no-op (nothing published) when already a maintainer', async () => {

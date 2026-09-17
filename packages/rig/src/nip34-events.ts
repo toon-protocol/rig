@@ -171,56 +171,6 @@ export function parsePayout(tags: string[][]): PayoutPointer | null {
   return result;
 }
 
-/**
- * Build a kind:30617 repository announcement event.
- *
- * @param repoId - Repository identifier (d tag)
- * @param name - Human-readable repository name
- * @param description - Repository description
- * @param maintainers - Optional declared maintainer pubkeys (hex). Emitted as
- *   a single `["maintainers", …]` tag when non-empty; duplicate and non-64-hex
- *   values are dropped. The owner (the signer) is an implicit maintainer and
- *   need not be listed — if passed it is emitted, which is harmless since the
- *   owner is authorized regardless. See {@link MAINTAINERS_TAG}.
- * @param payout - Optional declared payout pointer (rig#92). Emitted as a
- *   single `["payout", "evm", <address>]` tag when given; omit (or pass
- *   `null`) to leave the repo with no payout pointer. See {@link PAYOUT_TAG}.
- */
-export function buildRepoAnnouncement(
-  repoId: string,
-  name: string,
-  description: string,
-  maintainers: string[] = [],
-  payout?: PayoutPointer | null
-): UnsignedEvent {
-  const tags: string[][] = [
-    ['d', repoId],
-    ['name', name],
-    ['description', description],
-  ];
-  const declared: string[] = [];
-  const seen = new Set<string>();
-  for (const value of maintainers) {
-    const hex = value.toLowerCase();
-    if (HEX64.test(hex) && !seen.has(hex)) {
-      seen.add(hex);
-      declared.push(hex);
-    }
-  }
-  if (declared.length > 0) {
-    tags.push([MAINTAINERS_TAG, ...declared]);
-  }
-  if (payout) {
-    tags.push([PAYOUT_TAG, payout.chain, payout.address]);
-  }
-  return {
-    kind: REPOSITORY_ANNOUNCEMENT_KIND,
-    content: '',
-    tags,
-    created_at: Math.floor(Date.now() / 1000),
-  };
-}
-
 // ---------------------------------------------------------------------------
 // kind:30618 — Repository Refs/State
 // ---------------------------------------------------------------------------

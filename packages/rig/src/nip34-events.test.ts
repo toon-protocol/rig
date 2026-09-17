@@ -15,13 +15,16 @@ import {
   buildComment,
   buildIssue,
   buildPatch,
-  buildRepoAnnouncement,
   buildRepoRefs,
   buildStatus,
   parseMaintainers,
   parsePayout,
 } from './nip34-events.js';
 import { parseStateRefTags } from './nip34-refs.js';
+import {
+  amendRepoAnnouncement,
+  buildRepoAnnouncement,
+} from './repo-announcement.js';
 
 const OWNER_PUBKEY =
   '55c2a467881059a942fdc6908b041273885b8720bfa8fcf2f5f9c20a73b0964d';
@@ -85,6 +88,191 @@ describe('buildRepoAnnouncement (kind:30617)', () => {
     expect(tags).toHaveLength(1);
     expect(tags[0]).toEqual([MAINTAINERS_TAG, OWNER_PUBKEY, AUTHOR_PUBKEY]);
     expect(parseMaintainers(event.tags)).toEqual([OWNER_PUBKEY, AUTHOR_PUBKEY]);
+  });
+});
+
+describe('amendRepoAnnouncement (kind:30617, #154)', () => {
+  const EUC = 'c0ffee'.padEnd(40, '0');
+
+  /**
+   * An announcement as another NIP-34 client (ngit) writes it: the tags rig
+   * models, plus role tags, `clone`, `blossoms`, `t`, `alt` and a tag rig has
+   * never heard of. Frozen so one test can never mutate the shared fixture.
+   */
+  const foreign = Object.freeze({
+    tags: [
+      ['d', 'hello-toon'],
+      ['name', 'Hello TOON'],
+      ['description', 'A demo repo'],
+      ['clone', 'https://relay.ngit.dev/npub1abc/hello-toon.git'],
+      ['relays', 'wss://relay.ngit.dev', 'wss://relay.damus.io'],
+      ['web', 'https://gitworkshop.dev/r/hello-toon'],
+      ['r', EUC, 'euc'],
+      [MAINTAINERS_TAG, OWNER_PUBKEY],
+      ['M', OWNER_PUBKEY],
+      ['m', AUTHOR_PUBKEY],
+      ['o', AUTHOR_PUBKEY],
+      ['blossoms', 'https://blossom.example'],
+      ['t', 'rust'],
+      ['alt', 'git repository: hello-toon'],
+      ['x-rig-knows-nothing', 'keep', 'me'],
+    ] as string[][],
+    content: 'freeform',
+  });
+
+  const UNKNOWN_NAMES = [
+    'clone',
+    'M',
+    'm',
+    'o',
+    'blossoms',
+    't',
+    'alt',
+    'x-rig-knows-nothing',
+  ];
+
+  it('carries every unknown tag over verbatim, in original relative order', () => {
+    const event = amendRepoAnnouncement(foreign, {
+      repoId: 'hello-toon',
+      maintainers: [OWNER_PUBKEY, AUTHOR_PUBKEY],
+    });
+
+    expect(event.tags.filter((t) => UNKNOWN_NAMES.includes(t[0] ?? ''))).toEqual(
+      [
+        ['clone', 'https://relay.ngit.dev/npub1abc/hello-toon.git'],
+        ['M', OWNER_PUBKEY],
+        ['m', AUTHOR_PUBKEY],
+        ['o', AUTHOR_PUBKEY],
+        ['blossoms', 'https://blossom.example'],
+        ['t', 'rust'],
+        ['alt', 'git repository: hello-toon'],
+        ['x-rig-knows-nothing', 'keep', 'me'],
+      ]
+    );
+  });
+
+  it('rewrites the edited field and leaves every other tag untouched', () => {
+    const event = amendRepoAnnouncement(foreign, {
+      repoId: 'hello-toon',
+      maintainers: [AUTHOR_PUBKEY],
+    });
+
+    expect(event.kind).toBe(30617);
+    expect(event.tags).toEqual([
+      ['d', 'hello-toon'],
+      ['name', 'Hello TOON'],
+      ['description', 'A demo repo'],
+      ['clone', 'https://relay.ngit.dev/npub1abc/hello-toon.git'],
+      ['relays', 'wss://relay.ngit.dev', 'wss://relay.damus.io'],
+      ['web', 'https://gitworkshop.dev/r/hello-toon'],
+      ['r', EUC, 'euc'],
+      [MAINTAINERS_TAG, AUTHOR_PUBKEY],
+      ['M', OWNER_PUBKEY],
+      ['m', AUTHOR_PUBKEY],
+      ['o', AUTHOR_PUBKEY],
+      ['blossoms', 'https://blossom.example'],
+      ['t', 'rust'],
+      ['alt', 'git repository: hello-toon'],
+      ['x-rig-knows-nothing', 'keep', 'me'],
+    ]);
+  });
+
+  it('preserves the current content (a republish is not a truncation)', () => {
+    const event = amendRepoAnnouncement(foreign, { repoId: 'hello-toon' });
+    expect(event.content).toBe('freeform');
+  });
+
+  it('drops a known tag whose edit clears it, keeping everything else', () => {
+    const event = amendRepoAnnouncement(foreign, {
+      repoId: 'hello-toon',
+      maintainers: [],
+    });
+    expect(event.tags.some((t) => t[0] === MAINTAINERS_TAG)).toBe(false);
+    expect(event.tags).toContainEqual(['M', OWNER_PUBKEY]);
+    expect(event.tags).toContainEqual(['r', EUC, 'euc']);
+  });
+
+  it('an `r` tag that is not the euc marker is unknown, so it survives', () => {
+    const event = amendRepoAnnouncement(
+      {
+        tags: [
+          ['d', 'x'],
+          ['r', 'refs/heads/main', 'abc'],
+        ],
+      },
+      { repoId: 'x', earliestUniqueCommit: EUC }
+    );
+    expect(event.tags).toEqual([
+      ['d', 'x'],
+      ['r', 'refs/heads/main', 'abc'],
+      ['r', EUC, 'euc'],
+    ]);
+  });
+
+  it('collapses repeated known tags into the single edited one', () => {
+    const event = amendRepoAnnouncement(
+      {
+        tags: [
+          ['d', 'x'],
+          [MAINTAINERS_TAG, OWNER_PUBKEY],
+          ['alt', 'keep'],
+          [MAINTAINERS_TAG, AUTHOR_PUBKEY],
+        ],
+      },
+      { repoId: 'x', maintainers: [AUTHOR_PUBKEY] }
+    );
+    expect(event.tags).toEqual([
+      ['d', 'x'],
+      [MAINTAINERS_TAG, AUTHOR_PUBKEY],
+      ['alt', 'keep'],
+    ]);
+  });
+
+  it('with no current announcement, emits the canonical tag order', () => {
+    const event = amendRepoAnnouncement(null, {
+      repoId: 'hello-toon',
+      name: 'Hello TOON',
+      description: 'A demo repo',
+      maintainers: [OWNER_PUBKEY],
+      payout: { chain: 'evm', address: EVM_ADDRESS },
+      relays: ['wss://relay.test.example'],
+      web: ['https://rig.example/r/hello-toon'],
+      earliestUniqueCommit: EUC,
+    });
+    expect(event.tags).toEqual([
+      ['d', 'hello-toon'],
+      ['name', 'Hello TOON'],
+      ['description', 'A demo repo'],
+      [MAINTAINERS_TAG, OWNER_PUBKEY],
+      [PAYOUT_TAG, 'evm', EVM_ADDRESS],
+      ['relays', 'wss://relay.test.example'],
+      ['web', 'https://rig.example/r/hello-toon'],
+      ['r', EUC, 'euc'],
+    ]);
+    expect(event.content).toBe('');
+  });
+
+  it('is what buildRepoAnnouncement is: a fresh amendment', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      expect(
+        buildRepoAnnouncement('test', 'Test', 'Desc', [OWNER_PUBKEY], {
+          chain: 'evm',
+          address: EVM_ADDRESS,
+        })
+      ).toEqual(
+        amendRepoAnnouncement(null, {
+          repoId: 'test',
+          name: 'Test',
+          description: 'Desc',
+          maintainers: [OWNER_PUBKEY],
+          payout: { chain: 'evm', address: EVM_ADDRESS },
+        })
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

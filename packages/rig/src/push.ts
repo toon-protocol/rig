@@ -23,7 +23,8 @@
  * objects via GraphQL) skips them entirely.
  */
 
-import { buildRepoAnnouncement, buildRepoRefs } from './nip34-events.js';
+import { buildRepoRefs } from './nip34-events.js';
+import { amendRepoAnnouncement } from './repo-announcement.js';
 import {
   EMPTY_BLOB_SHA,
   MAX_OBJECT_SIZE,
@@ -563,11 +564,11 @@ export async function executePush(
   // twice.
   let announceReceipt: PublishReceipt | null = null;
   if (plan.announceNeeded && !remoteState.announced) {
-    const announceEvent = buildRepoAnnouncement(
-      plan.repoId,
-      plan.announcement.name,
-      plan.announcement.description
-    );
+    const announceEvent = amendRepoAnnouncement(null, {
+      repoId: plan.repoId,
+      name: plan.announcement.name,
+      description: plan.announcement.description,
+    });
     announceReceipt = await publisher.publishEvent(announceEvent, relayUrls);
     totalFeePaid += announceReceipt.feePaid;
   }
