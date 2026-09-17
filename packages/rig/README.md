@@ -459,9 +459,14 @@ rig ci serve --relay wss://<relay> --repo <owner-npub>/<repo-id> [--repo …]
 | `--gateway <url>` | `RIG_ARWEAVE_GATEWAY`, else rig's preferred Arweave gateway | the gateway that serves the store's raw bytes: prefix for log/artifact URLs (`<gateway>/raw/<txId>`) **and** the first gateway the coordinator reads a commit's objects from (same `/raw/` route), ahead of the shared public list — name a private or local gateway (the sandbox's) and the coordinator needs nothing else to read |
 | `--act-bin <path>` | `act` on PATH (or `RIG_ACT_BIN`) | the act binary |
 | `--platform <label>=<image>` | `ubuntu-latest=catthehacker/ubuntu:act-latest` | `runs-on` label → Docker image (repeatable) |
+| `--pull` / `--no-pull` | act's default (pull before each run) | whether act pulls the runner image named by `--platform` before each run |
 | `--workdir <dir>` | `<state-dir>/work` | where commits are materialized |
 | `--once` | | stop after the first run concludes (its 9842 and final 39842 are on the relay) — one `rig ci trigger` answered by one bounded serve; ignored or refused triggers do not count |
 | `--json` | | one JSON document with the coordinator, relay, repos and state dir on start |
+
+A runner image built or loaded on the coordinator host and never pushed to a
+registry needs `--no-pull`: without it act force-pulls the image named by
+`--platform` and every run fails in *Set up job* with `pull access denied`.
 
 On start the coordinator publishes an **Advertisement** (19843: runner family
 `act`, its selectors, admission `maintainer-request`, execution

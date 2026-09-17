@@ -40,6 +40,7 @@ import type { NostrEvent } from '../remote-state.js';
 import { hexToNpub } from '../npub.js';
 import type { CiDeps } from './ci.js';
 import {
+  actRunnerOptions,
   estimateRunCost,
   makeAffordabilityCheck,
   runCiServe,
@@ -301,6 +302,50 @@ describe('rig ci serve: flags', () => {
         { io: rec5.io, env: {}, cwd: '/x' }
       )
     ).toBe(2);
+  });
+
+  it('refuses --pull together with --no-pull (exit 2), and accepts either alone (#175)', async () => {
+    const rec = makeIo();
+    expect(
+      await runCiServe(
+        ['--relay', RELAY, '--repo', REPO_FLAG, '--pull', '--no-pull'],
+        { io: rec.io, env: {}, cwd: '/x' }
+      )
+    ).toBe(2);
+    expect(rec.err[0]).toContain('--pull');
+    expect(rec.err[0]).toContain('--no-pull');
+
+    // Either alone parses: the run reaches the act-binary check, which is
+    // the first thing after the flags that can refuse.
+    for (const flag of ['--pull', '--no-pull']) {
+      const recOne = makeIo();
+      expect(
+        await runCiServe(['--relay', RELAY, '--repo', REPO_FLAG, flag], {
+          io: recOne.io,
+          env: { PATH: '/nonexistent-bin' },
+          cwd: '/nonexistent',
+        })
+      ).toBe(1);
+      expect(recOne.err.join('\n')).toMatch(/act executable was not found/);
+    }
+  });
+
+  it('maps the runner flags onto ActRunner options — --no-pull is the one a local image needs (#175)', () => {
+    expect(actRunnerOptions({ pull: false })).toEqual({ pull: false });
+    expect(actRunnerOptions({ pull: true })).toEqual({ pull: true });
+    // Neither flag: no `pull` key at all, so act's own default (pull) stands.
+    expect(actRunnerOptions({})).toEqual({});
+    expect(
+      actRunnerOptions({
+        actBin: '/opt/act',
+        platforms: { 'ubuntu-latest': 'my-runner:1' },
+        pull: false,
+      })
+    ).toEqual({
+      actBin: '/opt/act',
+      platforms: { 'ubuntu-latest': 'my-runner:1' },
+      pull: false,
+    });
   });
 
   it('refuses before loading an identity when act is not installed', async () => {

@@ -27,7 +27,11 @@
 
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { ActRunner, DEFAULT_ACT_PLATFORMS } from '../ci/act-runner.js';
+import {
+  ActRunner,
+  DEFAULT_ACT_PLATFORMS,
+  type ActRunnerOptions,
+} from '../ci/act-runner.js';
 import {
   DEFAULT_CONCURRENCY,
   DEFAULT_RUN_TIMEOUT_MS,
@@ -94,6 +98,10 @@ Options:
   --act-bin <path>       the act executable (default: RIG_ACT_BIN, else PATH)
   --platform <label=img> runs-on label → Docker image; repeatable
                          (default: ubuntu-latest=${DEFAULT_ACT_PLATFORMS['ubuntu-latest']})
+  --pull                 pull the runner image before each run (act's default)
+  --no-pull              never pull: run the image already on this host —
+                         what a locally built or otherwise private runner
+                         image needs, since act cannot pull it
   --workdir <dir>        where commits are checked out for runs (default:
                          <state-dir>/work)
   --once                 stop after the first run concludes (its Workflow
@@ -129,6 +137,12 @@ interface ServeFlags {
   gateway?: string;
   actBin?: string;
   platforms?: Record<string, string>;
+  /**
+   * `--pull` / `--no-pull`. Absent → act's own default (force-pull), which is
+   * what an image pulled from a registry wants; `false` is what a runner image
+   * built or loaded on this host needs (#175).
+   */
+  pull?: boolean;
   workdir?: string;
   /** Stop after the first run concludes. */
   once: boolean;
@@ -149,6 +163,8 @@ function parseServeArgs(args: string[]): ServeFlags | 'help' {
       gateway: { type: 'string' },
       'act-bin': { type: 'string' },
       platform: { type: 'string', multiple: true },
+      pull: { type: 'boolean' },
+      'no-pull': { type: 'boolean' },
       workdir: { type: 'string' },
       once: { type: 'boolean', default: false },
       json: { type: 'boolean', default: false },
@@ -237,6 +253,15 @@ function parseServeArgs(args: string[]): ServeFlags | 'help' {
     }
   }
 
+  // The pull policy is a tri-state: neither flag leaves act's own default in
+  // place, so `rig ci serve` never has to restate it.
+  if (values.pull && values['no-pull']) {
+    throw new ServeUsageError('--pull and --no-pull cannot both be given');
+  }
+  let pull: boolean | undefined;
+  if (values.pull) pull = true;
+  if (values['no-pull']) pull = false;
+
   return {
     relay: values.relay,
     repos,
@@ -246,9 +271,27 @@ function parseServeArgs(args: string[]): ServeFlags | 'help' {
     ...(values.gateway !== undefined ? { gateway: values.gateway } : {}),
     ...(values['act-bin'] !== undefined ? { actBin: values['act-bin'] } : {}),
     ...(platforms ? { platforms } : {}),
+    ...(pull !== undefined ? { pull } : {}),
     ...(values.workdir !== undefined ? { workdir: values.workdir } : {}),
     once: values.once,
     json: values.json,
+  };
+}
+
+/**
+ * The ActRunner options the runner-shaped flags describe. A flag the operator
+ * did not give leaves no key behind, so ActRunner's own defaults (act on PATH,
+ * the community ubuntu image, act's force-pull) stand.
+ */
+export function actRunnerOptions(flags: {
+  actBin?: string;
+  platforms?: Record<string, string>;
+  pull?: boolean;
+}): ActRunnerOptions {
+  return {
+    ...(flags.actBin !== undefined ? { actBin: flags.actBin } : {}),
+    ...(flags.platforms ? { platforms: flags.platforms } : {}),
+    ...(flags.pull !== undefined ? { pull: flags.pull } : {}),
   };
 }
 
@@ -411,10 +454,7 @@ export async function runCiServe(
   if (forced.runner) {
     runner = forced.runner;
   } else {
-    const act = new ActRunner({
-      ...(flags.actBin !== undefined ? { actBin: flags.actBin } : {}),
-      ...(flags.platforms ? { platforms: flags.platforms } : {}),
-    });
+    const act = new ActRunner(actRunnerOptions(flags));
     if (act.binary(forced.env) === null) {
       io.err(
         'rig ci serve: the act executable was not found — install nektos/act ' +
