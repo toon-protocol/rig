@@ -40,8 +40,10 @@ import type { NostrEvent } from '../remote-state.js';
 import { hexToNpub } from '../npub.js';
 import type { CiDeps } from './ci.js';
 import {
+  actRunnerOptions,
   estimateRunCost,
   makeAffordabilityCheck,
+  parseServeArgs,
   runCiServe,
 } from './ci-serve.js';
 import {
@@ -301,6 +303,77 @@ describe('rig ci serve: flags', () => {
         { io: rec5.io, env: {}, cwd: '/x' }
       )
     ).toBe(2);
+  });
+
+  it('refuses --pull together with --no-pull (exit 2), and accepts either alone (#175)', async () => {
+    const rec = makeIo();
+    expect(
+      await runCiServe(
+        ['--relay', RELAY, '--repo', REPO_FLAG, '--pull', '--no-pull'],
+        { io: rec.io, env: {}, cwd: '/x' }
+      )
+    ).toBe(2);
+    expect(rec.err[0]).toContain('--pull');
+    expect(rec.err[0]).toContain('--no-pull');
+
+    // Either alone parses: the run reaches the act-binary check, which is
+    // the first thing after the flags that can refuse.
+    for (const flag of ['--pull', '--no-pull']) {
+      const recOne = makeIo();
+      expect(
+        await runCiServe(['--relay', RELAY, '--repo', REPO_FLAG, flag], {
+          io: recOne.io,
+          env: { PATH: '/nonexistent-bin' },
+          cwd: '/nonexistent',
+        })
+      ).toBe(1);
+      expect(recOne.err.join('\n')).toMatch(/act executable was not found/);
+    }
+
+    // A value act does not use either: say what to type instead of letting
+    // node's parseArgs answer.
+    const recBad = makeIo();
+    expect(
+      await runCiServe(
+        ['--relay', RELAY, '--repo', REPO_FLAG, '--pull=maybe'],
+        { io: recBad.io, env: {}, cwd: '/x' }
+      )
+    ).toBe(2);
+    expect(recBad.err[0]).toContain('use --pull or --no-pull');
+  });
+
+  it('carries the runner flags from argv into the ActRunner options — --no-pull is what a local image needs (#175)', () => {
+    const optionsFor = (extra: string[]): unknown => {
+      const flags = parseServeArgs([
+        '--relay',
+        RELAY,
+        '--repo',
+        REPO_FLAG,
+        ...extra,
+      ]);
+      if (flags === 'help') throw new Error('unexpected --help');
+      return actRunnerOptions(flags);
+    };
+    expect(optionsFor(['--no-pull'])).toEqual({ pull: false });
+    expect(optionsFor(['--pull'])).toEqual({ pull: true });
+    // act's own spelling of the same thing.
+    expect(optionsFor(['--pull=false'])).toEqual({ pull: false });
+    expect(optionsFor(['--pull=true'])).toEqual({ pull: true });
+    // Neither flag: no `pull` key at all, so act's own default (pull) stands.
+    expect(optionsFor([])).toEqual({});
+    expect(
+      optionsFor([
+        '--act-bin',
+        '/opt/act',
+        '--platform',
+        'ubuntu-latest=my-runner:1',
+        '--no-pull',
+      ])
+    ).toEqual({
+      actBin: '/opt/act',
+      platforms: { 'ubuntu-latest': 'my-runner:1' },
+      pull: false,
+    });
   });
 
   it('refuses before loading an identity when act is not installed', async () => {
