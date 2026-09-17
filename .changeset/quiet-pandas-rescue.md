@@ -18,4 +18,4 @@ New repos get all three on their first push. Existing repos are backfilled on an
 
 `rig maintainers add|remove` and `rig payout set|clear` now show the same tag-level diff before their confirmation, and their `--json` envelopes gain a `changes: { added, removed }` field, so a machine consumer sees exactly what the fee buys.
 
-Note for repos announced by another NIP-34 client: `relays` and `web` are tags rig models, so a rig republish rewrites them to the relay this publish goes to and rig's own viewer URL. Every tag rig does not model — `clone`, the maintainer role tags, `blossoms`, `t`, `alt` and anything else — still rides along verbatim.
+Note for repos announced by another NIP-34 client: `relays` and `web` are **unioned**, never substituted — a republish adds rig's relay and viewer URL to whatever the announcement already declares and keeps that client's entries in their original order. A republish that adds nothing new changes no tag, so it publishes nothing and costs nothing. Every tag rig does not model — `clone`, the maintainer role tags, `blossoms`, `t`, `alt` and anything else — still rides along verbatim.

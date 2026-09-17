@@ -4,14 +4,29 @@
 import { describe, it, expect } from 'vitest';
 
 import {
+  NGIT_STATUS_NGIT,
+  NGIT_STATUS_NGIT_TARGET,
+  NGIT_STATUS_NGIT_TARGET_EVENT_ID,
+} from './__fixtures__/ngit-wire.js';
+import {
   parseRepoAnnouncement,
   parseRepoRefs,
   parseIssue,
   parsePR,
   parseComment,
+  resolveIssueStatus,
+  commentBelongsToThread,
   resolvePRStatus,
+  withTargetAuthor,
 } from './nip34-parsers.js';
 import type { NostrEvent } from './nip34-parsers.js';
+import {
+  NGIT_COMMENT_THREAD_COMMENTS,
+  NGIT_COMMENT_THREAD_NESTED_REPLY_ID,
+  NGIT_COMMENT_THREAD_NESTED_REPLY_PARENT_ID,
+  NGIT_COMMENT_THREAD_ROOT_EVENT_ID,
+  NGIT_STATE_NGIT,
+} from './__fixtures__/ngit-wire.js';
 
 // ============================================================================
 // Factories
@@ -417,6 +432,9 @@ function createMockPREvent(
     content?: string;
     commitShas?: string[];
     baseBranch?: string;
+    /** #161: the `branch-name` tag — the shape new patches write. */
+    branchNameTag?: string;
+    tTags?: string[];
     created_at?: number;
   } = {}
 ): NostrEvent {
@@ -431,6 +449,14 @@ function createMockPREvent(
   }
   if (overrides.baseBranch !== undefined) {
     tags.push(['branch', overrides.baseBranch]);
+  }
+  if (overrides.branchNameTag !== undefined) {
+    tags.push(['branch-name', overrides.branchNameTag]);
+  }
+  if (overrides.tTags) {
+    for (const label of overrides.tTags) {
+      tags.push(['t', label]);
+    }
   }
 
   return {
@@ -476,6 +502,42 @@ function createMockCommentEvent(
 }
 
 /**
+ * Factory: a NIP-22 kind:1111 comment (#159). `parentEventId` makes it a
+ * nested reply — the lowercase `e`/`k`/`p` then name that comment while the
+ * uppercase `E`/`K`/`P` still name the thread root.
+ */
+function createMockNip22CommentEvent(overrides: {
+  id?: string;
+  pubkey?: string;
+  rootEventId: string;
+  rootKind?: number;
+  rootAuthorPubkey?: string;
+  parentEventId?: string;
+  created_at?: number;
+  content?: string;
+}): NostrEvent {
+  const rootAuthor = overrides.rootAuthorPubkey ?? 'ab'.repeat(32);
+  const rootKind = overrides.rootKind ?? 1621;
+  const isReply = overrides.parentEventId !== undefined;
+  return {
+    id: overrides.id ?? 'e'.repeat(64),
+    pubkey: overrides.pubkey ?? 'cd'.repeat(32),
+    created_at: overrides.created_at ?? 1700001000,
+    kind: 1111,
+    tags: [
+      ['E', overrides.rootEventId, '', rootAuthor],
+      ['K', String(rootKind)],
+      ['P', rootAuthor],
+      ['e', overrides.parentEventId ?? overrides.rootEventId, '', rootAuthor],
+      ['k', isReply ? '1111' : String(rootKind)],
+      ['p', rootAuthor],
+    ],
+    content: overrides.content ?? 'Comment text',
+    sig: 'f'.repeat(128),
+  };
+}
+
+/**
  * Factory: creates a status event (kind:1630-1633).
  */
 function createMockStatusEvent(overrides: {
@@ -483,13 +545,17 @@ function createMockStatusEvent(overrides: {
   prEventId: string;
   created_at?: number;
   pubkey?: string;
+  /** rig#160: emit the NIP-10 root-marked e tag instead of the bare form. */
+  marker?: boolean;
 }): NostrEvent {
   return {
     id: Math.random().toString(36).slice(2).padEnd(64, '0'),
     pubkey: overrides.pubkey ?? 'ab'.repeat(32),
     created_at: overrides.created_at ?? 1700002000,
     kind: overrides.kind,
-    tags: [['e', overrides.prEventId]],
+    tags: overrides.marker
+      ? [['e', overrides.prEventId, '', 'root']]
+      : [['e', overrides.prEventId]],
     content: '',
     sig: '0'.repeat(128),
   };
@@ -601,6 +667,47 @@ describe('NIP-34 Parsers - parsePR', () => {
     expect(result).not.toBeNull();
     expect(result!.content).toBe('Detailed patch content here');
   });
+
+  // #161: patch branch name round-trips.
+  it('[P1] extracts base branch from branch-name tag (new patches)', () => {
+    const event = createMockPREvent({
+      subject: 'Fix bug',
+      branchNameTag: 'feature/new',
+    });
+
+    const result = parsePR(event);
+
+    expect(result).not.toBeNull();
+    expect(result?.baseBranch).toBe('feature/new');
+  });
+
+  it('[P1] prefers branch-name over a disagreeing legacy branch tag', () => {
+    const event = createMockPREvent({
+      subject: 'Fix bug',
+      branchNameTag: 'feature/wins',
+      baseBranch: 'feature/loses',
+    });
+
+    const result = parsePR(event);
+
+    expect(result).not.toBeNull();
+    expect(result?.baseBranch).toBe('feature/wins');
+  });
+
+  it('[P1] a legacy patch with the branch only in t does not surface it as baseBranch', () => {
+    const event = createMockPREvent({
+      subject: 'Legacy t-only patch',
+      tTags: ['feature/was-a-branch'],
+    });
+
+    const result = parsePR(event);
+
+    expect(result).not.toBeNull();
+    // No branch-name, no branch tag: falls back to the 'main' default, same
+    // as if the patch carried no branch info at all — no heuristic reads it
+    // out of t.
+    expect(result?.baseBranch).toBe('main');
+  });
 });
 
 describe('NIP-34 Parsers - parseComment', () => {
@@ -614,7 +721,7 @@ describe('NIP-34 Parsers - parseComment', () => {
     expect(result!.parentEventId).toBe(parentId);
   });
 
-  it('[P1] returns null for non-1622 events', () => {
+  it('[P1] returns null for events of neither comment kind', () => {
     const event = createMockCommentEvent({ kind: 1 });
 
     const result = parseComment(event);
@@ -629,6 +736,135 @@ describe('NIP-34 Parsers - parseComment', () => {
     const result = parseComment(event);
 
     expect(result).toBeNull();
+  });
+
+  // ── NIP-22 kind:1111 (rig#159) ────────────────────────────────────────────
+
+  it('[P1] a legacy kind:1622 comment roots at its lone e tag', () => {
+    const parentId = 'parent'.repeat(10) + 'bbbb';
+    const event = createMockCommentEvent({ parentEventId: parentId });
+
+    const result = parseComment(event);
+
+    expect(result).not.toBeNull();
+    expect(result?.kind).toBe(1622);
+    expect(result?.rootEventId).toBe(parentId);
+    expect(result?.parentEventId).toBe(parentId);
+  });
+
+  it('[P1] a top-level kind:1111 roots and parents at the issue', () => {
+    const rootId = 'a1'.repeat(32);
+    const event = createMockNip22CommentEvent({ rootEventId: rootId });
+
+    const result = parseComment(event);
+
+    expect(result).not.toBeNull();
+    expect(result?.kind).toBe(1111);
+    expect(result?.rootEventId).toBe(rootId);
+    expect(result?.parentEventId).toBe(rootId);
+  });
+
+  it('[P1] a nested kind:1111 reply keeps the issue as its root', () => {
+    const rootId = 'a1'.repeat(32);
+    const parentId = 'b2'.repeat(32);
+    const event = createMockNip22CommentEvent({
+      rootEventId: rootId,
+      parentEventId: parentId,
+    });
+
+    const result = parseComment(event);
+
+    expect(result?.rootEventId).toBe(rootId);
+    expect(result?.parentEventId).toBe(parentId);
+  });
+
+  it('[P1] rejects a kind:1111 with no UPPERCASE E root scope', () => {
+    const event = createMockNip22CommentEvent({ rootEventId: 'a1'.repeat(32) });
+    event.tags = event.tags.filter((t) => t[0] !== 'E');
+
+    expect(parseComment(event)).toBeNull();
+  });
+});
+
+describe('NIP-34 Parsers - commentBelongsToThread (#159)', () => {
+  const rootId = 'a1'.repeat(32);
+  const otherRoot = 'c3'.repeat(32);
+
+  it('[P1] matches a kind:1111 on the UPPERCASE E tag', () => {
+    const event = createMockNip22CommentEvent({ rootEventId: rootId });
+
+    expect(commentBelongsToThread(event, rootId)).toBe(true);
+  });
+
+  it('[P1] a kind:1111 matching ONLY on a lowercase e is NOT in the thread', () => {
+    // Root scope is another thread; the lowercase `e` (its parent comment)
+    // happens to be this thread's root id. Case-sensitive matching excludes it.
+    const event = createMockNip22CommentEvent({
+      rootEventId: otherRoot,
+      parentEventId: rootId,
+    });
+
+    expect(commentBelongsToThread(event, rootId)).toBe(false);
+  });
+
+  it('[P1] matches a legacy kind:1622 on its lowercase e tag', () => {
+    const event = createMockCommentEvent({ parentEventId: rootId });
+
+    expect(commentBelongsToThread(event, rootId)).toBe(true);
+  });
+});
+
+describe('NIP-34 Parsers - the captured ngit kind:1111 thread (#155/#159)', () => {
+  it('[P1] parses all five captured comments into one thread', () => {
+    const parsed = NGIT_COMMENT_THREAD_COMMENTS.map((e) => parseComment(e));
+
+    expect(parsed.every((c) => c !== null)).toBe(true);
+    expect(
+      parsed.every(
+        (c) => c?.rootEventId === NGIT_COMMENT_THREAD_ROOT_EVENT_ID
+      )
+    ).toBe(true);
+    expect(
+      NGIT_COMMENT_THREAD_COMMENTS.every((e) =>
+        commentBelongsToThread(e, NGIT_COMMENT_THREAD_ROOT_EVENT_ID)
+      )
+    ).toBe(true);
+  });
+
+  it('[P1] the genuine nested reply parents at another comment', () => {
+    const reply = NGIT_COMMENT_THREAD_COMMENTS.find(
+      (e) => e.id === NGIT_COMMENT_THREAD_NESTED_REPLY_ID
+    );
+    expect(reply).toBeDefined();
+
+    const parsed = reply ? parseComment(reply) : null;
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.parentEventId).toBe(
+      NGIT_COMMENT_THREAD_NESTED_REPLY_PARENT_ID
+    );
+    expect(parsed?.rootEventId).toBe(NGIT_COMMENT_THREAD_ROOT_EVENT_ID);
+  });
+
+  it('[P1] a mixed 1622 + 1111 thread merges in createdAt order', () => {
+    const legacy = createMockCommentEvent({
+      id: 'd4'.repeat(32),
+      parentEventId: NGIT_COMMENT_THREAD_ROOT_EVENT_ID,
+      created_at: 1, // older than every captured comment
+      content: 'legacy',
+    });
+
+    const merged = [...NGIT_COMMENT_THREAD_COMMENTS, legacy]
+      .filter((e) =>
+        commentBelongsToThread(e, NGIT_COMMENT_THREAD_ROOT_EVENT_ID)
+      )
+      .map((e) => parseComment(e))
+      .filter((c): c is NonNullable<typeof c> => c !== null)
+      .sort((a, b) => a.createdAt - b.createdAt);
+
+    expect(merged).toHaveLength(6);
+    expect(merged[0]?.kind).toBe(1622);
+    expect(merged.slice(1).every((c) => c.kind === 1111)).toBe(true);
   });
 });
 
@@ -766,6 +1002,163 @@ describe('NIP-34 Parsers - resolvePRStatus (8.5-UNIT-004)', () => {
     expect(
       resolvePRStatus(prEventId, statusEvents, [...AUTHORIZED, maintainer])
     ).toBe('closed');
+  });
+
+  // ── rig#160: NIP-10 root marker + a tag, both read forms ─────────────────
+
+  it('[P0] a marker-form e tag (["e", id, "", "root"]) resolves status identically to the bare form (rig#160)', () => {
+    const statusEvents: NostrEvent[] = [
+      createMockStatusEvent({
+        kind: 1632,
+        prEventId,
+        created_at: 1700001000,
+        marker: true,
+      }),
+    ];
+    expect(resolvePRStatus(prEventId, statusEvents, AUTHORIZED)).toBe(
+      'closed'
+    );
+  });
+
+  it('[P0] the winner is the LATEST authorized status regardless of which form each event uses (rig#160)', () => {
+    const statusEvents: NostrEvent[] = [
+      createMockStatusEvent({
+        kind: 1630,
+        prEventId,
+        created_at: 1700001000,
+      }), // bare, open
+      createMockStatusEvent({
+        kind: 1632,
+        prEventId,
+        created_at: 1700002000,
+        marker: true,
+      }), // marker, closed — later, wins
+    ];
+    expect(resolvePRStatus(prEventId, statusEvents, AUTHORIZED)).toBe(
+      'closed'
+    );
+  });
+
+  it('[P0] a marker-form status from an unauthorized pubkey is ignored, same as the bare form (rig#160)', () => {
+    const stranger = 'ff'.repeat(32);
+    const statusEvents: NostrEvent[] = [
+      createMockStatusEvent({
+        kind: 1632,
+        prEventId,
+        created_at: 1700001000,
+        pubkey: stranger,
+        marker: true,
+      }),
+    ];
+    expect(resolvePRStatus(prEventId, statusEvents, AUTHORIZED)).toBe('open');
+  });
+
+  it('[P0] the captured ngit marker-form status (rig#155 fixtures) resolves its real target to "applied" (rig#160)', () => {
+    const authorized = [NGIT_STATUS_NGIT.pubkey.toLowerCase()];
+    expect(
+      resolvePRStatus(
+        NGIT_STATUS_NGIT_TARGET_EVENT_ID,
+        [NGIT_STATUS_NGIT],
+        authorized
+      )
+    ).toBe('applied');
+  });
+
+  it('[P0] the captured ngit status is ignored when the signer is not authorized (rig#160)', () => {
+    expect(
+      resolvePRStatus(
+        NGIT_STATUS_NGIT_TARGET_EVENT_ID,
+        [NGIT_STATUS_NGIT],
+        ['ff'.repeat(32)]
+      )
+    ).toBe('open');
+  });
+
+  it('[P0] full parsePR + resolvePRStatus flow: the captured ngit PR (kind:1618) flips from "open" to "applied" via its captured marker-form status (rig#160)', () => {
+    // parsePR (unlike rig's own CLI tracker, which reads only kind:1617
+    // patches — a separate, out-of-scope dual-read gap) already accepts
+    // BOTH 1617 and 1618, so this is a real end-to-end proof for rig-web:
+    // the SAME captured events a viewer's usePRs hook would fetch, run
+    // through the SAME two functions that hook calls.
+    const pr = parsePR(NGIT_STATUS_NGIT_TARGET);
+    expect(pr).not.toBeNull();
+    expect(pr?.status).toBe('open'); // parsePR's hardcoded default, pre-resolution
+    const authorized = withTargetAuthor(
+      new Set<string>(),
+      pr?.authorPubkey ?? ''
+    );
+    const resolved = resolvePRStatus(
+      NGIT_STATUS_NGIT_TARGET_EVENT_ID,
+      [NGIT_STATUS_NGIT],
+      // The real status is signed by the repo owner, not the PR's own
+      // author — prove it resolves WITHOUT relying on the new
+      // target-author rule, exactly like `usePRs` would with a correctly
+      // resolved owner ∪ maintainers set.
+      new Set([...authorized, NGIT_STATUS_NGIT.pubkey.toLowerCase()])
+    );
+    expect(resolved).toBe('applied');
+  });
+});
+
+describe('NIP-34 Parsers - resolveIssueStatus (rig#160)', () => {
+  const issueEventId = 'i'.repeat(64);
+  const AUTHORIZED = ['ab'.repeat(32)];
+
+  it('[P1] returns open when no close events exist', () => {
+    expect(resolveIssueStatus(issueEventId, [], AUTHORIZED)).toBe('open');
+  });
+
+  it('[P1] closes on an authorized kind:1632 close event', () => {
+    const closeEvents: NostrEvent[] = [
+      createMockStatusEvent({ kind: 1632, prEventId: issueEventId }),
+    ];
+    expect(resolveIssueStatus(issueEventId, closeEvents, AUTHORIZED)).toBe(
+      'closed'
+    );
+  });
+
+  it('[P0] a marker-form close event closes the issue, same as the bare form (rig#160)', () => {
+    const closeEvents: NostrEvent[] = [
+      createMockStatusEvent({
+        kind: 1632,
+        prEventId: issueEventId,
+        marker: true,
+      }),
+    ];
+    expect(resolveIssueStatus(issueEventId, closeEvents, AUTHORIZED)).toBe(
+      'closed'
+    );
+  });
+
+  it('[P0] IGNORES an unauthorized marker-form close — spoof regression (rig#160)', () => {
+    const stranger = 'ff'.repeat(32);
+    const closeEvents: NostrEvent[] = [
+      createMockStatusEvent({
+        kind: 1632,
+        prEventId: issueEventId,
+        pubkey: stranger,
+        marker: true,
+      }),
+    ];
+    expect(resolveIssueStatus(issueEventId, closeEvents, AUTHORIZED)).toBe(
+      'open'
+    );
+    // Confirms the filter (not some other quirk) protects the state.
+    expect(
+      resolveIssueStatus(issueEventId, closeEvents, [...AUTHORIZED, stranger])
+    ).toBe('closed');
+  });
+});
+
+describe('NIP-34 Parsers - withTargetAuthor (rig#160)', () => {
+  it('adds the target author to a copy of the authorized set, without mutating the input', () => {
+    const owner = 'ab'.repeat(32);
+    const authorized = new Set([owner]);
+    const result = withTargetAuthor(authorized, 'CD'.repeat(32)); // mixed case
+
+    expect(result).toEqual(new Set([owner, 'cd'.repeat(32)])); // lowercased
+    expect(authorized).toEqual(new Set([owner])); // original untouched
+    expect(result).not.toBe(authorized); // a new Set, not the same object
   });
 });
 
@@ -979,5 +1372,148 @@ describe('NIP-34 Parsers - 8.6-UNIT-005b: arweaveMap from kind:30618', () => {
     expect(result).not.toBeNull();
     expect(result!.arweaveMap.size).toBe(1);
     expect(result!.arweaveMap.get('good-sha')).toBe('good-txId');
+  });
+});
+
+// ============================================================================
+// NIP-34 ref tag shapes (rig#156, spec rig#153)
+//
+// The same matrix `@toon-protocol/rig`'s `nip34-refs.test.ts` runs against the
+// shared rig-side parser, asserting the SAME view model out of rig-web's
+// documented copy — including against the real ngit state event both packages
+// hold a copy of (rig#155).
+// ============================================================================
+
+const SHA_A = '1a'.repeat(20);
+const SHA_B = '2b'.repeat(20);
+const SHA_C = '3c'.repeat(20);
+
+/** Narrow a parse result or fail the test loudly (no non-null assertions). */
+function parsedRefs(event: NostrEvent): Map<string, string> {
+  const result = parseRepoRefs(event);
+  if (result === null) throw new Error('expected parseRepoRefs to succeed');
+  return result.refs;
+}
+
+function refsEventWithTags(tags: string[][]): NostrEvent {
+  return createMockRefsEvent({ tags: [['d', 'my-repo'], ...tags] });
+}
+
+describe('NIP-34 Parsers - parseRepoRefs: dual ref tag shapes', () => {
+  it('reads the NIP-34 shape, where the ref path is the tag name', () => {
+    const refs = parsedRefs(
+      refsEventWithTags([
+        ['refs/heads/main', SHA_A],
+        ['refs/tags/v1.0.0', SHA_B],
+        ['HEAD', 'ref: refs/heads/main'],
+      ])
+    );
+
+    expect([...refs]).toEqual([
+      ['refs/heads/main', SHA_A],
+      ['refs/tags/v1.0.0', SHA_B],
+    ]);
+  });
+
+  it('merges both shapes into one ref set when they agree', () => {
+    const refs = parsedRefs(
+      refsEventWithTags([
+        ['refs/heads/main', SHA_A],
+        ['r', 'refs/heads/main', SHA_A],
+        ['r', 'refs/heads/dev', SHA_B],
+        ['refs/tags/v2', SHA_C],
+      ])
+    );
+
+    expect(refs.size).toBe(3);
+    expect(refs.get('refs/heads/main')).toBe(SHA_A);
+    expect(refs.get('refs/heads/dev')).toBe(SHA_B);
+    expect(refs.get('refs/tags/v2')).toBe(SHA_C);
+  });
+
+  it('lets the NIP shape win a same-ref disagreement, whichever came first', () => {
+    expect(
+      parsedRefs(
+        refsEventWithTags([
+          ['refs/heads/main', SHA_A],
+          ['r', 'refs/heads/main', SHA_B],
+        ])
+      ).get('refs/heads/main')
+    ).toBe(SHA_A);
+
+    expect(
+      parsedRefs(
+        refsEventWithTags([
+          ['r', 'refs/heads/main', SHA_B],
+          ['refs/heads/main', SHA_A],
+        ])
+      ).get('refs/heads/main')
+    ).toBe(SHA_A);
+  });
+
+  it('does not list a peeled ^{} entry as a ref', () => {
+    const refs = parsedRefs(
+      refsEventWithTags([
+        ['refs/tags/v1.0.0', SHA_A],
+        ['refs/tags/v1.0.0^{}', SHA_B],
+      ])
+    );
+
+    expect([...refs]).toEqual([['refs/tags/v1.0.0', SHA_A]]);
+  });
+
+  it('ignores NIP-shape tags with no value and non-ref tag names', () => {
+    const refs = parsedRefs(
+      refsEventWithTags([
+        ['refs/heads/empty'],
+        ['refs/notes/commits', SHA_A],
+        ['--upload-pack=/evil', SHA_B],
+        ['refs/heads/ok', SHA_C],
+      ])
+    );
+
+    expect([...refs]).toEqual([['refs/heads/ok', SHA_C]]);
+  });
+
+  it('caps DISTINCT refs across both shapes combined at 1000', () => {
+    const tags: string[][] = [];
+    for (let i = 0; i < 600; i += 1) tags.push([`refs/heads/n${i}`, SHA_A]);
+    for (let i = 0; i < 600; i += 1)
+      tags.push(['r', `refs/heads/l${i}`, SHA_B]);
+
+    const refs = parsedRefs(refsEventWithTags(tags));
+    expect(refs.size).toBe(1000);
+    expect(refs.get('refs/heads/n599')).toBe(SHA_A);
+    expect(refs.get('refs/heads/l399')).toBe(SHA_B);
+    expect(refs.has('refs/heads/l400')).toBe(false);
+  });
+
+  it('still reads the arweave map from an event that trips the ref cap', () => {
+    const tags: string[][] = [];
+    for (let i = 0; i < 1200; i += 1) tags.push([`refs/heads/n${i}`, SHA_A]);
+    tags.push(['arweave', SHA_C, 'tx-c']);
+
+    const result = parseRepoRefs(refsEventWithTags(tags));
+    expect(result).not.toBeNull();
+    expect(result?.refs.size).toBe(1000);
+    expect(result?.arweaveMap.get(SHA_C)).toBe('tx-c');
+  });
+
+  it('parses the real ngit state event to its branches and tags', () => {
+    const refs = parsedRefs(NGIT_STATE_NGIT);
+
+    expect(
+      [...refs.keys()].filter((r) => r.startsWith('refs/heads/')).sort()
+    ).toEqual([
+      'refs/heads/main',
+      'refs/heads/stable',
+      'refs/heads/timeout-testing',
+      'refs/heads/tmp',
+    ]);
+    expect(
+      [...refs.keys()].filter((r) => r.startsWith('refs/tags/'))
+    ).toHaveLength(60);
+    expect(refs.size).toBe(64);
+    expect([...refs.keys()].some((r) => r.endsWith('^{}'))).toBe(false);
   });
 });

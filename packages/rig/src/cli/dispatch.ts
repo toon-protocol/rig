@@ -87,7 +87,8 @@ Commands rig owns:
   issue list | show <id>     read the repo's issues + comments (free)
   pr list | show <id>        read the repo's patches; show prints the full
                              patch text (free)
-  comment <root-event-id>    comment (kind:1622) on an issue or patch
+  comment <target-event-id>  comment (NIP-22 kind:1111) on an issue or patch,
+                             or reply to an existing kind:1111 comment
   pr create                  publish a patch (kind:1617) with real
                              \`git format-patch\` content
   pr status <event-id> <state>  set an issue/patch status (kind:1630-1633):

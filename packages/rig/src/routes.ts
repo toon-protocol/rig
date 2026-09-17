@@ -167,20 +167,32 @@ export interface GitIssueRequest {
   labels?: string[];
 }
 
-/** `POST /git/comment` — publish a kind:1622 comment on an issue/patch. PAID. */
+/**
+ * `POST /git/comment` — publish a NIP-22 kind:1111 comment on an issue or
+ * patch. PAID.
+ *
+ * The root is the issue/patch being discussed, NEVER the repository: it
+ * becomes the comment's uppercase `E`/`K`/`P` scope. `parentComment` makes
+ * the comment a nested reply (lowercase `e`/`k`/`p`, `k` = 1111); omitted,
+ * the parent is the root itself. Legacy kind:1622 is never published (#159).
+ */
 export interface GitCommentRequest {
   repoAddr: GitRepoAddr;
-  /** Event id of the issue or patch being commented on. */
+  /** Event id of the issue or patch the thread hangs off (uppercase `E`). */
   rootEventId: string;
+  /** Kind of that root event, e.g. 1621 or 1617 (uppercase `K`). */
+  rootKind: number;
+  /** Pubkey of the root event's author (uppercase `P`). */
+  rootAuthorPubkey: string;
   /** Comment body (Markdown content). */
   body: string;
-  /**
-   * Pubkey of the TARGET event's author (NIP-34 `p` threading tag — not the
-   * comment author). Defaults to the repo owner.
-   */
-  parentAuthorPubkey?: string;
-  /** `e`-tag marker (default 'root': commenting directly on the issue/patch). */
-  marker?: 'root' | 'reply';
+  /** The kind:1111 comment being replied to — omit for a top-level comment. */
+  parentComment?: {
+    /** Event id of that comment (lowercase `e`). */
+    eventId: string;
+    /** Pubkey of its author (lowercase `p`). */
+    authorPubkey: string;
+  };
 }
 
 /**

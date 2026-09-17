@@ -6,8 +6,9 @@
  * encodings): kind:1621 issues / kind:1617 patches scoped to the repo by the
  * `#a` tag (`30617:<owner>:<repoId>`), kind:1630-1633 status events to derive
  * each item's state (LATEST-WINS: highest created_at, ties broken by lowest
- * id), and kind:1622 comments under `show`. No payments, no channel, no
- * identity — reads are free on TOON.
+ * id), and comments under `show` — NIP-22 kind:1111 (matched on the UPPERCASE
+ * `E` root tag) merged with legacy kind:1622 by `created_at` (#159). No
+ * payments, no channel, no identity — reads are free on TOON.
  *
  * State derivation mirrors rig-web's proven `resolvePRStatus`, upgraded to
  * latest-wins for issues too (a re-opened issue is open again).
@@ -23,7 +24,13 @@ import {
   STATUS_DRAFT_KIND,
   STATUS_OPEN_KIND,
 } from '@toon-protocol/core/nip34';
-import { COMMENT_KIND, authorizedStatusAuthors } from '../nip34-events.js';
+import {
+  COMMENT_KIND,
+  LEGACY_COMMENT_KIND,
+  authorizedStatusAuthors,
+  commentBelongsToThread,
+  firstTagValue,
+} from '../nip34-events.js';
 import { ownerToHex } from '../npub.js';
 import {
   queryRelay,
@@ -64,9 +71,10 @@ ${READ_COMMON_FLAGS}`;
 
 export const ISSUE_SHOW_USAGE = `Usage: rig issue show <event-id> [options]
 
-Show one issue (kind:1621): metadata, derived state, body, and its
-kind:1622 comments — FREE (relay reads only). <event-id> is the 64-char hex
-id \`rig issue create\` printed (also visible in \`rig issue list\`).
+Show one issue (kind:1621): metadata, derived state, body, and its comments
+— NIP-22 kind:1111 merged with legacy kind:1622 in time order — FREE (relay
+reads only). <event-id> is the 64-char hex id \`rig issue create\` printed
+(also visible in \`rig issue list\`).
 
 Options:
 ${READ_COMMON_FLAGS}`;
@@ -85,7 +93,8 @@ export const PR_SHOW_USAGE = `Usage: rig pr show <event-id> [options]
 
 Show one patch/PR (kind:1617): metadata, derived state, the FULL patch text
 (real \`git format-patch\` output — pipe it to \`git am\` to apply), and its
-kind:1622 comments — FREE (relay reads only).
+comments — NIP-22 kind:1111 merged with legacy kind:1622 in time order —
+FREE (relay reads only).
 
 Options:
 ${READ_COMMON_FLAGS}`;
@@ -110,9 +119,8 @@ const STATUS_KINDS = [
   STATUS_DRAFT_KIND,
 ];
 
-function tagValue(tags: string[][], name: string): string | undefined {
-  return tags.find((t) => t[0] === name)?.[1];
-}
+/** Local alias for the shared, case-sensitive tag reader (../nip34-events.ts). */
+const tagValue = firstTagValue;
 
 function tagValues(tags: string[][], name: string): string[] {
   return tags.filter((t) => t[0] === name && t[1]).map((t) => t[1] as string);
@@ -121,15 +129,21 @@ function tagValues(tags: string[][], name: string): string[] {
 /**
  * Derive the state of an issue/patch from its status events: consider only
  * kind:1630-1633 events whose `e` tag references the target AND whose author
- * is AUTHORIZED — the repo owner ∪ declared maintainers (#287). Among the
- * authorized events the LATEST wins (highest created_at, ties broken by lowest
- * event id — the same replaceable convention remote-state uses). Unauthorized
- * status events (any funded stranger) are IGNORED for state; they never move
- * it. No authorized status events ⇒ open.
+ * is AUTHORIZED — the repo owner ∪ declared maintainers ∪ the target's own
+ * author (#287, rig#160). The `e` tag match is on `tags[1]` only, so both the
+ * NIP-10 marker form (`["e", <id>, "", "root"]`) and the legacy bare form
+ * (`["e", <id>]`) are honored identically. Among the authorized events the
+ * LATEST wins (highest created_at, ties broken by lowest event id — the same
+ * replaceable convention remote-state uses), regardless of which form each
+ * used. Unauthorized status events (any funded stranger) are IGNORED for
+ * state; they never move it. No authorized status events ⇒ open.
  *
- * `authorized` is the lowercased-hex set from {@link authorizedStatusAuthors}.
- * When it is empty (the 30617 could not be resolved) NOTHING is authorized and
- * the state stays open — a safe, non-spoofable default.
+ * `authorized` is the caller's authority set for THIS target: the repo-wide
+ * {@link authorizedStatusAuthors} result (owner ∪ maintainers) unioned with
+ * the target event's own author pubkey — callers do that union per item,
+ * since the target author varies per target while the repo-wide set does
+ * not (see `fetchItems`/`fetchItem`). When it is empty NOTHING is authorized
+ * and the state stays open — a safe, non-spoofable default.
  */
 export function deriveStatus(
   targetEventId: string,
@@ -153,6 +167,19 @@ export function deriveStatus(
   return winner === null
     ? 'open'
     : (STATUS_BY_KIND[winner.kind] as TrackerStatus);
+}
+
+/**
+ * Union a target's own author into the repo-wide authorized set (rig#160):
+ * the target's own author is ALSO authorized to move its own status, on top
+ * of the repo-wide owner ∪ maintainers set (see {@link deriveStatus}'s doc
+ * comment). Returns a NEW Set; does not mutate `authorized`.
+ */
+export function withTargetAuthor(
+  authorized: ReadonlySet<string>,
+  targetAuthorPubkey: string
+): Set<string> {
+  return new Set([...authorized, targetAuthorPubkey.toLowerCase()]);
 }
 
 // ---------------------------------------------------------------------------
@@ -383,7 +410,13 @@ interface TrackerItem {
   content: string;
   /** kind:1617 only: `commit` tag SHAs. */
   commitShas?: string[];
-  /** kind:1617 only: `branch` tag. */
+  /**
+   * kind:1617 only: branch name, read from `branch-name` first (#161 — the
+   * tag new patches write), falling back to the legacy `branch` tag. Never
+   * read from `t`: a legacy patch that only carries the branch in `t` is not
+   * guessed at and renders as it always has (unlabeled branch, `t` as a
+   * label).
+   */
   branch?: string;
   /**
    * kind:1617 only: the PR body from the `description` tag (#280). Separate
@@ -410,7 +443,8 @@ function parseTrackerItem(
   };
   if (event.kind === PATCH_KIND) {
     item.commitShas = tagValues(event.tags, 'commit');
-    const branch = tagValue(event.tags, 'branch');
+    const branch =
+      tagValue(event.tags, 'branch-name') ?? tagValue(event.tags, 'branch');
     if (branch !== undefined) item.branch = branch;
     const description = tagValue(event.tags, 'description');
     if (description !== undefined) item.description = description;
@@ -469,19 +503,37 @@ async function fetchItems(
   const authorized = await authorizedPromise;
   return items
     .map((event) =>
-      parseTrackerItem(event, deriveStatus(event.id, statuses.values(), authorized))
+      parseTrackerItem(
+        event,
+        deriveStatus(
+          event.id,
+          statuses.values(),
+          withTargetAuthor(authorized, event.pubkey)
+        )
+      )
     )
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 
+/** One comment in a merged thread (NIP-22 kind:1111 ∪ legacy kind:1622). */
+interface ShownComment {
+  eventId: string;
+  authorPubkey: string;
+  createdAt: number;
+  content: string;
+  /** Wire kind this comment arrived as: 1111 (NIP-22) or 1622 (legacy). */
+  kind: number;
+  /**
+   * The event this comment replies to — the lowercase `e` tag. Equals the
+   * thread root for a top-level comment; another comment's id for a nested
+   * reply. `null` when the event carries no lowercase `e` (legacy shapes).
+   */
+  replyToEventId: string | null;
+}
+
 interface ShownItem {
   item: TrackerItem;
-  comments: {
-    eventId: string;
-    authorPubkey: string;
-    createdAt: number;
-    content: string;
-  }[];
+  comments: ShownComment[];
   repoATag: string | null;
 }
 
@@ -518,22 +570,27 @@ async function fetchItem(
       [{ kinds: STATUS_KINDS, '#e': [eventId] }],
       ctx.webSocketFactory
     ),
+    // One thread, two wire shapes (#159): NIP-22 kind:1111 comments hang off
+    // the root's UPPERCASE `E` tag (a nested reply's lowercase `e` names its
+    // parent comment, so `#e` would miss it); legacy kind:1622 comments only
+    // ever carry the lowercase `e`. Both are merged below by `created_at`.
     queryAll(
       ctx.relays,
-      [{ kinds: [COMMENT_KIND], '#e': [eventId] }],
+      [
+        { kinds: [COMMENT_KIND], '#E': [eventId] },
+        { kinds: [LEGACY_COMMENT_KIND], '#e': [eventId] },
+      ],
       ctx.webSocketFactory
     ),
   ]);
 
   const comments = [...commentEvents.values()]
-    .filter(
-      (e) =>
-        e.kind === COMMENT_KIND &&
-        e.tags.some((t) => t[0] === 'e' && t[1] === eventId)
-    )
+    .filter((e) => commentBelongsToThread(e, eventId))
     .sort((a, b) => a.created_at - b.created_at)
     .map((e) => ({
       eventId: e.id,
+      kind: e.kind,
+      replyToEventId: tagValue(e.tags, 'e') ?? null,
       authorPubkey: e.pubkey,
       createdAt: e.created_at,
       content: e.content,
@@ -554,7 +611,11 @@ async function fetchItem(
   return {
     item: parseTrackerItem(
       event,
-      deriveStatus(eventId, statusEvents.values(), authorized)
+      deriveStatus(
+        eventId,
+        statusEvents.values(),
+        withTargetAuthor(authorized, event.pubkey)
+      )
     ),
     comments,
     repoATag,
@@ -650,9 +711,11 @@ async function runList(
     for (const item of items) {
       const labels =
         item.labels.length > 0 ? `  [${item.labels.join(', ')}]` : '';
+      // #161: kind:1617 items only — issues never set `.branch`.
+      const branch = item.branch !== undefined ? `  → ${item.branch}` : '';
       io.out(
         `${item.status.padEnd(7)}  ${item.eventId.slice(0, 8)}  ${item.title}` +
-          `  (${item.authorPubkey.slice(0, 8)}, ${isoDate(item.createdAt)})${labels}`
+          `  (${item.authorPubkey.slice(0, 8)}, ${isoDate(item.createdAt)})${labels}${branch}`
       );
     }
     io.out(
@@ -751,9 +814,16 @@ async function runShow(
     io.out('');
     io.out(`Comments (${shown.comments.length}):`);
     for (const comment of shown.comments) {
+      // A nested reply's lowercase `e` names another comment, not the thread
+      // root — surface that so a NIP-22 thread reads as a conversation (#159).
+      const replyTo =
+        comment.replyToEventId !== null &&
+        comment.replyToEventId !== item.eventId
+          ? ` in reply to ${comment.replyToEventId.slice(0, 8)}`
+          : '';
       io.out(
         `--- ${comment.eventId.slice(0, 8)} by ${comment.authorPubkey.slice(0, 8)} ` +
-          `on ${isoDate(comment.createdAt)}`
+          `on ${isoDate(comment.createdAt)}${replyTo}`
       );
       for (const line of comment.content.split('\n')) io.out(line);
     }

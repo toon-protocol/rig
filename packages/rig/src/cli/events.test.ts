@@ -35,6 +35,57 @@ const OWNER = 'ab'.repeat(32);
 const CONFIG_OWNER = 'cd'.repeat(32);
 const ROOT_EVENT = '12'.repeat(32);
 const EVENT_ID = 'ef'.repeat(32);
+/** Author of the kind:1621 the comment tests target (NOT the repo owner). */
+const ISSUE_AUTHOR = '9a'.repeat(32);
+/** Author of the kind:1111 comment the reply test targets. */
+const COMMENT_AUTHOR = '8b'.repeat(32);
+const PARENT_COMMENT_ID = '7c'.repeat(32);
+
+function wireEvent(
+  overrides: Partial<NostrEvent> & { id: string; kind: number }
+): NostrEvent {
+  return {
+    pubkey: ISSUE_AUTHOR,
+    created_at: 1_700_000_000,
+    tags: [],
+    content: '',
+    sig: 'f0'.repeat(64),
+    ...overrides,
+  };
+}
+
+/**
+ * The kind:1621 issue `rig comment <id>` targets. #159 reads the target off
+ * the relay to learn the thread root's kind and author, so the hermetic mock
+ * relay serves it in every comment test.
+ */
+const ROOT_ISSUE: NostrEvent = wireEvent({
+  id: ROOT_EVENT,
+  kind: 1621,
+  tags: [
+    ['a', `30617:${CONFIG_OWNER}:demo`],
+    ['subject', 'Root issue'],
+  ],
+  content: 'the issue body',
+});
+
+/** An existing kind:1111 comment on {@link ROOT_ISSUE} — the reply target. */
+const PARENT_COMMENT: NostrEvent = wireEvent({
+  id: PARENT_COMMENT_ID,
+  kind: 1111,
+  pubkey: COMMENT_AUTHOR,
+  created_at: 1_700_000_100,
+  tags: [
+    ['E', ROOT_EVENT, '', ISSUE_AUTHOR],
+    ['K', '1621'],
+    ['P', ISSUE_AUTHOR],
+    ['e', ROOT_EVENT, '', ISSUE_AUTHOR],
+    ['k', '1621'],
+    ['p', ISSUE_AUTHOR],
+    ['a', `30617:${CONFIG_OWNER}:demo`],
+  ],
+  content: 'first comment',
+});
 
 // ---------------------------------------------------------------------------
 // Fixture repo
@@ -129,9 +180,15 @@ function makeDeps(
     cwd,
     readStdin: async () => options.stdin ?? '',
     probeDaemon: options.probeDaemon ?? NO_DAEMON,
-    // Hermetic mock relay for the #287 authority pre-check (never real network).
+    // Hermetic mock relay for the #287 authority pre-check and the #159
+    // comment-target lookup (never real network). The comment thread root and
+    // one existing kind:1111 comment are always served.
     webSocketFactory: makeMockRelayFactory(
-      (filter) => filterEvents(options.remoteEvents ?? [], filter),
+      (filter) =>
+        filterEvents(
+          [ROOT_ISSUE, PARENT_COMMENT, ...(options.remoteEvents ?? [])],
+          filter
+        ),
       'object'
     ),
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
@@ -441,8 +498,8 @@ describe('confirm gating', () => {
   });
 });
 
-describe('rig comment', () => {
-  it('publishes kind:1622 with the default root marker and owner p-tag', async () => {
+describe('rig comment (NIP-22 kind:1111, #159)', () => {
+  it('publishes a top-level kind:1111 whose parent repeats the root scope', async () => {
     const h = deps();
     const code = await runComment(
       [ROOT_EVENT, '--body', 'nice catch', '--yes'],
@@ -450,40 +507,119 @@ describe('rig comment', () => {
     );
     expect(code).toBe(0);
     const { event } = fake.published[0] as FakeStandalone['published'][0];
-    expect(event.kind).toBe(1622);
+    expect(event.kind).toBe(1111);
     expect(event.content).toBe('nice catch');
-    expect(event.tags).toContainEqual(['e', ROOT_EVENT, '', 'root']);
-    expect(event.tags).toContainEqual(['p', CONFIG_OWNER]);
-    expect(event.tags).toContainEqual(['a', `30617:${CONFIG_OWNER}:demo`]);
-    expect(h.out.join('\n')).toContain('kind:1622');
+    // Root scope: the ISSUE and its author — never the repository.
+    expect(event.tags).toEqual([
+      ['E', ROOT_EVENT, '', ISSUE_AUTHOR],
+      ['K', '1621'],
+      ['P', ISSUE_AUTHOR],
+      ['e', ROOT_EVENT, '', ISSUE_AUTHOR],
+      ['k', '1621'],
+      ['p', ISSUE_AUTHOR],
+      ['a', `30617:${CONFIG_OWNER}:demo`],
+    ]);
+    expect(h.out.join('\n')).toContain('kind:1111');
   });
 
-  it('passes --parent-author and --marker reply through', async () => {
+  it('targeting a kind:1111 comment publishes a REPLY (k=1111) under the same root', async () => {
     const h = deps();
     const code = await runComment(
-      [
-        ROOT_EVENT,
-        '--body',
-        'b',
-        '--parent-author',
-        OWNER,
-        '--marker',
-        'reply',
-        '--yes',
-      ],
+      [PARENT_COMMENT_ID, '--body', 'replying', '--yes'],
       h.deps
     );
     expect(code).toBe(0);
     const { event } = fake.published[0] as FakeStandalone['published'][0];
-    expect(event.tags).toContainEqual(['e', ROOT_EVENT, '', 'reply']);
-    expect(event.tags).toContainEqual(['p', OWNER]);
+    expect(event.kind).toBe(1111);
+    expect(event.tags).toEqual([
+      ['E', ROOT_EVENT, '', ISSUE_AUTHOR],
+      ['K', '1621'],
+      ['P', ISSUE_AUTHOR],
+      ['e', PARENT_COMMENT_ID, '', COMMENT_AUTHOR],
+      ['k', '1111'],
+      ['p', COMMENT_AUTHOR],
+      ['a', `30617:${CONFIG_OWNER}:demo`],
+    ]);
   });
 
-  it('validates the root event id, marker, and body (exit 2)', async () => {
+  it('roots a comment on a patch at kind:1617', async () => {
+    const PATCH_ID = '6d'.repeat(32);
+    const h = deps({
+      remoteEvents: [
+        wireEvent({
+          id: PATCH_ID,
+          kind: 1617,
+          tags: [['a', `30617:${CONFIG_OWNER}:demo`]],
+        }),
+      ],
+    });
+    const code = await runComment([PATCH_ID, '--body', 'lgtm', '--yes'], h.deps);
+    expect(code).toBe(0);
+    const { event } = fake.published[0] as FakeStandalone['published'][0];
+    expect(event.tags).toContainEqual(['K', '1617']);
+    expect(event.tags).toContainEqual(['k', '1617']);
+  });
+
+  it('refuses when the target is not on the relay — nothing published', async () => {
+    const h = deps();
+    const code = await runComment(
+      ['5e'.repeat(32), '--body', 'b', '--yes'],
+      h.deps
+    );
+    expect(code).toBe(1);
+    expect(h.err.join('\n')).toContain('not found');
+    expect(fake.published).toHaveLength(0);
+  });
+
+  it('refuses a kind:1111 target whose root scope is unusable', async () => {
+    const BAD_ID = '3a'.repeat(32);
+    const h = deps({
+      remoteEvents: [
+        wireEvent({
+          id: BAD_ID,
+          kind: 1111,
+          // A hostile/garbled root scope must not be copied into a paid event.
+          tags: [
+            ['E', 'not-a-hex-id'],
+            ['K', 'banana'],
+            ['P', ISSUE_AUTHOR],
+          ],
+        }),
+      ],
+    });
+    const code = await runComment([BAD_ID, '--body', 'b', '--yes'], h.deps);
+    expect(code).toBe(1);
+    expect(h.err.join('\n')).toContain('NIP-22 root scope');
+    expect(fake.published).toHaveLength(0);
+  });
+
+  it('refuses to reply to a legacy kind:1622 comment', async () => {
+    const LEGACY_ID = '4f'.repeat(32);
+    const h = deps({
+      remoteEvents: [
+        wireEvent({
+          id: LEGACY_ID,
+          kind: 1622,
+          tags: [['e', ROOT_EVENT, '', 'root']],
+        }),
+      ],
+    });
+    const code = await runComment([LEGACY_ID, '--body', 'b', '--yes'], h.deps);
+    expect(code).toBe(1);
+    expect(h.err.join('\n')).toContain('kind:1622');
+    expect(fake.published).toHaveLength(0);
+  });
+
+  it('validates the target event id and body, and rejects the retired flags (exit 2)', async () => {
     expect(await runComment(['not-hex', '--body', 'b'], deps().deps)).toBe(2);
+    const h = deps();
+    expect(
+      await runComment([ROOT_EVENT, '--body', 'b', '--marker', 'reply'], h.deps)
+    ).toBe(2);
+    expect(h.err.join('\n')).toContain('--marker and --parent-author');
     expect(
       await runComment(
-        [ROOT_EVENT, '--body', 'b', '--marker', 'sideways'],
+        [ROOT_EVENT, '--body', 'b', '--parent-author', OWNER],
         deps().deps
       )
     ).toBe(2);
@@ -519,7 +655,10 @@ describe('rig pr create (real format-patch)', () => {
     expect(event.content).toContain('+the feature');
     expect(event.tags).toContainEqual(['commit', second]);
     expect(event.tags).toContainEqual(['parent-commit', first]);
-    expect(event.tags).toContainEqual(['t', 'feature']);
+    // #161: --branch writes the `branch-name` tag, never `t` — a patch's
+    // branch used to be misreported as a label.
+    expect(event.tags).toContainEqual(['branch-name', 'feature']);
+    expect(event.tags.filter((tag) => tag[0] === 't')).toHaveLength(0);
     expect(h.out.join('\n')).toContain('kind:1617');
   });
 
@@ -696,7 +835,7 @@ describe('rig pr create (real format-patch)', () => {
 });
 
 describe('rig pr status', () => {
-  it('publishes the mapped status kind with the repo a-tag', async () => {
+  it('publishes the mapped status kind with the root-marked e tag and the repo a-tag (rig#160)', async () => {
     const h = deps();
     const code = await runPr(
       ['status', ROOT_EVENT, 'applied', '--yes'],
@@ -705,7 +844,7 @@ describe('rig pr status', () => {
     expect(code).toBe(0);
     const { event } = fake.published[0] as FakeStandalone['published'][0];
     expect(event.kind).toBe(1631);
-    expect(event.tags).toContainEqual(['e', ROOT_EVENT]);
+    expect(event.tags).toContainEqual(['e', ROOT_EVENT, '', 'root']);
     expect(event.tags).toContainEqual(['a', `30617:${CONFIG_OWNER}:demo`]);
     const text = h.out.join('\n');
     expect(text).toContain('kind:1631');
@@ -937,7 +1076,7 @@ describe('usage', () => {
     for (const [run, args, needle] of [
       [runIssue, ['create', '--help'], '--body-file'],
       [runIssue, ['--help'], '--body-file'],
-      [runComment, ['--help'], '--parent-author'],
+      [runComment, ['--help'], 'NIP-22 kind:1111'],
       [runPr, ['create', '--help'], '--patch-file'],
       [runPr, ['--help'], 'cover-letter'],
       [runPr, ['--help'], 'Usage: rig pr status'],
@@ -1021,7 +1160,7 @@ describe('daemon delegation (#279)', () => {
     const receipt = {
       eventId: EVENT_ID,
       feePaid: '7',
-      kind: 1622,
+      kind: 1111,
       channelId: '0xchannel',
       nonce: 4,
     };
@@ -1045,9 +1184,12 @@ describe('daemon delegation (#279)', () => {
         url: 'http://127.0.0.1:8787/git/comment',
         body: {
           repoAddr: { ownerPubkey: CONFIG_OWNER, repoId: 'demo' },
-          rootEventId: ROOT_EVENT,
           body: 'B',
-          marker: 'root',
+          // The relay-resolved NIP-22 root travels with the request, so the
+          // daemon builds the same kind:1111 the standalone path would (#159).
+          rootEventId: ROOT_EVENT,
+          rootKind: 1621,
+          rootAuthorPubkey: ISSUE_AUTHOR,
         },
       },
     ]);
@@ -1063,7 +1205,7 @@ describe('daemon delegation (#279)', () => {
 
   it('--standalone forces the embedded seam even with a same-identity git daemon', async () => {
     // The daemon would normally handle the publish; --standalone bypasses it.
-    const { posts, fetchImpl } = daemonFetch({ eventId: EVENT_ID, kind: 1622 });
+    const { posts, fetchImpl } = daemonFetch({ eventId: EVENT_ID, kind: 1111 });
     const h = makeDeps({ ...env, RIG_MNEMONIC: TEST_MNEMONIC }, repoDir, {
       loadStandalone: fake.load,
       probeDaemon: sameIdentityProbe(),
@@ -1087,7 +1229,7 @@ describe('daemon delegation (#279)', () => {
     const { fetchImpl } = daemonFetch({
       eventId: EVENT_ID,
       feePaid: '7',
-      kind: 1622,
+      kind: 1111,
     });
     const h = makeDeps({ ...env, RIG_MNEMONIC: TEST_MNEMONIC }, repoDir, {
       probeDaemon: sameIdentityProbe('wss://daemon-relay.example'),

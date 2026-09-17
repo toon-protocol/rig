@@ -52,8 +52,10 @@ Republish this repo's kind:30617 announcement with no field edit, refreshing
 its NIP-34 conformance tags (#158) so other clients can find and group it:
 
   relays          the relay this repo publishes to — where its issues,
-                  patches and state live
-  web             the repo's rig-web viewer URL
+                  patches and state live. Added to the relays the
+                  announcement already lists; none are removed
+  web             the repo's rig-web viewer URL, added alongside any
+                  viewer URL another client already announced
   r <sha> euc     the earliest unique commit: the repo's fork identity.
                   Written only if the announcement has none — once declared it
                   never changes, so forks stay grouped

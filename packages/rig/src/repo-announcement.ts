@@ -374,18 +374,47 @@ export interface ConformanceFacts {
 }
 
 /**
+ * Every value a multi-valued tag already carries on `current`, in order,
+ * followed by `additions` that are not already there. Blank-stripped and
+ * deduped, so a repeat republish adds nothing.
+ */
+function unionValues(
+  current: ExistingAnnouncement | null,
+  name: string,
+  additions: readonly string[]
+): string[] {
+  const existing: string[] = [];
+  for (const tag of current?.tags ?? []) {
+    if (tag[0] === name) existing.push(...tag.slice(1));
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of [...existing, ...additions]) {
+    const trimmed = value.trim();
+    if (trimmed.length === 0 || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+/**
  * The conformance-tag edits to fold into an {@link amendRepoAnnouncement}
  * call — the backfill every owner-initiated republish performs.
  *
- * `relays` and `web` are rig's own statement of where this publish went and
- * where the repo can be browsed, so they are REWRITTEN to track the current
- * publish rather than merged with what is there. That is what #158 asks for
- * ("the relay URLs the publish is going to"), and it has a cost worth naming:
- * on a repo whose announcement was last written by another client, a rig
- * republish replaces that client's `relays` list and `web` URL with rig's.
- * Both are slots rig models, so #154's carry-over guarantee does not cover
- * them — it covers `clone`, the role tags, `blossoms`, `t`, `alt` and
- * everything rig has never heard of, which survive untouched.
+ * `relays` and `web` are UNIONED into what the announcement already declares,
+ * never substituted for it. rig's statement is "this repo also lives at this
+ * relay, and can also be browsed here" — a repo announced by another NIP-34
+ * client keeps that client's relay list and viewer URL, and gains rig's. The
+ * existing values lead, in their original order, so a second republish that
+ * adds nothing new is a no-op and costs nothing (see
+ * {@link diffAnnouncementTags}).
+ *
+ * Union, not rewrite, is what makes a rig republish safe on a repo rig does
+ * not exclusively own: dropping another client's relay would strand that
+ * client's readers, and #158's "the relay URLs the publish is going to" is
+ * satisfied as long as rig's relay is IN the list. Removing a stale relay or
+ * viewer URL is therefore never automatic — it is a deliberate edit.
  *
  * The `euc` is written only when the announcement does not already declare
  * one: a repo's fork identity must never change under its owner, even if the
@@ -405,8 +434,10 @@ export function conformanceEdits(
     AnnouncementEdits,
     'relays' | 'web' | 'earliestUniqueCommit'
   > = {};
-  if (facts.relays.length > 0) edits.relays = facts.relays;
-  if (facts.web !== null) edits.web = [facts.web];
+  const relays = unionValues(current, RELAYS_TAG, facts.relays);
+  if (relays.length > 0) edits.relays = relays;
+  const web = unionValues(current, WEB_TAG, facts.web === null ? [] : [facts.web]);
+  if (web.length > 0) edits.web = web;
   if (announcedEuc(current) === null && facts.earliestUniqueCommit !== null) {
     edits.earliestUniqueCommit = facts.earliestUniqueCommit;
   }
