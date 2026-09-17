@@ -12,6 +12,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { WebSocketServer } from 'ws';
 import type { AddressInfo } from 'node:net';
 
+import { NGIT_STATE_NGIT } from './nip34-fixtures/index.js';
 import { fetchRemoteState, type NostrEvent } from './remote-state.js';
 
 // ---------------------------------------------------------------------------
@@ -476,7 +477,11 @@ describe('fetchRemoteState', () => {
       fetchRemoteState({ relayUrls: ['ws://x'], ownerPubkey: '', repoId: REPO })
     ).rejects.toThrow(/ownerPubkey/);
     await expect(
-      fetchRemoteState({ relayUrls: ['ws://x'], ownerPubkey: OWNER, repoId: '' })
+      fetchRemoteState({
+        relayUrls: ['ws://x'],
+        ownerPubkey: OWNER,
+        repoId: '',
+      })
     ).rejects.toThrow(/repoId/);
   });
 
@@ -500,5 +505,98 @@ describe('fetchRemoteState', () => {
     // The symref row must not leak into the ref map
     expect(state.refs.has('HEAD')).toBe(false);
     expect(state.refs.size).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// NIP-34 ref tag shapes (rig#156) — through the real relay seam
+// ---------------------------------------------------------------------------
+
+describe('fetchRemoteState: NIP-34 ref tag shape', () => {
+  const relays: MockRelay[] = [];
+
+  async function relay(events: NostrEvent[]): Promise<MockRelay> {
+    const r = await startMockRelay(events);
+    relays.push(r);
+    return r;
+  }
+
+  beforeEach(() => clearShaCache());
+  afterEach(async () => {
+    await Promise.all(relays.splice(0).map((r) => r.close()));
+  });
+
+  async function stateFrom(tags: string[][]) {
+    const r = await relay([makeRefsEvent({ tags: [['d', REPO], ...tags] })]);
+    return fetchRemoteState({
+      relayUrls: [r.url],
+      ownerPubkey: OWNER,
+      repoId: REPO,
+    });
+  }
+
+  it('reads a NIP-shape-only state event (what ngit publishes)', async () => {
+    const state = await stateFrom([
+      ['refs/heads/main', SHA_MAIN],
+      ['refs/tags/v1.0.0', SHA_DEV],
+      ['HEAD', 'ref: refs/heads/main'],
+      ['arweave', SHA_MAIN, TX_MAIN],
+    ]);
+
+    expect([...state.refs]).toEqual([
+      ['refs/heads/main', SHA_MAIN],
+      ['refs/tags/v1.0.0', SHA_DEV],
+    ]);
+    expect(state.headSymref).toBe('refs/heads/main');
+    // The arweave map still parses — the ref loop never short-circuits it.
+    expect(state.shaToTxId.get(SHA_MAIN)).toBe(TX_MAIN);
+  });
+
+  it('lets the NIP shape win when a dual-written event disagrees with itself', async () => {
+    const state = await stateFrom([
+      ['r', 'refs/heads/main', SHA_DEV],
+      ['refs/heads/main', SHA_MAIN],
+      ['r', 'refs/heads/dev', SHA_DEV],
+    ]);
+
+    expect(state.refs.get('refs/heads/main')).toBe(SHA_MAIN);
+    expect(state.refs.get('refs/heads/dev')).toBe(SHA_DEV);
+    expect(state.refs.size).toBe(2);
+  });
+
+  it('does not list peeled ^{} entries as refs', async () => {
+    const state = await stateFrom([
+      ['refs/tags/v1.0.0', SHA_MAIN],
+      ['refs/tags/v1.0.0^{}', SHA_DEV],
+    ]);
+
+    expect([...state.refs]).toEqual([['refs/tags/v1.0.0', SHA_MAIN]]);
+  });
+
+  it('caps distinct refs across both shapes combined at 1000', async () => {
+    const tags: string[][] = [];
+    for (let i = 0; i < 700; i += 1) tags.push([`refs/heads/n${i}`, SHA_MAIN]);
+    for (let i = 0; i < 700; i += 1)
+      tags.push(['r', `refs/heads/l${i}`, SHA_DEV]);
+
+    const state = await stateFrom(tags);
+    expect(state.refs.size).toBe(1000);
+  });
+
+  it('parses the real ngit state event captured off relay.ngit.dev', async () => {
+    const r = await relay([
+      { ...NGIT_STATE_NGIT, pubkey: OWNER, tags: NGIT_STATE_NGIT.tags },
+    ]);
+    const state = await fetchRemoteState({
+      relayUrls: [r.url],
+      ownerPubkey: OWNER,
+      repoId: 'ngit',
+    });
+
+    expect(state.refs.size).toBe(64);
+    expect(state.headSymref).toBe('refs/heads/main');
+    expect([...state.refs.keys()].some((ref) => ref.endsWith('^{}'))).toBe(
+      false
+    );
   });
 });

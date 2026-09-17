@@ -115,6 +115,47 @@ export function filterEvents(
 }
 
 // ---------------------------------------------------------------------------
+// Foreign announcement tags (#154)
+// ---------------------------------------------------------------------------
+
+/**
+ * Tags a kind:30617 can carry that rig does not model: another NIP-34
+ * client's maintainer role tags (nips PR #2324), `clone`, `blossoms`, `t`,
+ * `alt`, and one rig has never heard of. A republish must carry every one of
+ * them over verbatim, in THIS order (#154) — the array is the assertion.
+ *
+ * `<owner>` and `<peer>` placeholders are substituted by
+ * {@link foreignAnnouncementTags} so a test can use its own pubkeys.
+ */
+export function foreignAnnouncementTags(
+  owner: string,
+  peer: string
+): string[][] {
+  return [
+    ['clone', 'https://relay.ngit.dev/npub1abc/demo.git'],
+    ['M', owner],
+    ['m', peer],
+    ['o', peer],
+    ['blossoms', 'https://blossom.example'],
+    ['t', 'rust'],
+    ['alt', 'git repository: demo'],
+    ['x-rig-knows-nothing', 'keep', 'me'],
+  ];
+}
+
+/**
+ * The foreign tags as they survived a republish, in published order — compare
+ * against the same {@link foreignAnnouncementTags} array the fixture used.
+ */
+export function survivingForeignTags(
+  publishedTags: string[][],
+  foreign: string[][]
+): string[][] {
+  const names = new Set(foreign.map((t) => t[0]));
+  return publishedTags.filter((t) => names.has(t[0]));
+}
+
+// ---------------------------------------------------------------------------
 // Mock Arweave gateway
 // ---------------------------------------------------------------------------
 
@@ -219,6 +260,21 @@ export function enumerateRepoRefs(repoDir: string): {
   return { refs, head };
 }
 
+/**
+ * Which kind:30618 ref tag shape(s) a fixture state event carries (rig#156):
+ * `legacy` is rig's `["r", <ref>, <sha>]`, `nip` is NIP-34's
+ * `[<ref>, <sha>]` (what ngit writes), `both` is the dual-written event.
+ */
+export type RefTagShape = 'legacy' | 'nip' | 'both';
+
+/** The ref tags for one refname/sha pair in the requested shape(s). */
+function refTags(refname: string, sha: string, shape: RefTagShape): string[][] {
+  const tags: string[][] = [];
+  if (shape !== 'legacy') tags.push([refname, sha]);
+  if (shape !== 'nip') tags.push(['r', refname, sha]);
+  return tags;
+}
+
 /** Build the kind:30617 + kind:30618 relay events describing `repoDir`. */
 export function repoStateEvents(opts: {
   repoDir: string;
@@ -227,6 +283,8 @@ export function repoStateEvents(opts: {
   createdAt?: number;
   /** Override the arweave map (default: txFor(sha) for every object). */
   arweaveMap?: Map<string, string>;
+  /** Ref tag shape to emit (default: `legacy`, what rig writes today). */
+  refShape?: RefTagShape;
 }): {
   announce: NostrEvent;
   refsEvent: NostrEvent;
@@ -258,7 +316,9 @@ export function repoStateEvents(opts: {
     kind: 30618,
     tags: [
       ['d', opts.repoId],
-      ...[...refs].map(([refname, sha]) => ['r', refname, sha]),
+      ...[...refs].flatMap(([refname, sha]) =>
+        refTags(refname, sha, opts.refShape ?? 'legacy')
+      ),
       ['HEAD', `ref: ${head}`],
       ...[...arweaveMap].map(([sha, txId]) => ['arweave', sha, txId]),
     ],

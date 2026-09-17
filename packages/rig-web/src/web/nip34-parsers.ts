@@ -137,8 +137,40 @@ export function repoAuthorizedAuthors(repo: RepoMetadata): Set<string> {
   return new Set([repo.ownerPubkey.toLowerCase(), ...repo.maintainers]);
 }
 
-/** Maximum number of refs to parse from a single kind:30618 event. */
+/**
+ * Maximum number of DISTINCT refs parsed from a single kind:30618 event,
+ * counted across both tag shapes combined (see {@link parseRepoRefs}).
+ */
 const MAX_REFS_PER_EVENT = 1000;
+
+/** Tag-name prefixes that make a NIP-34-shaped tag a ref. */
+const NIP_REF_PREFIXES = ['refs/heads/', 'refs/tags/'] as const;
+
+/** Suffix marking a peeled annotated-tag entry: `refs/tags/v1.0.0^{}`. */
+const PEELED_SUFFIX = '^{}';
+
+/** Is this tag NAME a NIP-34-shaped ref path? */
+function isNipRefTagName(name: string): boolean {
+  return NIP_REF_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
+/**
+ * Merge the two shapes' refs into one map: NIP shape first, so it both wins
+ * every same-ref disagreement and takes first claim on the cap's slots;
+ * legacy refs fill whatever remains.
+ */
+function mergeRefShapes(
+  nip: Map<string, string>,
+  legacy: Map<string, string>
+): Map<string, string> {
+  const refs = new Map([...nip].slice(0, MAX_REFS_PER_EVENT));
+  for (const [refname, sha] of legacy) {
+    if (refs.size >= MAX_REFS_PER_EVENT) break;
+    if (nip.has(refname)) continue;
+    refs.set(refname, sha);
+  }
+  return refs;
+}
 
 /** Parsed repository refs from a kind:30618 event. */
 export interface RepoRefs {
@@ -147,25 +179,67 @@ export interface RepoRefs {
   arweaveMap: Map<string, string>;
 }
 
-/** Parse a kind:30618 repository refs event into RepoRefs. */
+/**
+ * Parse a kind:30618 repository refs event into RepoRefs, accepting BOTH ref
+ * tag shapes (rig#156, spec rig#153):
+ *
+ *  - **NIP-34 shape** — `["refs/heads/main", "<sha>"]`, where the ref path IS
+ *    the tag name. What NIP-34 specifies and what ngit, gitworkshop.dev and
+ *    the rest of the ecosystem write.
+ *  - **Legacy rig shape** — `["r", "refs/heads/main", "<sha>"]`, rig's own
+ *    spelling, read forever so every repo pushed before rig#153 keeps
+ *    rendering.
+ *
+ * A NIP-shape name ending in `^{}` is a PEELED annotated tag (ngit emits
+ * these): not a ref, not listed. When both shapes name the same ref with
+ * different shas the NIP shape wins, whichever came first in tag order. The
+ * cap counts distinct refs across both shapes combined.
+ *
+ * This is a deliberate COPY of `@toon-protocol/rig`'s `nip34-refs.ts`, which
+ * rig-web cannot import — see this file's header for why, and keep the two in
+ * step. Both are tested against the same captured ngit events
+ * (`./__fixtures__/ngit-wire.ts`).
+ *
+ * ONE deliberate divergence from the rig-side parser: {@link RepoRefs} has no
+ * field for a `HEAD` symref, so symref tags are not extracted here. A NIP-34
+ * `["HEAD", "ref: refs/heads/main"]` is simply ignored (`HEAD` is not a
+ * ref-path prefix), while rig's legacy `["r", "HEAD", …]` keeps landing in
+ * `refs` under the key `HEAD` exactly as it did before rig#156 — rig-web's
+ * callers (`ref-resolver.ts`) already look for that key, so changing it would
+ * be a view-model change this read-only ticket does not ask for.
+ */
 export function parseRepoRefs(event: NostrEvent): RepoRefs | null {
   if (event.kind !== 30618) return null;
 
   const dTag = getTagValue(event.tags, 'd');
   if (!dTag) return null;
 
-  const refs = new Map<string, string>();
+  // Each shape is staged on its own, then merged NIP-first (see
+  // mergeRefShapes). Both staging maps are themselves bounded, so a relay
+  // that serves a million ref tags costs bounded memory.
+  const nip = new Map<string, string>();
+  const legacy = new Map<string, string>();
   const arweaveMap = new Map<string, string>();
+
   for (const tag of event.tags) {
-    if (tag[0] === 'r' && tag[1] && tag[2]) {
-      if (refs.size >= MAX_REFS_PER_EVENT) break;
-      refs.set(tag[1], tag[2]);
-    } else if (tag[0] === 'arweave' && tag[1] && tag[2]) {
+    const name = tag[0];
+    if (name === undefined) continue;
+    if (name === 'r' && tag[1] && tag[2]) {
+      if (legacy.size < MAX_REFS_PER_EVENT || legacy.has(tag[1])) {
+        legacy.set(tag[1], tag[2]);
+      }
+    } else if (name === 'arweave' && tag[1] && tag[2]) {
       arweaveMap.set(tag[1], tag[2]);
+    } else if (
+      tag[1] &&
+      isNipRefTagName(name) &&
+      !name.endsWith(PEELED_SUFFIX)
+    ) {
+      if (nip.size < MAX_REFS_PER_EVENT || nip.has(name)) nip.set(name, tag[1]);
     }
   }
 
-  return { repoId: dTag, refs, arweaveMap };
+  return { repoId: dTag, refs: mergeRefShapes(nip, legacy), arweaveMap };
 }
 
 /** Parse a kind:30617 repository announcement event into RepoMetadata. */
