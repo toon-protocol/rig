@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { useRigConfig } from './use-rig-config.js';
 import { useRelay } from './use-relay.js';
-import { resolveIssueStatus } from '../nip34-parsers.js';
+import { resolveIssueStatus, withTargetAuthor } from '../nip34-parsers.js';
 import type { NostrEvent, NostrFilter } from '../nip34-parsers.js';
 
 /** A repo-list row's minimal shape, as needed to key + authorize its issues. */
@@ -110,7 +110,11 @@ export function useRepoIssueCounts(
       const authorized = authorizedByKey.get(repo.key) ?? new Set<string>();
       let open = 0;
       for (const issue of repoIssues) {
-        const status = resolveIssueStatus(issue.id, statusEvents, authorized);
+        const status = resolveIssueStatus(
+          issue.id,
+          statusEvents,
+          withTargetAuthor(authorized, issue.pubkey)
+        );
         if (status === 'open') open += 1;
       }
       result.set(repo.key, open);

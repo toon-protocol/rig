@@ -406,16 +406,33 @@ export type StatusKind =
 /**
  * Build a status event (kind 1630-1633).
  *
+ * rig#153/#160: the `e` tag carries the NIP-10 `root` marker
+ * (`["e", <target>, "", "root"]`) rather than the old bare `["e", <id>]`, so
+ * clients that resolve a status's root via the marker (ngit's
+ * `get_event_root`, among others) honor rig statuses. The repo `a` tag rides
+ * along so a status stream can be scoped to the repository without first
+ * resolving the target. Readers (this package's tracker and rig-web's
+ * parsers) accept BOTH this marker form and the legacy bare form — a status
+ * is matched by `tags.find(t => t[0] === 'e')?.[1] === targetEventId`
+ * regardless of any trailing marker elements.
+ *
+ * @param repoOwnerPubkey - Pubkey of the repository owner
+ * @param repoId - Repository identifier
  * @param targetEventId - Event ID of the patch, PR, or issue being updated
  * @param statusKind - One of 1630 (open), 1631 (applied), 1632 (closed), 1633 (draft)
- * @param targetPubkey - Optional pubkey of the target event author (p tag per NIP-34 StatusEvent)
+ * @param targetPubkey - Optional pubkey of the target event author (p tag per NIP-34 StatusEvent), when known
  */
 export function buildStatus(
+  repoOwnerPubkey: string,
+  repoId: string,
   targetEventId: string,
   statusKind: StatusKind,
   targetPubkey?: string
 ): UnsignedEvent {
-  const tags: string[][] = [['e', targetEventId]];
+  const tags: string[][] = [
+    ['e', targetEventId, '', 'root'],
+    ['a', `${REPOSITORY_ANNOUNCEMENT_KIND}:${repoOwnerPubkey}:${repoId}`],
+  ];
   if (targetPubkey) {
     tags.push(['p', targetPubkey]);
   }

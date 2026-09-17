@@ -4,12 +4,19 @@
 import { describe, it, expect } from 'vitest';
 
 import {
+  NGIT_STATUS_NGIT,
+  NGIT_STATUS_NGIT_TARGET,
+  NGIT_STATUS_NGIT_TARGET_EVENT_ID,
+} from './__fixtures__/ngit-wire.js';
+import {
   parseRepoAnnouncement,
   parseRepoRefs,
   parseIssue,
   parsePR,
   parseComment,
+  resolveIssueStatus,
   resolvePRStatus,
+  withTargetAuthor,
 } from './nip34-parsers.js';
 import type { NostrEvent } from './nip34-parsers.js';
 
@@ -483,13 +490,17 @@ function createMockStatusEvent(overrides: {
   prEventId: string;
   created_at?: number;
   pubkey?: string;
+  /** rig#160: emit the NIP-10 root-marked e tag instead of the bare form. */
+  marker?: boolean;
 }): NostrEvent {
   return {
     id: Math.random().toString(36).slice(2).padEnd(64, '0'),
     pubkey: overrides.pubkey ?? 'ab'.repeat(32),
     created_at: overrides.created_at ?? 1700002000,
     kind: overrides.kind,
-    tags: [['e', overrides.prEventId]],
+    tags: overrides.marker
+      ? [['e', overrides.prEventId, '', 'root']]
+      : [['e', overrides.prEventId]],
     content: '',
     sig: '0'.repeat(128),
   };
@@ -766,6 +777,163 @@ describe('NIP-34 Parsers - resolvePRStatus (8.5-UNIT-004)', () => {
     expect(
       resolvePRStatus(prEventId, statusEvents, [...AUTHORIZED, maintainer])
     ).toBe('closed');
+  });
+
+  // ── rig#160: NIP-10 root marker + a tag, both read forms ─────────────────
+
+  it('[P0] a marker-form e tag (["e", id, "", "root"]) resolves status identically to the bare form (rig#160)', () => {
+    const statusEvents: NostrEvent[] = [
+      createMockStatusEvent({
+        kind: 1632,
+        prEventId,
+        created_at: 1700001000,
+        marker: true,
+      }),
+    ];
+    expect(resolvePRStatus(prEventId, statusEvents, AUTHORIZED)).toBe(
+      'closed'
+    );
+  });
+
+  it('[P0] the winner is the LATEST authorized status regardless of which form each event uses (rig#160)', () => {
+    const statusEvents: NostrEvent[] = [
+      createMockStatusEvent({
+        kind: 1630,
+        prEventId,
+        created_at: 1700001000,
+      }), // bare, open
+      createMockStatusEvent({
+        kind: 1632,
+        prEventId,
+        created_at: 1700002000,
+        marker: true,
+      }), // marker, closed — later, wins
+    ];
+    expect(resolvePRStatus(prEventId, statusEvents, AUTHORIZED)).toBe(
+      'closed'
+    );
+  });
+
+  it('[P0] a marker-form status from an unauthorized pubkey is ignored, same as the bare form (rig#160)', () => {
+    const stranger = 'ff'.repeat(32);
+    const statusEvents: NostrEvent[] = [
+      createMockStatusEvent({
+        kind: 1632,
+        prEventId,
+        created_at: 1700001000,
+        pubkey: stranger,
+        marker: true,
+      }),
+    ];
+    expect(resolvePRStatus(prEventId, statusEvents, AUTHORIZED)).toBe('open');
+  });
+
+  it('[P0] the captured ngit marker-form status (rig#155 fixtures) resolves its real target to "applied" (rig#160)', () => {
+    const authorized = [NGIT_STATUS_NGIT.pubkey.toLowerCase()];
+    expect(
+      resolvePRStatus(
+        NGIT_STATUS_NGIT_TARGET_EVENT_ID,
+        [NGIT_STATUS_NGIT],
+        authorized
+      )
+    ).toBe('applied');
+  });
+
+  it('[P0] the captured ngit status is ignored when the signer is not authorized (rig#160)', () => {
+    expect(
+      resolvePRStatus(
+        NGIT_STATUS_NGIT_TARGET_EVENT_ID,
+        [NGIT_STATUS_NGIT],
+        ['ff'.repeat(32)]
+      )
+    ).toBe('open');
+  });
+
+  it('[P0] full parsePR + resolvePRStatus flow: the captured ngit PR (kind:1618) flips from "open" to "applied" via its captured marker-form status (rig#160)', () => {
+    // parsePR (unlike rig's own CLI tracker, which reads only kind:1617
+    // patches — a separate, out-of-scope dual-read gap) already accepts
+    // BOTH 1617 and 1618, so this is a real end-to-end proof for rig-web:
+    // the SAME captured events a viewer's usePRs hook would fetch, run
+    // through the SAME two functions that hook calls.
+    const pr = parsePR(NGIT_STATUS_NGIT_TARGET);
+    expect(pr).not.toBeNull();
+    expect(pr?.status).toBe('open'); // parsePR's hardcoded default, pre-resolution
+    const authorized = withTargetAuthor(
+      new Set<string>(),
+      pr?.authorPubkey ?? ''
+    );
+    const resolved = resolvePRStatus(
+      NGIT_STATUS_NGIT_TARGET_EVENT_ID,
+      [NGIT_STATUS_NGIT],
+      // The real status is signed by the repo owner, not the PR's own
+      // author — prove it resolves WITHOUT relying on the new
+      // target-author rule, exactly like `usePRs` would with a correctly
+      // resolved owner ∪ maintainers set.
+      new Set([...authorized, NGIT_STATUS_NGIT.pubkey.toLowerCase()])
+    );
+    expect(resolved).toBe('applied');
+  });
+});
+
+describe('NIP-34 Parsers - resolveIssueStatus (rig#160)', () => {
+  const issueEventId = 'i'.repeat(64);
+  const AUTHORIZED = ['ab'.repeat(32)];
+
+  it('[P1] returns open when no close events exist', () => {
+    expect(resolveIssueStatus(issueEventId, [], AUTHORIZED)).toBe('open');
+  });
+
+  it('[P1] closes on an authorized kind:1632 close event', () => {
+    const closeEvents: NostrEvent[] = [
+      createMockStatusEvent({ kind: 1632, prEventId: issueEventId }),
+    ];
+    expect(resolveIssueStatus(issueEventId, closeEvents, AUTHORIZED)).toBe(
+      'closed'
+    );
+  });
+
+  it('[P0] a marker-form close event closes the issue, same as the bare form (rig#160)', () => {
+    const closeEvents: NostrEvent[] = [
+      createMockStatusEvent({
+        kind: 1632,
+        prEventId: issueEventId,
+        marker: true,
+      }),
+    ];
+    expect(resolveIssueStatus(issueEventId, closeEvents, AUTHORIZED)).toBe(
+      'closed'
+    );
+  });
+
+  it('[P0] IGNORES an unauthorized marker-form close — spoof regression (rig#160)', () => {
+    const stranger = 'ff'.repeat(32);
+    const closeEvents: NostrEvent[] = [
+      createMockStatusEvent({
+        kind: 1632,
+        prEventId: issueEventId,
+        pubkey: stranger,
+        marker: true,
+      }),
+    ];
+    expect(resolveIssueStatus(issueEventId, closeEvents, AUTHORIZED)).toBe(
+      'open'
+    );
+    // Confirms the filter (not some other quirk) protects the state.
+    expect(
+      resolveIssueStatus(issueEventId, closeEvents, [...AUTHORIZED, stranger])
+    ).toBe('closed');
+  });
+});
+
+describe('NIP-34 Parsers - withTargetAuthor (rig#160)', () => {
+  it('adds the target author to a copy of the authorized set, without mutating the input', () => {
+    const owner = 'ab'.repeat(32);
+    const authorized = new Set([owner]);
+    const result = withTargetAuthor(authorized, 'CD'.repeat(32)); // mixed case
+
+    expect(result).toEqual(new Set([owner, 'cd'.repeat(32)])); // lowercased
+    expect(authorized).toEqual(new Set([owner])); // original untouched
+    expect(result).not.toBe(authorized); // a new Set, not the same object
   });
 });
 

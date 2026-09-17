@@ -437,30 +437,52 @@ describe('buildPatch (kind:1617)', () => {
   });
 });
 
-describe('buildStatus (kinds 1630-1633)', () => {
-  it('builds each status kind with an e tag', () => {
+describe('buildStatus (kinds 1630-1633, rig#160 root marker + a tag)', () => {
+  it('builds each status kind with the NIP-10 root-marked e tag and the repo a tag', () => {
     for (const statusKind of [1630, 1631, 1632, 1633] as const) {
-      const event = buildStatus(EVENT_ID, statusKind);
+      const event = buildStatus(OWNER_PUBKEY, 'hello-toon', EVENT_ID, statusKind);
       expect(event.kind).toBe(statusKind);
-      expect(event.tags).toEqual(expect.arrayContaining([['e', EVENT_ID]]));
+      expect(event.tags).toEqual(
+        expect.arrayContaining([
+          ['e', EVENT_ID, '', 'root'],
+          ['a', `30617:${OWNER_PUBKEY}:hello-toon`],
+        ])
+      );
     }
   });
 
   it('includes a p tag when targetPubkey is provided', () => {
-    const event = buildStatus(EVENT_ID, 1631, OWNER_PUBKEY);
+    const event = buildStatus(
+      OWNER_PUBKEY,
+      'hello-toon',
+      EVENT_ID,
+      1631,
+      AUTHOR_PUBKEY
+    );
 
     expect(event.tags).toEqual(
       expect.arrayContaining([
-        ['e', EVENT_ID],
-        ['p', OWNER_PUBKEY],
+        ['e', EVENT_ID, '', 'root'],
+        ['a', `30617:${OWNER_PUBKEY}:hello-toon`],
+        ['p', AUTHOR_PUBKEY],
       ])
     );
   });
 
   it('omits the p tag when targetPubkey is not provided', () => {
-    const event = buildStatus(EVENT_ID, 1630);
+    const event = buildStatus(OWNER_PUBKEY, 'hello-toon', EVENT_ID, 1630);
 
     const pTags = event.tags.filter((t) => t[0] === 'p');
     expect(pTags).toHaveLength(0);
+  });
+
+  it('no longer emits the old bare (un-marked, a-tag-less) form', () => {
+    const event = buildStatus(OWNER_PUBKEY, 'hello-toon', EVENT_ID, 1632);
+
+    // The bare form was exactly `['e', EVENT_ID]` with nothing else — the
+    // e tag must now carry the marker, distinguishing it from that shape.
+    const eTag = event.tags.find((t) => t[0] === 'e');
+    expect(eTag).not.toEqual(['e', EVENT_ID]);
+    expect(eTag).toEqual(['e', EVENT_ID, '', 'root']);
   });
 });
