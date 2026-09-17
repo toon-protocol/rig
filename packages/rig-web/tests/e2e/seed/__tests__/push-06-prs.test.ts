@@ -39,7 +39,7 @@ describe('Story 10.6: Push 06 — PRs with Status', () => {
   // AC-6.1: buildPatch produces correct kind:1617 for PR #1
   // -------------------------------------------------------------------------
 
-  it('[P0] AC-6.1: buildPatch for PR #1 produces kind:1617 with correct a tag, subject, commit/parent-commit tags, and branch t tag', async () => {
+  it('[P0] AC-6.1: buildPatch for PR #1 produces kind:1617 with correct a tag, subject, commit/parent-commit tags, and branch-name tag (#161)', async () => {
     const { buildPatch } = await import('../lib/event-builders.js');
     const push01 = await import('../push-01-init.js');
 
@@ -89,17 +89,19 @@ describe('Story 10.6: Push 06 — PRs with Status', () => {
     expect(parentTags[0]![1]).toBe(commit2Sha);
     expect(parentTags[1]![1]).toBe(commit3Sha);
 
-    // t tag = branch name
+    // #161: branch-name tag = branch name, never t
+    const branchNameTag = event.tags.find((t) => t[0] === 'branch-name');
+    expect(branchNameTag).toBeDefined();
+    expect(branchNameTag![1]).toBe('feature/add-retry');
     const tTag = event.tags.find((t) => t[0] === 't');
-    expect(tTag).toBeDefined();
-    expect(tTag![1]).toBe('feature/add-retry');
+    expect(tTag).toBeUndefined();
   });
 
   // -------------------------------------------------------------------------
   // AC-6.1: buildPatch produces correct kind:1617 for PR #2
   // -------------------------------------------------------------------------
 
-  it('[P0] AC-6.1: buildPatch for PR #2 produces kind:1617 with correct a tag, subject, single commit/parent-commit pair, no branch tag', async () => {
+  it('[P0] AC-6.1: buildPatch for PR #2 produces kind:1617 with correct a tag, subject, single commit/parent-commit pair, no branch-name tag', async () => {
     const { buildPatch } = await import('../lib/event-builders.js');
     const push01 = await import('../push-01-init.js');
 
@@ -138,7 +140,9 @@ describe('Story 10.6: Push 06 — PRs with Status', () => {
     expect(parentTags).toHaveLength(1);
     expect(parentTags[0]![1]).toBe(parentSha);
 
-    // No t tag (no branch name)
+    // No branch-name tag (no branch name), and no t tag either
+    const branchNameTag = event.tags.find((t) => t[0] === 'branch-name');
+    expect(branchNameTag).toBeUndefined();
     const tTag = event.tags.find((t) => t[0] === 't');
     expect(tTag).toBeUndefined();
   });

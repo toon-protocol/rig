@@ -417,6 +417,9 @@ function createMockPREvent(
     content?: string;
     commitShas?: string[];
     baseBranch?: string;
+    /** #161: the `branch-name` tag — the shape new patches write. */
+    branchNameTag?: string;
+    tTags?: string[];
     created_at?: number;
   } = {}
 ): NostrEvent {
@@ -431,6 +434,14 @@ function createMockPREvent(
   }
   if (overrides.baseBranch !== undefined) {
     tags.push(['branch', overrides.baseBranch]);
+  }
+  if (overrides.branchNameTag !== undefined) {
+    tags.push(['branch-name', overrides.branchNameTag]);
+  }
+  if (overrides.tTags) {
+    for (const label of overrides.tTags) {
+      tags.push(['t', label]);
+    }
   }
 
   return {
@@ -600,6 +611,47 @@ describe('NIP-34 Parsers - parsePR', () => {
 
     expect(result).not.toBeNull();
     expect(result!.content).toBe('Detailed patch content here');
+  });
+
+  // #161: patch branch name round-trips.
+  it('[P1] extracts base branch from branch-name tag (new patches)', () => {
+    const event = createMockPREvent({
+      subject: 'Fix bug',
+      branchNameTag: 'feature/new',
+    });
+
+    const result = parsePR(event);
+
+    expect(result).not.toBeNull();
+    expect(result!.baseBranch).toBe('feature/new');
+  });
+
+  it('[P1] prefers branch-name over a disagreeing legacy branch tag', () => {
+    const event = createMockPREvent({
+      subject: 'Fix bug',
+      branchNameTag: 'feature/wins',
+      baseBranch: 'feature/loses',
+    });
+
+    const result = parsePR(event);
+
+    expect(result).not.toBeNull();
+    expect(result!.baseBranch).toBe('feature/wins');
+  });
+
+  it('[P1] a legacy patch with the branch only in t does not surface it as baseBranch', () => {
+    const event = createMockPREvent({
+      subject: 'Legacy t-only patch',
+      tTags: ['feature/was-a-branch'],
+    });
+
+    const result = parsePR(event);
+
+    expect(result).not.toBeNull();
+    // No branch-name, no branch tag: falls back to the 'main' default, same
+    // as if the patch carried no branch info at all — no heuristic reads it
+    // out of t.
+    expect(result!.baseBranch).toBe('main');
   });
 });
 

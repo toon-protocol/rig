@@ -630,3 +630,117 @@ describe('rig pr list/show', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// #161: patch branch name round-trips (branch-name tag, with legacy fallback)
+// ---------------------------------------------------------------------------
+
+describe('rig pr show — branch-name round-trip (#161)', () => {
+  const NEW_PATCH_ID = '61'.repeat(32);
+  const LEGACY_BRANCH_TAG_ID = '62'.repeat(32);
+  const LEGACY_T_ONLY_ID = '63'.repeat(32);
+  const BOTH_TAGS_ID = '64'.repeat(32);
+
+  const branchEvents: NostrEvent[] = [
+    // A patch published under the fix: branch lives in `branch-name`.
+    event({
+      id: NEW_PATCH_ID,
+      kind: 1617,
+      created_at: 1000,
+      tags: [
+        ['a', A_TAG],
+        ['subject', 'New-style patch'],
+        ['branch-name', 'feature/new'],
+        ['t', 'real-label'],
+      ],
+      content: 'patch text',
+    }),
+    // A pre-fix patch that already carried the branch in the legacy `branch`
+    // tag (never actually written by buildPatch, but readers have always
+    // looked for it — must keep working).
+    event({
+      id: LEGACY_BRANCH_TAG_ID,
+      kind: 1617,
+      created_at: 1100,
+      tags: [
+        ['a', A_TAG],
+        ['subject', 'Legacy branch-tag patch'],
+        ['branch', 'feature/legacy'],
+      ],
+      content: 'patch text',
+    }),
+    // The actual historical bug: the branch was written to `t` (and nowhere
+    // else). No heuristic recovers it — it renders exactly as it does today,
+    // i.e. as a label, with no Branch: line.
+    event({
+      id: LEGACY_T_ONLY_ID,
+      kind: 1617,
+      created_at: 1200,
+      tags: [
+        ['a', A_TAG],
+        ['subject', 'Legacy t-only patch'],
+        ['t', 'feature/was-a-branch'],
+      ],
+      content: 'patch text',
+    }),
+    // Both shapes present, disagreeing — branch-name must win.
+    event({
+      id: BOTH_TAGS_ID,
+      kind: 1617,
+      created_at: 1300,
+      tags: [
+        ['a', A_TAG],
+        ['subject', 'Both tags patch'],
+        ['branch-name', 'feature/wins'],
+        ['branch', 'feature/loses'],
+      ],
+      content: 'patch text',
+    }),
+  ];
+
+  it('reads the branch from branch-name on a new patch, and t stays a real label', async () => {
+    const io = makeTestIo();
+    const code = await runPrShow(
+      [NEW_PATCH_ID, '--relay', RELAY],
+      makeDeps(io, 'object', branchEvents)
+    );
+    expect(code).toBe(0);
+    const text = io.outLines.join('\n');
+    expect(text).toContain('Branch:  feature/new');
+    expect(text).toContain('Labels:  real-label');
+  });
+
+  it('falls back to the legacy branch tag when branch-name is absent', async () => {
+    const io = makeTestIo();
+    const code = await runPrShow(
+      [LEGACY_BRANCH_TAG_ID, '--relay', RELAY],
+      makeDeps(io, 'object', branchEvents)
+    );
+    expect(code).toBe(0);
+    expect(io.outLines.join('\n')).toContain('Branch:  feature/legacy');
+  });
+
+  it('a legacy patch with the branch only in t renders exactly as it does today: no Branch line, t as a label', async () => {
+    const io = makeTestIo();
+    const code = await runPrShow(
+      [LEGACY_T_ONLY_ID, '--relay', RELAY],
+      makeDeps(io, 'object', branchEvents)
+    );
+    expect(code).toBe(0);
+    const text = io.outLines.join('\n');
+    expect(text).not.toContain('Branch:');
+    expect(text).toContain('Labels:  feature/was-a-branch');
+  });
+
+  it('prefers branch-name over a disagreeing legacy branch tag', async () => {
+    const io = makeTestIo();
+    const code = await runPrShow(
+      [BOTH_TAGS_ID, '--relay', RELAY],
+      makeDeps(io, 'object', branchEvents)
+    );
+    expect(code).toBe(0);
+    const text = io.outLines.join('\n');
+    expect(text).toContain('Branch:  feature/wins');
+    expect(text).not.toContain('feature/loses');
+  });
+});

@@ -334,7 +334,7 @@ describe('buildComment (kind:1622)', () => {
 describe('buildPatch (kind:1617)', () => {
   const commits = [{ sha: 'abc123', parentSha: 'def456' }];
 
-  it('builds a patch with a/p/subject/commit/parent-commit/t tags', () => {
+  it('builds a patch with a/p/subject/commit/parent-commit/branch-name tags', () => {
     const event = buildPatch(
       OWNER_PUBKEY,
       'hello-toon',
@@ -351,14 +351,31 @@ describe('buildPatch (kind:1617)', () => {
         ['subject', 'Fix readme'],
         ['commit', 'abc123'],
         ['parent-commit', 'def456'],
-        ['t', 'feature/fix'],
+        ['branch-name', 'feature/fix'],
       ])
     );
   });
 
-  it('omits the branch t tag when branchTag is not provided', () => {
+  // #161: the branch NEVER lands in `t` — that tag is reserved for real
+  // labels, and a patch's branch used to be misreported as one.
+  it('writes the branch to branch-name, never to t', () => {
+    const event = buildPatch(
+      OWNER_PUBKEY,
+      'hello-toon',
+      'Fix readme',
+      commits,
+      'feature/fix'
+    );
+
+    const tTags = event.tags.filter((t) => t[0] === 't');
+    expect(tTags).toHaveLength(0);
+  });
+
+  it('omits the branch-name tag when branchTag is not provided', () => {
     const event = buildPatch(OWNER_PUBKEY, 'hello-toon', 'Fix readme', commits);
 
+    const branchNameTags = event.tags.filter((t) => t[0] === 'branch-name');
+    expect(branchNameTags).toHaveLength(0);
     const tTags = event.tags.filter((t) => t[0] === 't');
     expect(tTags).toHaveLength(0);
   });
@@ -431,7 +448,7 @@ describe('buildPatch (kind:1617)', () => {
       expect.arrayContaining([
         ['subject', 'Fix readme'],
         ['commit', 'abc123'],
-        ['t', 'feature/fix'],
+        ['branch-name', 'feature/fix'],
       ])
     );
   });
