@@ -770,6 +770,48 @@ export class GitRepoReader {
   }
 
   /**
+   * SHAs of the repo's ROOT commits — the parentless commits a history starts
+   * from — via `git rev-list --max-parents=0`.
+   *
+   * The repo's *earliest unique commit* (NIP-34's `euc` fork-identity tag) is
+   * chosen from these; the choosing rule lives in `repo-announcement.ts`.
+   *
+   * @param rev - Consider only roots reachable from this revision. Omit for
+   *   every root in the repository (`--all`).
+   * @returns The roots in `rev-list` order, or `[]` when the revision does not
+   *   resolve — an unborn `HEAD` in a repo with no commits is not an error.
+   */
+  async rootCommits(rev?: string): Promise<string[]> {
+    const args = ['rev-list', '--max-parents=0'];
+    if (rev === undefined) {
+      args.push('--all');
+    } else {
+      assertRevision(rev, 'rev');
+      args.push(rev);
+    }
+    args.push('--'); // nothing supplied can become a pathspec
+    // Exit 128 = the revision does not resolve (unborn HEAD) — "no roots".
+    const { stdout, exitCode } = await this.git(args, {
+      allowExitCodes: [128],
+    });
+    if (exitCode !== 0) return [];
+    const roots: string[] = [];
+    for (const line of stdout.split('\n')) {
+      const sha = line.trim();
+      if (!sha) continue;
+      if (!FULL_SHA_RE.test(sha)) {
+        throw new GitError(
+          `unexpected rev-list --max-parents=0 line: ${JSON.stringify(line)}`,
+          undefined,
+          ''
+        );
+      }
+      roots.push(sha);
+    }
+    return roots;
+  }
+
+  /**
    * Resolve a ref/revision to a full SHA via `git rev-parse --verify`.
    * Throws {@link GitError} when the name doesn't resolve.
    */

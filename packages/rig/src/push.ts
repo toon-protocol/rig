@@ -33,9 +33,12 @@
 
 import {
   MAX_ARWEAVE_TAGS_PER_EVENT,
-  buildRepoAnnouncement,
   buildRepoRefs,
 } from './nip34-events.js';
+import {
+  amendRepoAnnouncement,
+  earliestUniqueCommit,
+} from './repo-announcement.js';
 import {
   EMPTY_BLOB_SHA,
   MAX_OBJECT_SIZE,
@@ -207,8 +210,19 @@ export interface PushPlan {
   knownShaToTxId: Map<string, string>;
   /** True when no kind:30617 exists yet — executePush announces first. */
   announceNeeded: boolean;
-  /** Announcement metadata used when {@link announceNeeded}. */
-  announcement: { name: string; description: string };
+  /**
+   * Announcement metadata used when {@link announceNeeded}. `web` and
+   * `earliestUniqueCommit` are the NIP-34 conformance tags (#158); the
+   * `relays` tag comes from the relay list `executePush` publishes to.
+   */
+  announcement: {
+    name: string;
+    description: string;
+    /** The repo's rig-web viewer URL (`repoWebUrl`), when one is known. */
+    web?: string;
+    /** The repo's `["r", "<sha>", "euc"]` fork identity, from local git. */
+    earliestUniqueCommit?: string;
+  };
   estimate: PushFeeEstimate;
 }
 
@@ -227,8 +241,12 @@ export interface PlanPushOptions {
   refs?: string[];
   /** Allow non-fast-forward updates (default false → hard error). */
   force?: boolean;
-  /** Repo name/description for the first-push announcement. */
-  announcement?: { name?: string; description?: string };
+  /**
+   * Repo metadata for the first-push announcement. `web` is the repo's
+   * rig-web viewer URL (`repoWebUrl` — the CLI supplies it once a relay is
+   * resolved); the `euc` is computed here from `repoReader`.
+   */
+  announcement?: { name?: string; description?: string; web?: string };
   /**
    * Async resolver for SHAs the remote's `arweave` tags don't cover —
    * consulted before deciding to re-upload. Defaults to
@@ -409,6 +427,10 @@ export async function planPush(options: PlanPushOptions): Promise<PushPlan> {
   // an optional per-KiB slope a metered store route publishes. `uploadChargeFor`
   // is the one rule for both, so the confirm table equals what is paid.
   const announceNeeded = !remoteState.announced;
+  // The `euc` (#158) is local-git only, and only a FIRST announcement needs
+  // it: a repo that is already announced is never republished by a push, and
+  // an announced euc is never recomputed.
+  const euc = announceNeeded ? await earliestUniqueCommit(repoReader) : null;
   const totalObjectBytes = objects.reduce((sum, o) => sum + o.size, 0);
   // Per object: the store route's base price plus, on a metered route (ADR
   // 0065 schedule), its per-KiB rate over the sealed payload — the same rule
@@ -432,6 +454,8 @@ export async function planPush(options: PlanPushOptions): Promise<PushPlan> {
     announcement: {
       name: options.announcement?.name ?? repoId,
       description: options.announcement?.description ?? '',
+      ...(options.announcement?.web ? { web: options.announcement.web } : {}),
+      ...(euc ? { earliestUniqueCommit: euc } : {}),
     },
     estimate: {
       objectCount: objects.length,
@@ -644,11 +668,20 @@ export async function executePush(
   // twice.
   let announceReceipt: PublishReceipt | null = null;
   if (plan.announceNeeded && !remoteState.announced) {
-    const announceEvent = buildRepoAnnouncement(
-      plan.repoId,
-      plan.announcement.name,
-      plan.announcement.description
-    );
+    // #158: a FIRST announcement carries the NIP-34 conformance tags —
+    // `relays` (where this publish went, so other clients find the repo's
+    // issues and patches), `web` (the rig-web viewer), and the `euc` fork
+    // identity. No `clone`: rig has no git-clonable URL.
+    const announceEvent = amendRepoAnnouncement(null, {
+      repoId: plan.repoId,
+      name: plan.announcement.name,
+      description: plan.announcement.description,
+      relays: relayUrls,
+      ...(plan.announcement.web ? { web: [plan.announcement.web] } : {}),
+      ...(plan.announcement.earliestUniqueCommit
+        ? { earliestUniqueCommit: plan.announcement.earliestUniqueCommit }
+        : {}),
+    });
     announceReceipt = await publisher.publishEvent(announceEvent, relayUrls);
     totalFeePaid += announceReceipt.feePaid;
   }

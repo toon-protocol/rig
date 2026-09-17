@@ -1,9 +1,12 @@
 /**
- * Human-facing rendering for `rig push`: the pre-push confirm table and the
- * post-push receipts. Machine consumers use `--json` instead (the raw wire
- * shapes from ../routes.ts) — nothing here is meant to be parsed.
+ * Human-facing rendering for `rig push` and the kind:30617 republishes: the
+ * pre-push confirm table, the post-push receipts, and the tag diff a paid
+ * announcement republish shows before it asks. Machine consumers use `--json`
+ * instead (the raw wire shapes from ../routes.ts) — nothing here is meant to
+ * be parsed.
  */
 
+import type { AnnouncementDiff } from '../repo-announcement.js';
 import type {
   GitEstimateResponse,
   GitEventResponse,
@@ -11,6 +14,18 @@ import type {
   GitRefUpdate,
   GitRepoAddr,
 } from '../routes.js';
+
+/**
+ * One indented line per changed tag of a kind:30617 republish — `-` for what
+ * goes, `+` for what arrives (#158). This is what the owner reads before
+ * confirming the fee, so it shows whole tags, values included.
+ */
+export function describeAnnouncementDiff(diff: AnnouncementDiff): string[] {
+  return [
+    ...diff.removed.map((tag) => `  - ${tag.join(' ')}`),
+    ...diff.added.map((tag) => `  + ${tag.join(' ')}`),
+  ];
+}
 
 /** Group thousands for readability: 1234567 → '1,234,567'. */
 export function formatNumber(value: number | string | bigint): string {

@@ -137,7 +137,24 @@ export function repoAuthorizedAuthors(repo: RepoMetadata): Set<string> {
   return new Set([repo.ownerPubkey.toLowerCase(), ...repo.maintainers]);
 }
 
-/** Maximum number of refs to parse from a single kind:30618 event. */
+/**
+ * Union a target's own author into the repo-wide authorized set (rig#160):
+ * the target's own author is ALSO authorized to move its own status, on top
+ * of the repo-wide {@link repoAuthorizedAuthors} set (see
+ * {@link resolvePRStatus} / {@link resolveIssueStatus}'s doc comments).
+ * Returns a NEW Set; does not mutate `authorized`.
+ */
+export function withTargetAuthor(
+  authorized: ReadonlySet<string>,
+  targetAuthorPubkey: string
+): Set<string> {
+  return new Set([...authorized, targetAuthorPubkey.toLowerCase()]);
+}
+
+/**
+ * Maximum number of DISTINCT refs parsed from a single kind:30618 event,
+ * counted across both tag shapes combined (see {@link parseRepoRefs}).
+ */
 const MAX_REFS_PER_EVENT = 1000;
 
 /**
@@ -150,6 +167,35 @@ const MAX_REFS_PER_EVENT = 1000;
  */
 const MAX_ARWEAVE_TAGS_PER_EVENT = 2000;
 
+/** Tag-name prefixes that make a NIP-34-shaped tag a ref. */
+const NIP_REF_PREFIXES = ['refs/heads/', 'refs/tags/'] as const;
+
+/** Suffix marking a peeled annotated-tag entry: `refs/tags/v1.0.0^{}`. */
+const PEELED_SUFFIX = '^{}';
+
+/** Is this tag NAME a NIP-34-shaped ref path? */
+function isNipRefTagName(name: string): boolean {
+  return NIP_REF_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
+/**
+ * Merge the two shapes' refs into one map: NIP shape first, so it both wins
+ * every same-ref disagreement and takes first claim on the cap's slots;
+ * legacy refs fill whatever remains.
+ */
+function mergeRefShapes(
+  nip: Map<string, string>,
+  legacy: Map<string, string>
+): Map<string, string> {
+  const refs = new Map([...nip].slice(0, MAX_REFS_PER_EVENT));
+  for (const [refname, sha] of legacy) {
+    if (refs.size >= MAX_REFS_PER_EVENT) break;
+    if (nip.has(refname)) continue;
+    refs.set(refname, sha);
+  }
+  return refs;
+}
+
 /** Parsed repository refs from a kind:30618 event. */
 export interface RepoRefs {
   repoId: string;
@@ -157,30 +203,68 @@ export interface RepoRefs {
   arweaveMap: Map<string, string>;
 }
 
-/** Parse a kind:30618 repository refs event into RepoRefs. */
+/**
+ * Parse a kind:30618 repository refs event into RepoRefs, accepting BOTH ref
+ * tag shapes (rig#156, spec rig#153):
+ *
+ *  - **NIP-34 shape** — `["refs/heads/main", "<sha>"]`, where the ref path IS
+ *    the tag name. What NIP-34 specifies and what ngit, gitworkshop.dev and
+ *    the rest of the ecosystem write.
+ *  - **Legacy rig shape** — `["r", "refs/heads/main", "<sha>"]`, rig's own
+ *    spelling, read forever so every repo pushed before rig#153 keeps
+ *    rendering.
+ *
+ * A NIP-shape name ending in `^{}` is a PEELED annotated tag (ngit emits
+ * these): not a ref, not listed. When both shapes name the same ref with
+ * different shas the NIP shape wins, whichever came first in tag order. The
+ * cap counts distinct refs across both shapes combined.
+ *
+ * This is a deliberate COPY of `@toon-protocol/rig`'s `nip34-refs.ts`, which
+ * rig-web cannot import — see this file's header for why, and keep the two in
+ * step. Both are tested against the same captured ngit events
+ * (`./__fixtures__/ngit-wire.ts`).
+ *
+ * ONE deliberate divergence from the rig-side parser: {@link RepoRefs} has no
+ * field for a `HEAD` symref, so symref tags are not extracted here. A NIP-34
+ * `["HEAD", "ref: refs/heads/main"]` is simply ignored (`HEAD` is not a
+ * ref-path prefix), while rig's legacy `["r", "HEAD", …]` keeps landing in
+ * `refs` under the key `HEAD` exactly as it did before rig#156 — rig-web's
+ * callers (`ref-resolver.ts`) already look for that key, so changing it would
+ * be a view-model change this read-only ticket does not ask for.
+ */
 export function parseRepoRefs(event: NostrEvent): RepoRefs | null {
   if (event.kind !== 30618) return null;
 
   const dTag = getTagValue(event.tags, 'd');
   if (!dTag) return null;
 
-  const refs = new Map<string, string>();
+  // Each shape is staged on its own, then merged NIP-first (see
+  // mergeRefShapes). Both staging maps are themselves bounded, so a relay
+  // that serves a million ref tags costs bounded memory.
+  const nip = new Map<string, string>();
+  const legacy = new Map<string, string>();
   const arweaveMap = new Map<string, string>();
+
   for (const tag of event.tags) {
-    if (tag[0] === 'r' && tag[1] && tag[2]) {
-      // `continue`, not `break`: hitting the ref cap must skip the surplus
-      // ref, not abandon the event — a `break` here dropped every `arweave`
-      // tag that followed, emptying the object map (#162). This matches
-      // `parseRefsEvent` in @toon-protocol/rig, which has always continued.
-      if (refs.size >= MAX_REFS_PER_EVENT) continue;
-      refs.set(tag[1], tag[2]);
-    } else if (tag[0] === 'arweave' && tag[1] && tag[2]) {
+    const name = tag[0];
+    if (name === undefined) continue;
+    if (name === 'r' && tag[1] && tag[2]) {
+      if (legacy.size < MAX_REFS_PER_EVENT || legacy.has(tag[1])) {
+        legacy.set(tag[1], tag[2]);
+      }
+    } else if (name === 'arweave' && tag[1] && tag[2]) {
       if (arweaveMap.size >= MAX_ARWEAVE_TAGS_PER_EVENT) continue;
       arweaveMap.set(tag[1], tag[2]);
+    } else if (
+      tag[1] &&
+      isNipRefTagName(name) &&
+      !name.endsWith(PEELED_SUFFIX)
+    ) {
+      if (nip.size < MAX_REFS_PER_EVENT || nip.has(name)) nip.set(name, tag[1]);
     }
   }
 
-  return { repoId: dTag, refs, arweaveMap };
+  return { repoId: dTag, refs: mergeRefShapes(nip, legacy), arweaveMap };
 }
 
 /** Parse a kind:30617 repository announcement event into RepoMetadata. */
@@ -258,13 +342,39 @@ export interface PRMetadata {
   labels?: string[];
 }
 
-/** Parsed comment metadata from a kind:1622 event. */
+/**
+ * NIP-22 comment — the kind NIP-34's "Replies" clause mandates, and the only
+ * kind rig writes since rig#159.
+ */
+export const COMMENT_KIND = 1111;
+/**
+ * rig's pre-#159 comment dialect. READ-ONLY: never written again, merged with
+ * {@link COMMENT_KIND} by `createdAt` so old threads keep rendering.
+ */
+export const LEGACY_COMMENT_KIND = 1622;
+
+/** The only two kinds a comment can arrive as. */
+export type CommentKind = typeof COMMENT_KIND | typeof LEGACY_COMMENT_KIND;
+
+/** Parsed comment metadata from a kind:1111 or legacy kind:1622 event. */
 export interface CommentMetadata {
   eventId: string;
   content: string;
   authorPubkey: string;
   createdAt: number;
+  /**
+   * The item this comment replies to — the lowercase `e` tag. Equals
+   * {@link rootEventId} for a top-level comment; another comment's id for a
+   * nested reply.
+   */
   parentEventId: string;
+  /**
+   * The issue/patch at the top of the thread — the UPPERCASE `E` tag on a
+   * kind:1111, the lone `e` tag on a legacy kind:1622.
+   */
+  rootEventId: string;
+  /** Wire kind this comment arrived as: 1111 (NIP-22) or 1622 (legacy). */
+  kind: CommentKind;
 }
 
 /** Parse a kind:1621 issue event into IssueMetadata. */
@@ -315,7 +425,14 @@ export function parsePR(event: NostrEvent): PRMetadata | null {
 
   const title = getTagValue(event.tags, 'subject') ?? '';
   const commitShas = getTagValues(event.tags, 'commit');
-  const baseBranch = getTagValue(event.tags, 'branch') ?? 'main';
+  // #161: `branch-name` is what new patches (and kind:1618 PRs, per NIP-34)
+  // write; `branch` is the legacy spelling rig used to read (and still may,
+  // on old events). Never fall back to `t` — a legacy patch that only
+  // carries the branch there is not guessed at.
+  const baseBranch =
+    getTagValue(event.tags, 'branch-name') ??
+    getTagValue(event.tags, 'branch') ??
+    'main';
   const description = getTagValue(event.tags, 'description');
 
   return {
@@ -421,12 +538,36 @@ function latestAuthorizedEvent(
   return latest;
 }
 
-/** Parse a kind:1622 comment event into CommentMetadata. */
+/**
+ * Parse a comment event into CommentMetadata — NIP-22 kind:1111 or the legacy
+ * kind:1622 dialect (rig#159).
+ *
+ * A kind:1111 carries BOTH scopes: the UPPERCASE `E` names the thread root
+ * (the issue or patch), the lowercase `e` its immediate parent (the root
+ * itself for a top-level comment, another comment for a reply). One without
+ * an `E` tag is not an issue/patch comment we can place and is rejected.
+ * Legacy kind:1622 has only the lowercase `e`, which IS its root.
+ */
 export function parseComment(event: NostrEvent): CommentMetadata | null {
-  if (event.kind !== 1622) return null;
+  if (event.kind === LEGACY_COMMENT_KIND) {
+    const parentEventId = getTagValue(event.tags, 'e');
+    if (!parentEventId) return null;
+    return {
+      eventId: event.id,
+      content: event.content,
+      authorPubkey: event.pubkey,
+      createdAt: event.created_at,
+      parentEventId,
+      rootEventId: parentEventId,
+      kind: LEGACY_COMMENT_KIND,
+    };
+  }
 
-  const parentEventId = getTagValue(event.tags, 'e');
-  if (!parentEventId) return null;
+  if (event.kind !== COMMENT_KIND) return null;
+
+  const rootEventId = getTagValue(event.tags, 'E');
+  if (!rootEventId) return null;
+  const parentEventId = getTagValue(event.tags, 'e') ?? rootEventId;
 
   return {
     eventId: event.id,
@@ -434,7 +575,30 @@ export function parseComment(event: NostrEvent): CommentMetadata | null {
     authorPubkey: event.pubkey,
     createdAt: event.created_at,
     parentEventId,
+    rootEventId,
+    kind: COMMENT_KIND,
   };
+}
+
+/**
+ * Does `event` belong to the comment thread rooted at `rootEventId`?
+ *
+ * kind:1111 membership is decided by the UPPERCASE `E` tag, matched
+ * case-sensitively — the same rule {@link parsePRUpdate} applies to kind:1619.
+ * A kind:1111 whose only match is a lowercase `e` replies to something else
+ * and is NOT in this thread.
+ */
+export function commentBelongsToThread(
+  event: NostrEvent,
+  rootEventId: string
+): boolean {
+  if (event.kind === COMMENT_KIND) {
+    return event.tags.some((t) => t[0] === 'E' && t[1] === rootEventId);
+  }
+  if (event.kind === LEGACY_COMMENT_KIND) {
+    return event.tags.some((t) => t[0] === 'e' && t[1] === rootEventId);
+  }
+  return false;
 }
 
 /** kind:1630-1633 → the PR status each one sets. */
@@ -448,10 +612,17 @@ const KIND_STATUS_MAP: Record<number, 'open' | 'applied' | 'closed' | 'draft'> =
 /**
  * Resolve the status of a PR from status events (kind:1630-1633), honoring
  * ONLY events signed by an AUTHORIZED author — the repo owner ∪ declared
- * maintainers (#287; see {@link repoAuthorizedAuthors}). The relay is
- * permissionless, so any funded stranger can PUBLISH a kind:163x against a PR;
- * this consumer-side filter ensures such spoofed events NEVER move the
- * displayed state. Among authorized events the latest (by created_at) wins.
+ * maintainers ∪ the PR's own author (#287, rig#160; see
+ * {@link repoAuthorizedAuthors} — callers union in the target's own author
+ * per-PR, since it varies per target while the repo-wide set does not; see
+ * `use-prs.ts`). The `e` tag match is on `tags[1]` only via
+ * {@link getTagValue}, so both the NIP-10 marker form
+ * (`["e", <id>, "", "root"]`) and the legacy bare form (`["e", <id>]`) are
+ * honored identically. The relay is permissionless, so any funded stranger
+ * can PUBLISH a kind:163x against a PR; this consumer-side filter ensures
+ * such spoofed events NEVER move the displayed state. Among authorized
+ * events the latest (by created_at) wins, regardless of which form each
+ * used.
  *
  * `authorized` is the lowercased-hex author set. When empty (the 30617 was not
  * resolved) nothing is authoritative and the PR resolves to open — a safe,
@@ -473,9 +644,12 @@ export function resolvePRStatus(
 
 /**
  * Resolve the status of an issue from close events (kind:1632), honoring ONLY
- * events signed by an AUTHORIZED author (owner ∪ maintainers, #287). An
- * unauthorized close event does NOT close the issue. `authorized` is the
- * lowercased-hex author set (see {@link repoAuthorizedAuthors}).
+ * events signed by an AUTHORIZED author (owner ∪ maintainers ∪ the issue's
+ * own author, #287, rig#160). An unauthorized close event does NOT close the
+ * issue. The `e` tag match is on `tags[1]` only, so both the NIP-10 marker
+ * form and the legacy bare form are honored identically. `authorized` is the
+ * lowercased-hex author set (see {@link repoAuthorizedAuthors} — callers
+ * union in the target's own author per-issue; see `use-issues.ts`).
  */
 export function resolveIssueStatus(
   issueEventId: string,

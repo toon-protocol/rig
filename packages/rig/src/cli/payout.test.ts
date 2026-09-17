@@ -15,8 +15,14 @@ import { parseMaintainers, parsePayout } from '../nip34-events.js';
 import type { CliIo } from './output.js';
 import type { EventCommandDeps } from './events.js';
 import { runPayout } from './payout.js';
+import { repoWebUrl } from '../rig-pointer.js';
 import type { StandaloneContext } from './standalone-context.js';
-import { filterEvents, makeMockRelayFactory } from './read-testkit.js';
+import {
+  filterEvents,
+  foreignAnnouncementTags,
+  makeMockRelayFactory,
+  survivingForeignTags,
+} from './read-testkit.js';
 
 const OWNER = 'ab'.repeat(32);
 const M1 = 'cd'.repeat(32);
@@ -125,6 +131,14 @@ function makeDeps(
 
 const ADDR = ['--repo-id', REPO, '--owner', OWNER, '--relay', RELAY];
 
+const FOREIGN_TAGS = foreignAnnouncementTags(OWNER, M1);
+
+/** An announcement as another NIP-34 client (ngit) wrote it. */
+function foreignAnnouncement(overrides: { payout?: string } = {}): NostrEvent {
+  const base = announcement(OWNER, { maintainers: [M1], ...overrides });
+  return { ...base, tags: [...base.tags, ...FOREIGN_TAGS] };
+}
+
 describe('rig payout show (free)', () => {
   it('prints the declared payout pointer', async () => {
     const io = makeIo();
@@ -190,6 +204,44 @@ describe('rig payout set/clear (paid, owner-only)', () => {
     expect(event.tags).toContainEqual(['description', 'Keep this']);
     expect(parseMaintainers(event.tags)).toEqual([M1]);
     expect(relayUrls).toEqual([RELAY]);
+  });
+
+  it('set preserves every tag rig does not model, in order (#154)', async () => {
+    const io = makeIo();
+    const fake = makeStandalone();
+    const code = await runPayout(
+      ['set', ADDR1, ...ADDR, '--yes'],
+      makeDeps(io, fake, [foreignAnnouncement()])
+    );
+    expect(code).toBe(0);
+    const first = fake.published[0];
+    if (!first) throw new Error('expected a published event');
+    expect(survivingForeignTags(first.event.tags, FOREIGN_TAGS)).toEqual(
+      FOREIGN_TAGS
+    );
+    // …and the field being edited is the only thing that changed.
+    expect(parsePayout(first.event.tags)).toEqual({
+      chain: 'evm',
+      address: ADDR1,
+    });
+    expect(parseMaintainers(first.event.tags)).toEqual([M1]);
+  });
+
+  it('clear preserves every tag rig does not model, in order (#154)', async () => {
+    const io = makeIo();
+    const fake = makeStandalone();
+    const code = await runPayout(
+      ['clear', ...ADDR, '--yes'],
+      makeDeps(io, fake, [foreignAnnouncement({ payout: ADDR1 })])
+    );
+    expect(code).toBe(0);
+    const first = fake.published[0];
+    if (!first) throw new Error('expected a published event');
+    expect(survivingForeignTags(first.event.tags, FOREIGN_TAGS)).toEqual(
+      FOREIGN_TAGS
+    );
+    expect(parsePayout(first.event.tags)).toBeNull();
+    expect(parseMaintainers(first.event.tags)).toEqual([M1]);
   });
 
   it('set normalizes a lowercase address to its EIP-55 checksummed form', async () => {
@@ -324,6 +376,26 @@ describe('rig payout set/clear (paid, owner-only)', () => {
       executed: false,
       payout: { chain: 'evm', address: ADDR1 },
     });
+  });
+
+  it('backfills the #158 conformance tags on a republish', async () => {
+    const io = makeIo();
+    const fake = makeStandalone();
+    const LOCAL_ROOT = 'a1'.repeat(20);
+    const code = await runPayout(['set', ADDR1, ...ADDR, '--yes'], {
+      ...makeDeps(io, fake, [announcement(OWNER)]),
+      rootCommits: async () => [LOCAL_ROOT],
+    });
+    expect(code).toBe(0);
+    const tags = fake.published[0]?.event.tags ?? [];
+    expect(tags).toContainEqual(['relays', RELAY]);
+    expect(tags).toContainEqual([
+      'web',
+      repoWebUrl({ env: {}, relay: RELAY, ownerPubkey: OWNER, repoId: REPO }),
+    ]);
+    expect(tags).toContainEqual(['r', LOCAL_ROOT, 'euc']);
+    // …and the payout edit it was asked for still happened.
+    expect(parsePayout(tags)).toEqual({ chain: 'evm', address: ADDR1 });
   });
 
   it('validates the address and subcommand (exit 2)', async () => {

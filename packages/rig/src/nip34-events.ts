@@ -23,8 +23,18 @@ import type {
 // Kinds not (yet) exported by @toon-protocol/core/nip34:
 /** Repository State (refs) — replaceable, pairs with kind:30617 via `d` tag. */
 export const REPOSITORY_STATE_KIND = 30618;
-/** Comment on an issue or patch (NIP-22 style threading within NIP-34). */
-export const COMMENT_KIND = 1622;
+/**
+ * Comment on an issue or patch — NIP-22 `kind:1111`, which NIP-34's "Replies"
+ * clause mandates ("Replies … should follow NIP-22 comment"). This is the kind
+ * rig WRITES (rig#159).
+ */
+export const COMMENT_KIND = 1111;
+/**
+ * rig's pre-#159 private comment dialect. READ-ONLY: never written again, kept
+ * so threads published before that release keep rendering. Every reader merges
+ * it with {@link COMMENT_KIND} by `created_at`.
+ */
+export const LEGACY_COMMENT_KIND = 1622;
 
 // ---------------------------------------------------------------------------
 // UnsignedEvent type (subset of nostr-tools — no id, sig, or pubkey)
@@ -53,6 +63,18 @@ export interface UnsignedEvent {
 export const MAINTAINERS_TAG = 'maintainers';
 
 const HEX64 = /^[0-9a-f]{64}$/;
+
+/**
+ * First value of the named tag, or `undefined`. Tag names are matched
+ * CASE-SENSITIVELY, exactly as NIP-01 defines them: `E` (a NIP-22 root scope)
+ * is a different tag from `e` (the parent item).
+ */
+export function firstTagValue(
+  tags: string[][],
+  name: string
+): string | undefined {
+  return tags.find((t) => t[0] === name)?.[1];
+}
 
 /**
  * Collect the declared maintainer pubkeys (lowercased hex) from a kind:30617
@@ -171,56 +193,6 @@ export function parsePayout(tags: string[][]): PayoutPointer | null {
   return result;
 }
 
-/**
- * Build a kind:30617 repository announcement event.
- *
- * @param repoId - Repository identifier (d tag)
- * @param name - Human-readable repository name
- * @param description - Repository description
- * @param maintainers - Optional declared maintainer pubkeys (hex). Emitted as
- *   a single `["maintainers", …]` tag when non-empty; duplicate and non-64-hex
- *   values are dropped. The owner (the signer) is an implicit maintainer and
- *   need not be listed — if passed it is emitted, which is harmless since the
- *   owner is authorized regardless. See {@link MAINTAINERS_TAG}.
- * @param payout - Optional declared payout pointer (rig#92). Emitted as a
- *   single `["payout", "evm", <address>]` tag when given; omit (or pass
- *   `null`) to leave the repo with no payout pointer. See {@link PAYOUT_TAG}.
- */
-export function buildRepoAnnouncement(
-  repoId: string,
-  name: string,
-  description: string,
-  maintainers: string[] = [],
-  payout?: PayoutPointer | null
-): UnsignedEvent {
-  const tags: string[][] = [
-    ['d', repoId],
-    ['name', name],
-    ['description', description],
-  ];
-  const declared: string[] = [];
-  const seen = new Set<string>();
-  for (const value of maintainers) {
-    const hex = value.toLowerCase();
-    if (HEX64.test(hex) && !seen.has(hex)) {
-      seen.add(hex);
-      declared.push(hex);
-    }
-  }
-  if (declared.length > 0) {
-    tags.push([MAINTAINERS_TAG, ...declared]);
-  }
-  if (payout) {
-    tags.push([PAYOUT_TAG, payout.chain, payout.address]);
-  }
-  return {
-    kind: REPOSITORY_ANNOUNCEMENT_KIND,
-    content: '',
-    tags,
-    created_at: Math.floor(Date.now() / 1000),
-  };
-}
-
 // ---------------------------------------------------------------------------
 // kind:30618 — Repository Refs/State
 // ---------------------------------------------------------------------------
@@ -273,6 +245,16 @@ export const MAX_ARWEAVE_TAGS_PER_EVENT = 2000;
 /**
  * Build a kind:30618 repository refs/state event.
  *
+ * Writes each ref in BOTH shapes, with identical SHAs (rig#157, dual-write
+ * window): the NIP-34 shape `[<refPath>, <sha>]`, where the ref path IS the
+ * tag name — what ngit, gitworkshop.dev and every other conformant client
+ * read — alongside rig's legacy `["r", <refPath>, <sha>]`, so rig installs
+ * older than this release keep fetching. Both shapes are read by
+ * {@link parseStateRefTags} in `./nip34-refs.ts` and by any legacy-only
+ * reader that only knows the `r` shape. `HEAD` and `arweave` tags are
+ * unaffected by this dual-write. The legacy write is removed in a later,
+ * separately ticketed change once older rig versions are unsupported.
+ *
  * At most {@link MAX_ARWEAVE_TAGS_PER_EVENT} `arweave` tags are emitted; a
  * larger `arweaveMap` is truncated to its first entries in iteration order,
  * so the caller decides priority (see `executePush`) and a repo under the cap
@@ -289,9 +271,10 @@ export function buildRepoRefs(
 ): UnsignedEvent {
   const tags: string[][] = [['d', repoId]];
 
-  // Add ref tags
+  // Add ref tags, dual-written in both shapes (rig#157).
   for (const [refPath, commitSha] of Object.entries(refs)) {
-    tags.push(['r', refPath, commitSha]);
+    tags.push([refPath, commitSha]); // NIP-34 shape: ref path is the tag name
+    tags.push(['r', refPath, commitSha]); // legacy shape, dual-write window
   }
 
   // Default HEAD to first ref (typically refs/heads/main)
@@ -353,37 +336,113 @@ export function buildIssue(
 }
 
 // ---------------------------------------------------------------------------
-// kind:1622 — Comment (on issue or PR)
+// kind:1111 — NIP-22 comment (on an issue or patch)
 // ---------------------------------------------------------------------------
 
 /**
- * Build a kind:1622 comment event.
+ * The event a comment thread hangs off: the kind:1621 issue or kind:1617
+ * patch being discussed — NEVER the repository. Becomes the comment's
+ * uppercase NIP-22 root scope (`E`/`K`/`P`).
+ */
+export interface CommentRoot {
+  /** Event id of the issue/patch (uppercase `E`). */
+  eventId: string;
+  /** Kind of that event, e.g. 1621 or 1617 (uppercase `K`). */
+  kind: number;
+  /** Pubkey of that event's author (uppercase `P`). */
+  authorPubkey: string;
+}
+
+/**
+ * The kind:1111 comment being replied to, when the new comment is a nested
+ * reply rather than a top-level comment. Becomes the lowercase parent
+ * (`e`/`k`/`p`), with `k` always {@link COMMENT_KIND}.
+ */
+export interface CommentParent {
+  /** Event id of the comment replied to (lowercase `e`). */
+  eventId: string;
+  /** Pubkey of that comment's author (lowercase `p`). */
+  authorPubkey: string;
+}
+
+/**
+ * Build a NIP-22 kind:1111 comment on a NIP-34 issue or patch (rig#159).
+ *
+ * NIP-22: "Comments MUST point to the root scope using uppercase tag names
+ * (e.g. `K`, `E`, `A` or `I`)" and "MUST point to the parent item with
+ * lowercase ones (e.g. `k`, `e`, `a` or `i`)", with "`P` for the root scope
+ * and `p` for the author of the parent item". So:
+ *
+ * - top-level comment → parent === root: `e`/`k`/`p` repeat `E`/`K`/`P`;
+ * - reply → `e` is the parent comment, `k` is `1111`, `p` its author, while
+ *   `E`/`K`/`P` still name the issue/patch at the top of the thread.
+ *
+ * The repo coordinate rides along as an ordinary lowercase `a` tag so a
+ * subscription can scope a whole repo's comments with one `#a` filter (spec
+ * rig#153). It is deliberately NOT the NIP-22 parent pointer — the parent is
+ * the `e` tag — so it is emitted last, after the six threading tags.
  *
  * @param repoOwnerPubkey - Pubkey of the repository owner
- * @param repoId - Repository identifier
- * @param issueOrPrEventId - Event ID of the issue or PR being commented on
- * @param authorPubkey - Pubkey of the issue/PR author (NIP-34 `p` tag for threading), NOT the comment author
+ * @param repoId - Repository identifier (NIP-34 `d` tag)
+ * @param root - The issue/patch the thread hangs off
  * @param body - Comment body (Markdown content)
- * @param marker - Event reference marker: 'root' or 'reply' (default: 'reply')
+ * @param parent - The kind:1111 comment being replied to; omit for a
+ *   top-level comment, whose parent is the root itself
  */
 export function buildComment(
   repoOwnerPubkey: string,
   repoId: string,
-  issueOrPrEventId: string,
-  authorPubkey: string,
+  root: CommentRoot,
   body: string,
-  marker: 'root' | 'reply' = 'reply'
+  parent?: CommentParent
 ): UnsignedEvent {
+  const parentTags: string[][] =
+    parent === undefined
+      ? [
+          ['e', root.eventId, '', root.authorPubkey],
+          ['k', String(root.kind)],
+          ['p', root.authorPubkey],
+        ]
+      : [
+          ['e', parent.eventId, '', parent.authorPubkey],
+          ['k', String(COMMENT_KIND)],
+          ['p', parent.authorPubkey],
+        ];
+
   return {
     kind: COMMENT_KIND,
     content: body,
     tags: [
+      ['E', root.eventId, '', root.authorPubkey],
+      ['K', String(root.kind)],
+      ['P', root.authorPubkey],
+      ...parentTags,
       ['a', `${REPOSITORY_ANNOUNCEMENT_KIND}:${repoOwnerPubkey}:${repoId}`],
-      ['e', issueOrPrEventId, '', marker],
-      ['p', authorPubkey],
     ],
     created_at: Math.floor(Date.now() / 1000),
   };
+}
+
+/**
+ * Does `event` belong to the comment thread rooted at `rootEventId`?
+ *
+ * kind:1111 membership is decided by the **uppercase** `E` tag, matched
+ * case-sensitively — the same rule rig already applies to kind:1619 PR
+ * updates. A kind:1111 whose only match is a lowercase `e` is a reply to
+ * something else and is NOT part of this thread. Legacy kind:1622 has no
+ * uppercase form: its `e` tag is the thread root.
+ */
+export function commentBelongsToThread(
+  event: { kind: number; tags: string[][] },
+  rootEventId: string
+): boolean {
+  if (event.kind === COMMENT_KIND) {
+    return event.tags.some((t) => t[0] === 'E' && t[1] === rootEventId);
+  }
+  if (event.kind === LEGACY_COMMENT_KIND) {
+    return event.tags.some((t) => t[0] === 'e' && t[1] === rootEventId);
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -404,7 +463,11 @@ export function buildComment(
  * @param repoId - Repository identifier
  * @param title - Patch/PR title (subject tag)
  * @param commits - Array of { sha, parentSha } for commit and parent-commit tags
- * @param branchTag - Branch name for the t tag
+ * @param branchTag - Branch name, written as the `branch-name` tag (#161) —
+ *                    the wider NIP-34 ecosystem's spelling (used verbatim by
+ *                    kind:1618 pull requests; confirmed against the NIP-34
+ *                    source at implementation time). Never written to `t`:
+ *                    that tag is reserved for real labels.
  * @param content - Real `git format-patch` text (NIP-34 patch body); defaults
  *                  to '' for callers that only reference commits by tag
  * @param description - PR body/cover text (`description` tag) — kept out of
@@ -435,7 +498,7 @@ export function buildPatch(
   }
 
   if (branchTag) {
-    tags.push(['t', branchTag]);
+    tags.push(['branch-name', branchTag]);
   }
 
   return {
@@ -460,16 +523,33 @@ export type StatusKind =
 /**
  * Build a status event (kind 1630-1633).
  *
+ * rig#153/#160: the `e` tag carries the NIP-10 `root` marker
+ * (`["e", <target>, "", "root"]`) rather than the old bare `["e", <id>]`, so
+ * clients that resolve a status's root via the marker (ngit's
+ * `get_event_root`, among others) honor rig statuses. The repo `a` tag rides
+ * along so a status stream can be scoped to the repository without first
+ * resolving the target. Readers (this package's tracker and rig-web's
+ * parsers) accept BOTH this marker form and the legacy bare form — a status
+ * is matched by `tags.find(t => t[0] === 'e')?.[1] === targetEventId`
+ * regardless of any trailing marker elements.
+ *
+ * @param repoOwnerPubkey - Pubkey of the repository owner
+ * @param repoId - Repository identifier
  * @param targetEventId - Event ID of the patch, PR, or issue being updated
  * @param statusKind - One of 1630 (open), 1631 (applied), 1632 (closed), 1633 (draft)
- * @param targetPubkey - Optional pubkey of the target event author (p tag per NIP-34 StatusEvent)
+ * @param targetPubkey - Optional pubkey of the target event author (p tag per NIP-34 StatusEvent), when known
  */
 export function buildStatus(
+  repoOwnerPubkey: string,
+  repoId: string,
   targetEventId: string,
   statusKind: StatusKind,
   targetPubkey?: string
 ): UnsignedEvent {
-  const tags: string[][] = [['e', targetEventId]];
+  const tags: string[][] = [
+    ['e', targetEventId, '', 'root'],
+    ['a', `${REPOSITORY_ANNOUNCEMENT_KIND}:${repoOwnerPubkey}:${repoId}`],
+  ];
   if (targetPubkey) {
     tags.push(['p', targetPubkey]);
   }

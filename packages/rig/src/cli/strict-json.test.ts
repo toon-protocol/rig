@@ -26,7 +26,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Publisher } from '../publisher.js';
-import type { RemoteState } from '../remote-state.js';
+import type { NostrEvent, RemoteState } from '../remote-state.js';
 import { dispatch, type DispatchDeps } from './dispatch.js';
 import { writeToonConfig } from './git-config.js';
 import {
@@ -51,6 +51,16 @@ import type {
 const OWNER = 'ab'.repeat(32);
 const HEX64 = '12'.repeat(32);
 const TX_ID = 'x'.repeat(43);
+/** The kind:1621 `rig comment HEX64` targets — served by the mock relay. */
+const COMMENT_ROOT_ISSUE: NostrEvent = {
+  id: HEX64,
+  pubkey: OWNER,
+  created_at: 1_700_000_000,
+  kind: 1621,
+  tags: [['a', `30617:${OWNER}:demo`]],
+  content: 'root issue',
+  sig: 'f0'.repeat(64),
+};
 /** Standard BIP-39 test vector phrase (public; never funded). */
 const TEST_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -489,7 +499,16 @@ describe('strict --json stdout: every rig-owned command emits exactly one JSON d
         'wss://relay.example',
         '--json',
       ],
-      { loadStandalone: makeNoisyStandalone().load }
+      {
+        loadStandalone: makeNoisyStandalone().load,
+        // `rig comment` reads its target off the relay to derive the NIP-22
+        // root (#159); keep that hermetic like every other read here.
+        seams: {
+          webSocketFactory: makeMockRelayFactory((filter) =>
+            filterEvents([COMMENT_ROOT_ISSUE], filter)
+          ),
+        },
+      }
     );
     expect(result.code).toBe(0);
     expect(parseSingleJsonDoc(result)).toMatchObject({
