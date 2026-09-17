@@ -8,6 +8,14 @@ this heading are recorded by hand; a changeset file is NOT the way to note a
 rig-web change, because an `ignore`d-only changeset is inert and blocks releases
 of `@toon-protocol/rig` (see the changeset gate in `.github/workflows/ci.yml`).
 
+- `VITE_ARWEAVE_GATEWAY` points rig-web at a self-hosted store gateway (rig#177).
+  It is tried ahead of the three public Arweave gateways at
+  `<gateway>/raw/<txId>`, with the public list kept behind it as a fallback, and
+  `vite.config.ts` splices its origin into the `connect-src`/`img-src` of the CSP
+  meta tag in dev and in build. Both halves are needed: with a hardcoded gateway
+  list AND a `connect-src` naming only the three public hosts, every repo page
+  rendered its relay data and then failed with "Could not resolve commit tree".
+
 - Default the ArNS result URL and the pointer-page asset gateway to mainnet
   ar.io gateways. `ar-io.dev` is ar.io's testnet gateway (its ArNS resolver runs
   against the Solana devnet contracts), so a mainnet name printed as

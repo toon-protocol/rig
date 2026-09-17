@@ -1,12 +1,38 @@
 import { resolve } from 'node:path';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
+
+import { withGatewayCsp } from './src/web/arweave-gateway.js';
+
+/**
+ * Let the browser actually REACH the store gateway the build reads from.
+ *
+ * `index.html` ships a CSP whose `connect-src` names only the three public
+ * Arweave gateways, so a `VITE_ARWEAVE_GATEWAY` fetch would be blocked before
+ * it left the page (rig#177). This stamps that gateway's origin into the
+ * policy in dev and in build, derived from the same env var that addresses
+ * the fetch — the host list itself is never duplicated here.
+ */
+function gatewayCspPlugin(): Plugin {
+  let gateway: string | undefined;
+  return {
+    name: 'rig-web:gateway-csp',
+    configResolved(config) {
+      gateway =
+        (config.env['VITE_ARWEAVE_GATEWAY'] as string | undefined) ??
+        process.env['VITE_ARWEAVE_GATEWAY'];
+    },
+    transformIndexHtml(html) {
+      return withGatewayCsp(html, gateway);
+    },
+  };
+}
 
 export default defineConfig({
   base: './',
   root: resolve(import.meta.dirname, 'src/web'),
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), gatewayCspPlugin()],
   resolve: {
     alias: {
       '@': resolve(import.meta.dirname, 'src/web'),

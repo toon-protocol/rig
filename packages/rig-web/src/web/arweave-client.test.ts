@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 import {
+  arweaveObjectUrl,
   fetchArweaveObject,
   resolveGitSha,
   clearShaCache,
@@ -408,5 +409,81 @@ describe('Arweave Client - 8.6-UNIT-005: seedShaCache pre-populates cache', () =
     // Should hit GraphQL, not the cache
     expect(result).toBe(graphqlTxId);
     expect(globalThis.fetch).toHaveBeenCalled();
+  });
+});
+
+// ============================================================================
+// rig#177: VITE_ARWEAVE_GATEWAY — reading from a self-hosted store gateway
+// ============================================================================
+
+describe('Arweave Client - self-hosted gateway override (rig#177)', () => {
+  const txId = 'selfHostedTxId0123456789abcdefghijklmnopqrs';
+
+  beforeEach(() => {
+    clearShaCache();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it('[P1] fetches the configured gateway FIRST, at the /raw/ route', async () => {
+    vi.stubEnv('VITE_ARWEAVE_GATEWAY', 'http://localhost:3000');
+    const responseData = new Uint8Array([9, 8, 7]);
+    mockFetch(async (url: string) => {
+      if (url === `http://localhost:3000/raw/${txId}`) {
+        return new Response(responseData, { status: 200 });
+      }
+      return new Response(null, { status: 404 });
+    });
+
+    const result = await fetchArweaveObject(txId);
+
+    expect(result).toEqual(responseData);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('[P1] falls back to the public gateways when the configured one misses', async () => {
+    vi.stubEnv('VITE_ARWEAVE_GATEWAY', 'http://localhost:3000');
+    const responseData = new Uint8Array([1, 1, 2]);
+    mockFetch(async (url: string) => {
+      if (url === `${ARWEAVE_GATEWAYS[0]}/${txId}`) {
+        return new Response(responseData, { status: 200 });
+      }
+      return new Response(null, { status: 404 });
+    });
+
+    const result = await fetchArweaveObject(txId);
+
+    expect(result).toEqual(responseData);
+  });
+
+  it('[P1] uses only the public gateways when the override is unset', async () => {
+    vi.stubEnv('VITE_ARWEAVE_GATEWAY', '');
+    const requested: string[] = [];
+    mockFetch(async (url: string) => {
+      requested.push(url);
+      return new Response(null, { status: 404 });
+    });
+
+    await fetchArweaveObject(txId);
+
+    expect(requested).toEqual(
+      ARWEAVE_GATEWAYS.map((gateway) => `${gateway}/${txId}`)
+    );
+  });
+
+  it('[P1] arweaveObjectUrl renders against the configured gateway', () => {
+    vi.stubEnv('VITE_ARWEAVE_GATEWAY', 'http://localhost:3000');
+
+    expect(arweaveObjectUrl(txId)).toBe(`http://localhost:3000/raw/${txId}`);
+  });
+
+  it('[P1] arweaveObjectUrl renders against a public gateway by default', () => {
+    vi.stubEnv('VITE_ARWEAVE_GATEWAY', '');
+
+    expect(arweaveObjectUrl(txId)).toBe(`${ARWEAVE_GATEWAYS[0]}/${txId}`);
   });
 });

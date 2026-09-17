@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { resolveGitSha, ARWEAVE_GATEWAYS } from '../arweave-client.js';
+import { resolveGitSha, arweaveObjectUrl } from '../arweave-client.js';
 import { parseGitTree } from '../git-objects.js';
 import { fetchArweaveObject } from '../arweave-client.js';
 import type { RepoRefs } from '../nip34-parsers.js';
@@ -63,7 +63,7 @@ export function useResolveImages(
 
           const blobTxId = await resolveGitSha(currentSha, repoId);
           if (blobTxId && !cancelled) {
-            replacements.set(path, `${ARWEAVE_GATEWAYS[0]}/${blobTxId}`);
+            replacements.set(path, arweaveObjectUrl(blobTxId));
           }
         } catch {
           // Skip unresolvable images
