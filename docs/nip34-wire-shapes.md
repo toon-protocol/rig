@@ -13,16 +13,15 @@ plus the read-side copy in `@toon-protocol/rig-web`) actually puts on the
 wire and accepts off it, checked against the builder/parser source and their
 tests. Where rig's behavior and the NIP diverge, that is stated plainly.
 
-**Status of this document — read before trusting it.** It was written as
-part of spec [rig#153](https://github.com/toon-protocol/rig/issues/153),
-against the _end state_ of that spec's ten tickets. At the time of writing,
-**no single branch contains all ten** — this document was assembled by
-reading six of them directly off `origin` (`nip34/154-lossless-announcement`,
-`nip34/158-announcement-conformance-tags`, `nip34/159-nip22-comments`,
-`nip34/160-status-root-marker`, `nip34/161-patch-branch-name`,
-`nip34/162-bound-object-map`) in addition to the three already on this
-branch (#155, #156, #157). **Re-verify this document against `main` once the
-full stack has landed** — nothing here was checked against `main` itself.
+**Status of this document.** It was written as part of spec
+[rig#153](https://github.com/toon-protocol/rig/issues/153), against the _end
+state_ of that spec's ten tickets (#154-#163) — originally assembled by
+reading branches that had not yet landed. **All ten have since landed on
+`main`, and every claim below was re-verified against that merged state**:
+each symbol it names, and the peeled-`^{}`, NIP-shape-wins, ref and
+object-map cap, `branch-name` read-order, `E`-tag thread-membership and
+status-authority rules. Where this document and the code disagree, the code
+is the ground truth and this document is the bug.
 
 The primary source for the comparative analysis behind spec #153 is
 `docs/research/ngit-nip34-vs-rig.md` (§6 field-level compatibility, §8

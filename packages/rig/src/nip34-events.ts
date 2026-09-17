@@ -9,10 +9,8 @@
  * The wire contract — every tag each builder writes, the NIP-34 clause it
  * follows, and any legacy shape still read (with its end condition) — is
  * `docs/nip34-wire-shapes.md`. Read that before changing a tag shape here;
- * update it after. NOTE: that document was written against the end state of
- * spec rig#153 across several branches at once (see its own "Status of this
- * document" section) — if you are reading it against a checkout that does
- * not yet match, this file's actual builders are the ground truth.
+ * update it after. Where the two disagree, this file's actual builders are
+ * the ground truth and the document is the bug.
  */
 
 import { getAddress, isAddress } from 'viem';

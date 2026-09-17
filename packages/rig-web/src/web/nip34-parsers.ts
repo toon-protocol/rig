@@ -20,10 +20,8 @@
  *
  * The wire contract these parsers read — every tag, its NIP-34 clause, and
  * any legacy shape still accepted, with its end condition — is documented in
- * `docs/nip34-wire-shapes.md` at the repo root. NOTE that document also
- * describes tickets not on every branch (see its own "Status of this
- * document" section) — trust this file's actual parsers over the doc if
- * they disagree.
+ * `docs/nip34-wire-shapes.md` at the repo root. Where the two disagree,
+ * this file's actual parsers are the ground truth.
  */
 
 // -------------------------------------------------------------------------

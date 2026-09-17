@@ -47,9 +47,8 @@
  *
  * See `docs/nip34-wire-shapes.md` for the full kind:30618 wire contract,
  * including the dual-write end condition and the object-map (`arweave` tag)
- * cap — NOTE that document also describes tickets not on every branch; see
- * its own "Status of this document" section, and trust this file's actual
- * code over the doc if they disagree.
+ * cap. Where the two disagree, this file's actual code is the ground
+ * truth.
  */
 
 /**
