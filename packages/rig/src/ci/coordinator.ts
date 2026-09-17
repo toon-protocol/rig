@@ -303,6 +303,24 @@ export const DEFAULT_ADVERTISEMENT_TTL = 30 * 60;
 const RENEW_FRACTION = 5 / 6;
 /** How much of a job log rides in the 9841 content. */
 export const LOG_TAIL_BYTES = 4096;
+/**
+ * The most the coordinator will ever upload for one job's log (ADR-0003).
+ * `estimateRunCost`'s per-upload envelope is this same constant, so the
+ * affordability estimate is an actual bound rather than a guess.
+ */
+export const LOG_UPLOAD_CAP_BYTES = 1024 * 1024; // 1 MiB
+/** Kept from the start of an over-cap log. */
+const LOG_UPLOAD_HEAD_BYTES = 512 * 1024;
+/**
+ * Reserved out of the nominal 512 KiB tail so the marker naming the omitted
+ * count can never push the total over {@link LOG_UPLOAD_CAP_BYTES} — the
+ * marker text is under 80 bytes even for a log in the gigabytes, so this
+ * budget is never exhausted in practice.
+ */
+const LOG_UPLOAD_MARKER_BUDGET_BYTES = 256;
+/** Kept from the end of an over-cap log. */
+const LOG_UPLOAD_TAIL_BYTES =
+  512 * 1024 - LOG_UPLOAD_MARKER_BUDGET_BYTES;
 /** Rotate the secrets key at least this often (NIP-C1: no later than 86,400 s). */
 const SECRETS_KEY_MAX_AGE = 86_400;
 
@@ -319,6 +337,28 @@ export function logTail(log: string): { tail: string; omitted: number } {
     tail: cut.toString('utf-8'),
     omitted: bytes.byteLength - LOG_TAIL_BYTES,
   };
+}
+
+/**
+ * Bounds a (already-redacted) log to at most {@link LOG_UPLOAD_CAP_BYTES}
+ * (ADR-0003). Under the cap, the log is returned whole and unchanged. Over
+ * the cap, it uploads as its head + a marker naming the omitted byte count
+ * + its tail; the tail yields a few bytes to the marker so the total never
+ * exceeds the cap. Called AFTER redaction, so a secret is absent from the
+ * result whether it fell in the kept head, the kept tail, or the omitted
+ * middle.
+ */
+export function boundLogForUpload(log: string): Buffer {
+  const bytes = Buffer.from(log, 'utf-8');
+  if (bytes.byteLength <= LOG_UPLOAD_CAP_BYTES) return bytes;
+  const head = bytes.subarray(0, LOG_UPLOAD_HEAD_BYTES);
+  const tail = bytes.subarray(bytes.byteLength - LOG_UPLOAD_TAIL_BYTES);
+  const omitted = bytes.byteLength - head.byteLength - tail.byteLength;
+  const marker = Buffer.from(
+    `\n[... ${omitted} bytes omitted (log capped at ${LOG_UPLOAD_CAP_BYTES} bytes) ...]\n`,
+    'utf-8'
+  );
+  return Buffer.concat([head, marker, tail]);
 }
 
 /** `<gateway>/raw/<txId>` — the TOON store's raw-bytes route. */
@@ -779,7 +819,7 @@ export async function startCoordinator(
       const { tail, omitted } = logTail(jobLog);
       const logReceipt = await serial.run(() =>
         uploadBlob({
-          body: Buffer.from(jobLog, 'utf-8'),
+          body: boundLogForUpload(jobLog),
           contentType: 'text/plain; charset=utf-8',
           repoId: repo.repoId,
         })

@@ -35,6 +35,7 @@ import {
 import {
   DEFAULT_CONCURRENCY,
   DEFAULT_RUN_TIMEOUT_MS,
+  LOG_UPLOAD_CAP_BYTES,
   startCoordinator,
   type CanAfford,
   type ConcludedRun,
@@ -317,11 +318,14 @@ export function actRunnerOptions(
 
 /** What one run is estimated to cost, in the smallest asset unit. */
 export function estimateRunCost(estimate: RunCostEstimate): bigint {
-  // Logs and artifacts are metered per KiB on the store route; 64 KiB is a
-  // generous per-upload envelope for a log tail's full file.
+  // Logs and artifacts are metered per KiB on the store route. The
+  // per-upload envelope is LOG_UPLOAD_CAP_BYTES — the coordinator never
+  // uploads a job log larger than that (ADR-0003) — so this is an actual
+  // bound, not a guess.
   return (
     BigInt(estimate.events) * estimate.rates.eventFee +
-    BigInt(estimate.uploads) * uploadChargeFor(estimate.rates, 64 * 1024)
+    BigInt(estimate.uploads) *
+      uploadChargeFor(estimate.rates, LOG_UPLOAD_CAP_BYTES)
   );
 }
 

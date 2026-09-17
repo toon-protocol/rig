@@ -352,4 +352,57 @@ describe('log redaction', () => {
     expect(everythingPublished(world)).not.toContain('hunter2');
     await handle.stop();
   });
+
+  it('bounds an over-cap job log to head + marker + tail (ADR-0003), redacting an injected secret wherever it falls — kept head, kept tail, or the omitted middle', async () => {
+    const world = makeWorld();
+    const { announce, refsEvent } = world.snapshot(1000);
+    world.relay.serve([announce, refsEvent, serviceRequest(MAINT, 1100)]);
+
+    const runner = new FakeRunner((request) => {
+      const base = defaultFakeRunResult(request);
+      const job = must(base.jobs[0]);
+      const headToken = request.secrets['HEAD_TOKEN'] ?? '';
+      const middleToken = request.secrets['MIDDLE_TOKEN'] ?? '';
+      const tailToken = request.secrets['TAIL_TOKEN'] ?? '';
+      // Head and tail chunks are each well over the 512 KiB kept on their
+      // side, so the middle secret lands squarely in the omitted range while
+      // the head/tail secrets land in the kept portions.
+      const log =
+        `near the top: ${headToken}\n` +
+        'A'.repeat(600 * 1024) +
+        `\nin the middle: ${middleToken}\n` +
+        'B'.repeat(600 * 1024) +
+        `\nnear the end: ${tailToken}\n`;
+      return { ...base, jobs: [{ ...job, log }] };
+    });
+    const handle = await world.start({ runner });
+
+    world.relay.push(
+      secretUpdate(world, handle, MAINT, {
+        HEAD_TOKEN: 'headsecretvalue',
+        MIDDLE_TOKEN: 'middlesecretvalue',
+        TAIL_TOKEN: 'tailsecretvalue',
+      })
+    );
+    await handle.idle();
+    push(world, 2000);
+    await handle.idle();
+
+    expect(world.publisher.uploadedBlobs).toHaveLength(1);
+    const body = Buffer.from(must(world.publisher.uploadedBlobs[0]).body);
+    // Never uploads more than the cap.
+    expect(body.byteLength).toBeLessThanOrEqual(1024 * 1024);
+    const text = body.toString('utf-8');
+    // The marker names the omission.
+    expect(text).toMatch(/\[\.\.\. \d+ bytes omitted/);
+    // A secret is absent no matter which portion it fell in.
+    expect(text).not.toContain('headsecretvalue');
+    expect(text).not.toContain('middlesecretvalue');
+    expect(text).not.toContain('tailsecretvalue');
+    expect(everythingPublished(world)).not.toContain('headsecretvalue');
+    expect(everythingPublished(world)).not.toContain('middlesecretvalue');
+    expect(everythingPublished(world)).not.toContain('tailsecretvalue');
+
+    await handle.stop();
+  });
 });
