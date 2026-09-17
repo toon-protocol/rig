@@ -351,3 +351,110 @@ describe('rig fetch reads both kind:30618 ref tag shapes', () => {
     expect(doc.updates.map((u) => u.refname)).not.toContain(hostile);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The read-path gateway override (#176)
+// ---------------------------------------------------------------------------
+
+const PRIVATE_GATEWAY = 'https://gw.test';
+
+/**
+ * Point `deps` at a gateway shaped like the TOON dev sandbox's: only the
+ * store's raw-bytes route `/raw/<txId>` on one host is served, every public
+ * gateway is unreachable. The delta can only arrive through the named one.
+ */
+function rawRouteOnlyGateway(world: World, deps: ReadCommandDeps): string[] {
+  const seen: string[] = [];
+  deps.fetchFn = async (url, init) => {
+    seen.push(url);
+    const parsed = new URL(url);
+    const raw = /^\/raw\/([^/]+)$/.exec(parsed.pathname);
+    if (parsed.host !== 'gw.test' || raw === null) {
+      return { ok: false, arrayBuffer: async () => new ArrayBuffer(0) };
+    }
+    return world.gateway.fetchFn(`${PRIVATE_GATEWAY}/${raw[1]}`, init);
+  };
+  return seen;
+}
+
+describe('rig fetch --gateway (#176)', () => {
+  /** Clone, then advance + republish the source so a delta exists to fetch. */
+  async function cloneThenAdvance(world: World): Promise<string> {
+    const cloneDir = await world.clone();
+    writeFileSync(join(world.srcDir, 'new.txt'), 'delta\n');
+    git(['add', '.'], world.srcDir);
+    git(['commit', '-m', 'second'], world.srcDir);
+    world.publish();
+    world.gateway.requests.length = 0;
+    return cloneDir;
+  }
+
+  it('reads the delta through the named gateway (<url>/raw/<txId>) before the public list', async () => {
+    const world = new World();
+    const cloneDir = await cloneThenAdvance(world);
+
+    const io = makeTestIo();
+    const deps = world.deps(io, cloneDir);
+    const seen = rawRouteOnlyGateway(world, deps);
+    const code = await runFetch(['--gateway', `${PRIVATE_GATEWAY}/`], deps);
+    expect(code).toBe(0);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((u) => u.startsWith(`${PRIVATE_GATEWAY}/raw/`))).toBe(
+      true
+    );
+    expect(gitText(cloneDir, ['rev-parse', 'refs/remotes/origin/main'])).toBe(
+      gitText(world.srcDir, ['rev-parse', 'main'])
+    );
+  });
+
+  it('RIG_ARWEAVE_GATEWAY names the gateway when --gateway is absent', async () => {
+    const world = new World();
+    const cloneDir = await cloneThenAdvance(world);
+
+    const io = makeTestIo();
+    const deps = world.deps(io, cloneDir);
+    deps.env = { RIG_ARWEAVE_GATEWAY: PRIVATE_GATEWAY };
+    const seen = rawRouteOnlyGateway(world, deps);
+    const code = await runFetch([], deps);
+    expect(code).toBe(0);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((u) => u.startsWith(`${PRIVATE_GATEWAY}/raw/`))).toBe(
+      true
+    );
+    expect(gitText(cloneDir, ['rev-parse', 'refs/remotes/origin/main'])).toBe(
+      gitText(world.srcDir, ['rev-parse', 'main'])
+    );
+  });
+
+  it('keeps the public gateway list as the fallback when the named one has nothing', async () => {
+    const world = new World();
+    const cloneDir = await cloneThenAdvance(world);
+
+    const io = makeTestIo();
+    const code = await runFetch(
+      ['--gateway', PRIVATE_GATEWAY],
+      world.deps(io, cloneDir)
+    );
+    expect(code).toBe(0);
+    expect(world.gateway.requests[0]).toMatch(
+      new RegExp(`^${PRIVATE_GATEWAY}/raw/`)
+    );
+    expect(world.gateway.requests.some((u) => u.includes('ar-io.dev'))).toBe(
+      true
+    );
+    expect(gitText(cloneDir, ['rev-parse', 'refs/remotes/origin/main'])).toBe(
+      gitText(world.srcDir, ['rev-parse', 'main'])
+    );
+  });
+
+  it('leaves the public list untouched when no gateway is configured', async () => {
+    const world = new World();
+    const cloneDir = await cloneThenAdvance(world);
+
+    const io = makeTestIo();
+    const code = await runFetch([], world.deps(io, cloneDir));
+    expect(code).toBe(0);
+    expect(world.gateway.requests.length).toBeGreaterThan(0);
+    expect(world.gateway.requests.some((u) => u.includes('/raw/'))).toBe(false);
+  });
+});

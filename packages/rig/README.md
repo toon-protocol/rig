@@ -565,6 +565,11 @@ git commit --allow-empty -m 'ci: dogfood' && rig push --yes
 rig ci status HEAD --json | jq .summary
 ```
 
+`RIG_ARWEAVE_GATEWAY` in that common env also steers the READ path: `rig clone`
+and `rig fetch` try `http://localhost:3000/raw/<txId>` first, so a repo pushed to
+the sandbox clones back out of it even though the public gateways never see those
+objects (see [Reading through your own gateway](#reading-through-your-own-gateway)).
+
 The same flow, end to end and asserted, is
 `src/__integration__/ci-sandbox.integration.test.ts`; it runs only with
 `RIG_CI_SANDBOX=1` and skips itself unless the sandbox's relay, hub, store edge
@@ -773,6 +778,26 @@ worktree). Everything happens in a temp dir moved into place on success, so a fa
 clone never leaves a partial repo. `rig fetch [remote]` is the same pipeline as a
 delta: only locally-missing objects are downloaded, and `refs/remotes/<remote>/*`
 (tags → `refs/tags/*`) move with a `git fetch`-style report.
+
+### Reading through your own gateway
+
+By default both commands read from rig's shared public gateway list. A repository
+whose objects live only on a **private, local or air-gapped** gateway is invisible
+there — so `--gateway <url>` (or `RIG_ARWEAVE_GATEWAY`, the same variable `rig push`,
+`rig site` and `rig ci serve` honour) puts that gateway **first**, on the store's
+raw-bytes route `<url>/raw/<txId>`, with the public list kept behind it as the
+fallback. It is the read-path twin of `rig ci serve --gateway`.
+
+```sh
+export RIG_ARWEAVE_GATEWAY=http://localhost:3000   # the dev sandbox's gateway
+rig clone ws://localhost:7100 <owner-npub>/<repo-id>
+rig fetch                                          # or: rig fetch --gateway http://localhost:3000
+```
+
+`/raw/` and not `/<txId>`: an ar.io node serves raw transaction bytes there whether
+or not it does sandboxed-subdomain redirects, and the TOON store's own gateway
+answers on that route alone. Public gateways serve the same bytes on both, so with
+nothing configured the list is exactly as it always was.
 
 `rig issue list|show` and `rig pr list|show` are pure relay reads (kind:1621/1617 by
 the repo `#a` tag; state from kind:1630-1633, latest wins; comments under `show` —

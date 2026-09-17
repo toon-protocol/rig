@@ -46,8 +46,11 @@ import {
 } from '../standalone/channel-map.js';
 import type { Runner } from '../ci/runner.js';
 import { defaultCoordinatorStateDir } from '../ci/state.js';
-import { ARWEAVE_GATEWAYS } from '@toon-protocol/arweave';
-import { PREFERRED_GATEWAY } from '../gateway-preference.js';
+import {
+  PREFERRED_GATEWAY,
+  configuredGateway,
+  readGatewaysFor,
+} from '../gateway-preference.js';
 import { hexToNpub, ownerToHex } from '../npub.js';
 import type { CiDeps } from './ci.js';
 import { rigVersion } from './dispatch.js';
@@ -398,12 +401,9 @@ export async function runCiServe(
   // a private or local gateway (the sandbox's answers only on /raw/) is
   // otherwise unreachable on the read path, and a public one serves the same
   // bytes there as at `/<txId>`.
-  const gateway = (
-    flags.gateway ??
-    forced.env['RIG_ARWEAVE_GATEWAY'] ??
-    PREFERRED_GATEWAY
-  ).replace(/\/+$/, '');
-  const readGateways = [`${gateway}/raw`, ...ARWEAVE_GATEWAYS];
+  const gateway =
+    configuredGateway(flags.gateway, forced.env) ?? PREFERRED_GATEWAY;
+  const readGateways = readGatewaysFor(gateway);
 
   // Runner first: a missing act binary must fail BEFORE the identity is
   // loaded or anything is paid.

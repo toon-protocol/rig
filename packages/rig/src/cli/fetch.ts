@@ -12,6 +12,7 @@
  */
 
 import { parseArgs } from 'node:util';
+import { readGateways } from '../gateway-preference.js';
 import {
   isSafeRefname,
   runGit,
@@ -56,6 +57,11 @@ Options:
   --repo-id <id>       repository id / NIP-34 d-tag (default: git config)
   --owner <pubkey>     repository owner (npub or 64-char hex; default: git config)
   --relay <url>        ad-hoc relay override — bypasses the remote's URL
+  --gateway <url>      gateway to read objects through FIRST, on its raw-bytes
+                       route <url>/raw/<txId>, ahead of the public gateway
+                       list — name a private, local or air-gapped gateway to
+                       fetch objects the public ones do not carry
+                       (env RIG_ARWEAVE_GATEWAY also sets it)
   --concurrency <n>    parallel gateway downloads (default 8)
   --json               machine-readable result envelope
   -h, --help           show this help`;
@@ -113,6 +119,7 @@ export async function runFetch(
   let relayFlag: string | undefined;
   let repoIdFlag: string | undefined;
   let ownerFlag: string | undefined;
+  let gatewayFlag: string | undefined;
   let concurrency: number | undefined;
   try {
     const { values, positionals } = parseArgs({
@@ -122,6 +129,7 @@ export async function runFetch(
         relay: { type: 'string' },
         'repo-id': { type: 'string' },
         owner: { type: 'string' },
+        gateway: { type: 'string' },
         concurrency: { type: 'string' },
         help: { type: 'boolean', short: 'h', default: false },
       },
@@ -142,6 +150,7 @@ export async function runFetch(
     repoIdFlag = values['repo-id'];
     ownerFlag =
       values.owner !== undefined ? ownerToHex(values.owner) : undefined;
+    gatewayFlag = values.gateway;
     if (values.concurrency !== undefined) {
       concurrency = Number.parseInt(values.concurrency, 10);
       if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
@@ -223,6 +232,8 @@ export async function runFetch(
       shaToTxId: remoteState.shaToTxId,
       resolveMissing: (shas) => remoteState.resolveMissing(shas),
       presentLocally,
+      // `--gateway` / RIG_ARWEAVE_GATEWAY first, public list behind it (#176).
+      gateways: readGateways(gatewayFlag, deps.env),
       ...(deps.fetchFn ? { fetchFn: deps.fetchFn } : {}),
       ...(concurrency !== undefined ? { concurrency } : {}),
     });
