@@ -66,6 +66,7 @@ import {
   authorizedStatusAuthors,
 } from '../nip34-events.js';
 import type { UnsignedEvent } from '../nip34-events.js';
+import { parseStateRefTags } from '../nip34-refs.js';
 import type { FetchLike } from '../object-fetch.js';
 import type { FeeRates, Publisher } from '../publisher.js';
 import {
@@ -337,21 +338,18 @@ export function movedRefs(
   return moved;
 }
 
+/**
+ * Ref state out of a kind:30618, through the shared dual-shape parser
+ * (`../nip34-refs.ts`) — so a coordinator serves repos whose state was
+ * written by ngit or any other conformant NIP-34 client exactly as it serves
+ * rig's own (rig#156).
+ */
 function parseRefsTags(ev: NostrEvent): {
   refs: Record<string, string>;
   head: string | null;
 } {
-  const refs: Record<string, string> = {};
-  let head: string | null = null;
-  for (const [name, v1, v2] of ev.tags) {
-    if (name === 'r' && v1 && v2) {
-      if (v1 === 'HEAD' && v2.startsWith('ref: ')) head = v2.slice(5);
-      else refs[v1] = v2;
-    } else if (name === 'HEAD' && v1?.startsWith('ref: ')) {
-      head = v1.slice(5);
-    }
-  }
-  return { refs, head };
+  const { refs, headSymref } = parseStateRefTags(ev.tags);
+  return { refs: Object.fromEntries(refs), head: headSymref };
 }
 
 function tagValues(tags: string[][], name: string): string[] {

@@ -23,6 +23,7 @@ import {
   repoStateEvents,
   storeFromObjects,
   txFor,
+  type RefTagShape,
 } from './read-testkit.js';
 import type { ReadCommandDeps } from './read-seams.js';
 
@@ -87,7 +88,7 @@ class World {
   readonly gateway = makeMockGateway(this.store);
   private version = 0;
 
-  constructor() {
+  constructor(private readonly refShape: RefTagShape = 'legacy') {
     this.srcDir = makeTempDir('toon-rig-fetch-src-');
     git(['init', '--initial-branch=main'], this.srcDir);
     writeFileSync(join(this.srcDir, 'README.md'), '# demo\n');
@@ -104,6 +105,7 @@ class World {
       owner: OWNER,
       repoId: REPO,
       createdAt: 1000 + this.version,
+      refShape: this.refShape,
     });
     this.events.length = 0;
     this.events.push(announce, refsEvent);
@@ -250,5 +252,65 @@ describe('rig fetch', () => {
       error: 'unknown_remote',
       remote: 'upstream',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// NIP-34 ref tag shapes (rig#156)
+// ---------------------------------------------------------------------------
+
+describe('rig fetch reads both kind:30618 ref tag shapes', () => {
+  for (const refShape of ['legacy', 'nip', 'both'] as const) {
+    it(`tracks a push advertised in the ${refShape} shape`, async () => {
+      const world = new World(refShape);
+      const cloneDir = await world.clone();
+
+      writeFileSync(join(world.srcDir, 'new.txt'), 'delta\n');
+      git(['add', '.'], world.srcDir);
+      git(['commit', '-m', 'second'], world.srcDir);
+      git(['branch', 'topic'], world.srcDir);
+      world.publish();
+      const newMain = gitText(world.srcDir, ['rev-parse', 'main']);
+
+      const io = makeTestIo();
+      const code = await runFetch(['--json'], world.deps(io, cloneDir));
+      expect(code).toBe(0);
+      expect(io.errLines.join('\n')).toBe('');
+
+      const doc = io.jsonDocs[0] as {
+        updates: { refname: string; newSha: string }[];
+      };
+      expect(doc.updates).toContainEqual(
+        expect.objectContaining({
+          refname: 'refs/heads/main',
+          newSha: newMain,
+        })
+      );
+      expect(doc.updates).toContainEqual(
+        expect.objectContaining({ refname: 'refs/heads/topic' })
+      );
+      expect(gitText(cloneDir, ['rev-parse', 'refs/remotes/origin/main'])).toBe(
+        newMain
+      );
+    });
+  }
+
+  it('skips an unsafe NIP-shape refname with the same warning as the r shape', async () => {
+    const world = new World('nip');
+    const cloneDir = await world.clone();
+
+    const hostile = 'refs/heads/../../../../etc/passwd';
+    world.publish();
+    const refsEvent = world.events[1] as NostrEvent;
+    refsEvent.tags.push([hostile, 'f'.repeat(40)]);
+
+    const io = makeTestIo();
+    const code = await runFetch(['--json'], world.deps(io, cloneDir));
+    expect(code).toBe(0);
+    expect(io.errLines.join('\n')).toContain(
+      'skipping unsafe ref name from relay'
+    );
+    const doc = io.jsonDocs[0] as { updates: { refname: string }[] };
+    expect(doc.updates.map((u) => u.refname)).not.toContain(hostile);
   });
 });
