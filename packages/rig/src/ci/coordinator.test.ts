@@ -25,6 +25,7 @@ import {
   repoStateEvents,
   storeFromObjects,
   type EnumeratedObject,
+  type RefTagShape,
 } from '../cli/read-testkit.js';
 import {
   fakeClock,
@@ -173,7 +174,7 @@ interface World {
   start(overrides?: Partial<CoordinatorOptions>): Promise<CoordinatorHandle>;
 }
 
-function makeWorld(): World {
+function makeWorld(options: { refShape?: RefTagShape } = {}): World {
   const srcDir = tempDir('rig-ci-coord-src-');
   git(['init', '--initial-branch=main'], srcDir);
   mkdirSync(join(srcDir, '.github', 'workflows'), { recursive: true });
@@ -212,6 +213,7 @@ function makeWorld(): World {
         owner: OWNER,
         repoId: REPO,
         createdAt,
+        refShape: options.refShape ?? 'legacy',
       });
       load(objects);
       announce.tags.push(['maintainers', MAINT]);
@@ -788,6 +790,61 @@ function secretUpdate(
     author
   );
 }
+
+// ---------------------------------------------------------------------------
+// NIP-34 ref tag shapes (rig#156)
+// ---------------------------------------------------------------------------
+
+describe('a repo whose state event is NIP-shape-only', () => {
+  it('materializes the right commit and runs the workflow, exactly as for the legacy shape', async () => {
+    const world = makeWorld({ refShape: 'nip' });
+    const { announce, refsEvent } = world.snapshot(1000);
+    // The 30618 carries NIP-34 ref tags only — not one `r` tag, which is all
+    // rig could read before rig#156 (it would have seen an empty repo).
+    expect(refsEvent.tags.filter((t) => t[0] === 'r')).toEqual([]);
+    expect(
+      refsEvent.tags.some((t) => (t[0] ?? '').startsWith('refs/heads/'))
+    ).toBe(true);
+
+    world.relay.serve([announce, refsEvent, serviceRequest(MAINT, 1100)]);
+    const handle = await world.start();
+
+    const sha = push(world, 2000);
+    await handle.idle();
+
+    expect(publishedKinds(world.publisher)).toEqual([
+      39842, 39842, 9841, 39842, 9842, 39842,
+    ]);
+    const [queued] = progressEvents(world.publisher);
+    expect(must(queued).trigger).toMatchObject({
+      repoAddr: ADDR,
+      commit: sha,
+      reason: 'push',
+      ref: 'refs/heads/main',
+    });
+    // The runner got a real checkout materialized at that commit.
+    expect(must(world.runner.requests[0]).trigger.commit).toBe(sha);
+    const [result] = resultEvents(world.publisher);
+    expect(result).toMatchObject({ conclusion: 'success' });
+    await handle.stop();
+  });
+
+  it('runs nothing when a dual-shaped republish moves no ref', async () => {
+    const world = makeWorld({ refShape: 'both' });
+    const { announce, refsEvent } = world.snapshot(1000);
+    world.relay.serve([announce, refsEvent, serviceRequest(MAINT, 1100)]);
+    const handle = await world.start();
+
+    // Same refs, new event: the dual shapes must collapse to the same ref
+    // map the cursor already holds, not look like 2x the refs moving.
+    const { refsEvent: republished } = world.snapshot(2000);
+    world.relay.push(republished);
+    await handle.idle();
+
+    expect(publishedKinds(world.publisher)).toEqual([]);
+    await handle.stop();
+  });
+});
 
 describe('secrets', () => {
   it('injects a maintainer-provisioned secret into a maintainer push, never into a stranger PR', async () => {

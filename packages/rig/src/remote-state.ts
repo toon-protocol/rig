@@ -3,8 +3,9 @@
  * `rig push` (epic #222, ticket #225).
  *
  * Queries relay(s) over NIP-01 WebSocket for the repository's NIP-34 state:
- *   - kind:30618 (repository state): `r` tags → ref map, `HEAD` symref,
- *     `arweave` tags → git SHA → Arweave txId hints.
+ *   - kind:30618 (repository state): ref tags → ref map (both the NIP-34
+ *     shape and rig's legacy `r` shape — see `./nip34-refs.ts`), `HEAD`
+ *     symref, `arweave` tags → git SHA → Arweave txId hints.
  *   - kind:30617 (repository announcement): presence = the repo exists on
  *     TOON (first-push detection) + name/description/relays metadata.
  *
@@ -36,6 +37,7 @@ import {
   parsePayout,
   type PayoutPointer,
 } from './nip34-events.js';
+import { parseStateRefTags, type ParsedStateRefs } from './nip34-refs.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -333,40 +335,24 @@ function getTagValue(tags: string[][], name: string): string | undefined {
   return tag?.[1];
 }
 
-/** Maximum number of refs parsed from a single kind:30618 event (mirrors views). */
-const MAX_REFS_PER_EVENT = 1000;
-
-/** Symref prefix used in `HEAD` tags: `["HEAD", "ref: refs/heads/main"]`. */
-const SYMREF_PREFIX = 'ref: ';
-
-interface ParsedRefs {
-  refs: Map<string, string>;
-  headSymref: string | null;
+interface ParsedRefs extends ParsedStateRefs {
   shaToTxId: Map<string, string>;
 }
 
-/** Parse a kind:30618 event's `r` / `HEAD` / `arweave` tags. */
+/**
+ * Parse a kind:30618 event's ref / `HEAD` / `arweave` tags.
+ *
+ * Ref and `HEAD` tags go through the shared dual-shape parser
+ * (`./nip34-refs.ts`), so a state event written by ngit (or any other
+ * conformant NIP-34 client) reads exactly like one written by rig — see that
+ * module for the conflict, peeled-tag and cap rules (rig#156).
+ */
 function parseRefsEvent(event: NostrEvent): ParsedRefs {
-  const refs = new Map<string, string>();
+  const { refs, headSymref } = parseStateRefTags(event.tags);
   const shaToTxId = new Map<string, string>();
-  let headSymref: string | null = null;
 
   for (const tag of event.tags) {
-    const [tagName, v1, v2] = tag;
-    if (tagName === 'r' && v1 && v2) {
-      if (v1 === 'HEAD' && v2.startsWith(SYMREF_PREFIX)) {
-        // Alternate symref spelling: ["r", "HEAD", "ref: refs/heads/main"]
-        headSymref = v2.slice(SYMREF_PREFIX.length);
-        continue;
-      }
-      if (refs.size >= MAX_REFS_PER_EVENT) continue;
-      refs.set(v1, v2);
-    } else if (tagName === 'HEAD' && v1?.startsWith(SYMREF_PREFIX)) {
-      // NIP-34 symref tag: ["HEAD", "ref: refs/heads/main"]
-      headSymref = v1.slice(SYMREF_PREFIX.length);
-    } else if (tagName === 'arweave' && v1 && v2) {
-      shaToTxId.set(v1, v2);
-    }
+    if (tag[0] === 'arweave' && tag[1] && tag[2]) shaToTxId.set(tag[1], tag[2]);
   }
 
   return { refs, headSymref, shaToTxId };

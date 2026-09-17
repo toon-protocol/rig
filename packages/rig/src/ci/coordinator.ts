@@ -66,6 +66,7 @@ import {
   authorizedStatusAuthors,
 } from '../nip34-events.js';
 import type { UnsignedEvent } from '../nip34-events.js';
+import { parseStateRefTags } from '../nip34-refs.js';
 import type { FetchLike } from '../object-fetch.js';
 import type { FeeRates, Publisher } from '../publisher.js';
 import {
@@ -335,23 +336,6 @@ export function movedRefs(
     if (before[ref] !== sha) moved.push({ ref, sha });
   }
   return moved;
-}
-
-function parseRefsTags(ev: NostrEvent): {
-  refs: Record<string, string>;
-  head: string | null;
-} {
-  const refs: Record<string, string> = {};
-  let head: string | null = null;
-  for (const [name, v1, v2] of ev.tags) {
-    if (name === 'r' && v1 && v2) {
-      if (v1 === 'HEAD' && v2.startsWith('ref: ')) head = v2.slice(5);
-      else refs[v1] = v2;
-    } else if (name === 'HEAD' && v1?.startsWith('ref: ')) {
-      head = v1.slice(5);
-    }
-  }
-  return { refs, head };
 }
 
 function tagValues(tags: string[][], name: string): string[] {
@@ -1205,8 +1189,12 @@ export async function startCoordinator(
   ): Promise<void> => {
     const cursor = repo.cursor as RepoCursor;
     if (repoSeen(repo, ev) || ev.created_at < cursor.lastCreatedAt) return;
-    const { refs, head } = parseRefsTags(ev);
-    if (head) repo.defaultBranch = head;
+    // Both ref tag shapes, through the shared parser (`../nip34-refs.ts`), so
+    // a coordinator serves repos whose state was written by ngit or any other
+    // conformant NIP-34 client exactly as it serves rig's own (rig#156).
+    const { refs: refMap, headSymref } = parseStateRefTags(ev.tags);
+    const refs = Object.fromEntries(refMap);
+    if (headSymref) repo.defaultBranch = headSymref;
     const moved = movedRefs(cursor.refs, refs);
     cursor.refs = refs;
     markRepoProcessed(repo, ev);

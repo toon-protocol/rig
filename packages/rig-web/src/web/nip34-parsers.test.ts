@@ -19,6 +19,7 @@ import {
   withTargetAuthor,
 } from './nip34-parsers.js';
 import type { NostrEvent } from './nip34-parsers.js';
+import { NGIT_STATE_NGIT } from './__fixtures__/ngit-wire.js';
 
 // ============================================================================
 // Factories
@@ -1147,5 +1148,148 @@ describe('NIP-34 Parsers - 8.6-UNIT-005b: arweaveMap from kind:30618', () => {
     expect(result).not.toBeNull();
     expect(result!.arweaveMap.size).toBe(1);
     expect(result!.arweaveMap.get('good-sha')).toBe('good-txId');
+  });
+});
+
+// ============================================================================
+// NIP-34 ref tag shapes (rig#156, spec rig#153)
+//
+// The same matrix `@toon-protocol/rig`'s `nip34-refs.test.ts` runs against the
+// shared rig-side parser, asserting the SAME view model out of rig-web's
+// documented copy — including against the real ngit state event both packages
+// hold a copy of (rig#155).
+// ============================================================================
+
+const SHA_A = '1a'.repeat(20);
+const SHA_B = '2b'.repeat(20);
+const SHA_C = '3c'.repeat(20);
+
+/** Narrow a parse result or fail the test loudly (no non-null assertions). */
+function parsedRefs(event: NostrEvent): Map<string, string> {
+  const result = parseRepoRefs(event);
+  if (result === null) throw new Error('expected parseRepoRefs to succeed');
+  return result.refs;
+}
+
+function refsEventWithTags(tags: string[][]): NostrEvent {
+  return createMockRefsEvent({ tags: [['d', 'my-repo'], ...tags] });
+}
+
+describe('NIP-34 Parsers - parseRepoRefs: dual ref tag shapes', () => {
+  it('reads the NIP-34 shape, where the ref path is the tag name', () => {
+    const refs = parsedRefs(
+      refsEventWithTags([
+        ['refs/heads/main', SHA_A],
+        ['refs/tags/v1.0.0', SHA_B],
+        ['HEAD', 'ref: refs/heads/main'],
+      ])
+    );
+
+    expect([...refs]).toEqual([
+      ['refs/heads/main', SHA_A],
+      ['refs/tags/v1.0.0', SHA_B],
+    ]);
+  });
+
+  it('merges both shapes into one ref set when they agree', () => {
+    const refs = parsedRefs(
+      refsEventWithTags([
+        ['refs/heads/main', SHA_A],
+        ['r', 'refs/heads/main', SHA_A],
+        ['r', 'refs/heads/dev', SHA_B],
+        ['refs/tags/v2', SHA_C],
+      ])
+    );
+
+    expect(refs.size).toBe(3);
+    expect(refs.get('refs/heads/main')).toBe(SHA_A);
+    expect(refs.get('refs/heads/dev')).toBe(SHA_B);
+    expect(refs.get('refs/tags/v2')).toBe(SHA_C);
+  });
+
+  it('lets the NIP shape win a same-ref disagreement, whichever came first', () => {
+    expect(
+      parsedRefs(
+        refsEventWithTags([
+          ['refs/heads/main', SHA_A],
+          ['r', 'refs/heads/main', SHA_B],
+        ])
+      ).get('refs/heads/main')
+    ).toBe(SHA_A);
+
+    expect(
+      parsedRefs(
+        refsEventWithTags([
+          ['r', 'refs/heads/main', SHA_B],
+          ['refs/heads/main', SHA_A],
+        ])
+      ).get('refs/heads/main')
+    ).toBe(SHA_A);
+  });
+
+  it('does not list a peeled ^{} entry as a ref', () => {
+    const refs = parsedRefs(
+      refsEventWithTags([
+        ['refs/tags/v1.0.0', SHA_A],
+        ['refs/tags/v1.0.0^{}', SHA_B],
+      ])
+    );
+
+    expect([...refs]).toEqual([['refs/tags/v1.0.0', SHA_A]]);
+  });
+
+  it('ignores NIP-shape tags with no value and non-ref tag names', () => {
+    const refs = parsedRefs(
+      refsEventWithTags([
+        ['refs/heads/empty'],
+        ['refs/notes/commits', SHA_A],
+        ['--upload-pack=/evil', SHA_B],
+        ['refs/heads/ok', SHA_C],
+      ])
+    );
+
+    expect([...refs]).toEqual([['refs/heads/ok', SHA_C]]);
+  });
+
+  it('caps DISTINCT refs across both shapes combined at 1000', () => {
+    const tags: string[][] = [];
+    for (let i = 0; i < 600; i += 1) tags.push([`refs/heads/n${i}`, SHA_A]);
+    for (let i = 0; i < 600; i += 1)
+      tags.push(['r', `refs/heads/l${i}`, SHA_B]);
+
+    const refs = parsedRefs(refsEventWithTags(tags));
+    expect(refs.size).toBe(1000);
+    expect(refs.get('refs/heads/n599')).toBe(SHA_A);
+    expect(refs.get('refs/heads/l399')).toBe(SHA_B);
+    expect(refs.has('refs/heads/l400')).toBe(false);
+  });
+
+  it('still reads the arweave map from an event that trips the ref cap', () => {
+    const tags: string[][] = [];
+    for (let i = 0; i < 1200; i += 1) tags.push([`refs/heads/n${i}`, SHA_A]);
+    tags.push(['arweave', SHA_C, 'tx-c']);
+
+    const result = parseRepoRefs(refsEventWithTags(tags));
+    expect(result).not.toBeNull();
+    expect(result?.refs.size).toBe(1000);
+    expect(result?.arweaveMap.get(SHA_C)).toBe('tx-c');
+  });
+
+  it('parses the real ngit state event to its branches and tags', () => {
+    const refs = parsedRefs(NGIT_STATE_NGIT);
+
+    expect(
+      [...refs.keys()].filter((r) => r.startsWith('refs/heads/')).sort()
+    ).toEqual([
+      'refs/heads/main',
+      'refs/heads/stable',
+      'refs/heads/timeout-testing',
+      'refs/heads/tmp',
+    ]);
+    expect(
+      [...refs.keys()].filter((r) => r.startsWith('refs/tags/'))
+    ).toHaveLength(60);
+    expect(refs.size).toBe(64);
+    expect([...refs.keys()].some((r) => r.endsWith('^{}'))).toBe(false);
   });
 });
