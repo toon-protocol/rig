@@ -16,7 +16,12 @@ import type { CliIo } from './output.js';
 import type { EventCommandDeps } from './events.js';
 import { runPayout } from './payout.js';
 import type { StandaloneContext } from './standalone-context.js';
-import { filterEvents, makeMockRelayFactory } from './read-testkit.js';
+import {
+  filterEvents,
+  foreignAnnouncementTags,
+  makeMockRelayFactory,
+  survivingForeignTags,
+} from './read-testkit.js';
 
 const OWNER = 'ab'.repeat(32);
 const M1 = 'cd'.repeat(32);
@@ -125,29 +130,7 @@ function makeDeps(
 
 const ADDR = ['--repo-id', REPO, '--owner', OWNER, '--relay', RELAY];
 
-/**
- * Tags an announcement can carry that rig does not model: another client's
- * maintainer role tags (nips PR #2324), `clone`, `blossoms`, `t`, `alt`, and
- * one rig has never heard of. A republish must carry all of them over
- * verbatim, in this order (#154).
- */
-const FOREIGN_TAGS: string[][] = [
-  ['clone', 'https://relay.ngit.dev/npub1abc/demo.git'],
-  ['M', OWNER],
-  ['m', M1],
-  ['o', M1],
-  ['blossoms', 'https://blossom.example'],
-  ['t', 'rust'],
-  ['alt', 'git repository: demo'],
-  ['x-rig-knows-nothing', 'keep', 'me'],
-];
-
-const FOREIGN_NAMES = FOREIGN_TAGS.map((t) => t[0]);
-
-/** The foreign tags as they survived a republish, in published order. */
-function survivingForeignTags(event: UnsignedEvent): string[][] {
-  return event.tags.filter((t) => FOREIGN_NAMES.includes(t[0]));
-}
+const FOREIGN_TAGS = foreignAnnouncementTags(OWNER, M1);
 
 /** An announcement as another NIP-34 client (ngit) wrote it. */
 function foreignAnnouncement(overrides: { payout?: string } = {}): NostrEvent {
@@ -232,7 +215,9 @@ describe('rig payout set/clear (paid, owner-only)', () => {
     expect(code).toBe(0);
     const first = fake.published[0];
     if (!first) throw new Error('expected a published event');
-    expect(survivingForeignTags(first.event)).toEqual(FOREIGN_TAGS);
+    expect(survivingForeignTags(first.event.tags, FOREIGN_TAGS)).toEqual(
+      FOREIGN_TAGS
+    );
     // …and the field being edited is the only thing that changed.
     expect(parsePayout(first.event.tags)).toEqual({
       chain: 'evm',
@@ -251,7 +236,9 @@ describe('rig payout set/clear (paid, owner-only)', () => {
     expect(code).toBe(0);
     const first = fake.published[0];
     if (!first) throw new Error('expected a published event');
-    expect(survivingForeignTags(first.event)).toEqual(FOREIGN_TAGS);
+    expect(survivingForeignTags(first.event.tags, FOREIGN_TAGS)).toEqual(
+      FOREIGN_TAGS
+    );
     expect(parsePayout(first.event.tags)).toBeNull();
     expect(parseMaintainers(first.event.tags)).toEqual([M1]);
   });

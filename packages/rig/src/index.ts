@@ -44,9 +44,6 @@ export {
 } from './nip34-events.js';
 
 export {
-  EARLIEST_UNIQUE_COMMIT_MARKER,
-  RELAYS_TAG,
-  WEB_TAG,
   amendRepoAnnouncement,
   buildRepoAnnouncement,
   type AnnouncementEdits,

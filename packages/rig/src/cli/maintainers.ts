@@ -315,16 +315,13 @@ async function runMutate(
         ? [...current, pubkey]
         : current.filter((m) => m !== pubkey);
 
-    const name = remote.name ?? ctx.repoId;
-    const description = remote.description ?? '';
-    // Amend rather than rebuild (#154): the maintainers tag is the only thing
-    // this command edits, so the payout pointer (rig#92) and every tag rig
-    // does not model — another client's role tags, `clone`, `blossoms`, … —
-    // ride along untouched instead of being wiped by the replaceable write.
+    // Amend rather than rebuild (#154): `maintainers` is the ONLY field this
+    // command edits, so name, description, the payout pointer (rig#92) and
+    // every tag rig does not model — another client's role tags, `clone`,
+    // `blossoms`, … — ride along verbatim instead of being wiped by the
+    // replaceable write. Passing a field here would rewrite it.
     const event = amendRepoAnnouncement(remote.announceEvent, {
       repoId: ctx.repoId,
-      name,
-      description,
       maintainers: next,
     });
     const fee = (await standaloneCtx.publisher.getFeeRates()).eventFee.toString();

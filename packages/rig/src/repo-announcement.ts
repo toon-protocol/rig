@@ -38,51 +38,6 @@ export const WEB_TAG = 'web';
  */
 export const EARLIEST_UNIQUE_COMMIT_MARKER = 'euc';
 
-/**
- * The tag slots this module models. Anything else on an announcement is
- * unknown by definition and is carried over untouched.
- *
- * Doubles as the emission order for tags that have no place to keep in the
- * current announcement (a first announcement, or a field being added).
- */
-const SLOT_ORDER = [
-  'd',
-  'name',
-  'description',
-  'maintainers',
-  'payout',
-  'relays',
-  'web',
-  'euc',
-] as const;
-
-type Slot = (typeof SLOT_ORDER)[number];
-
-/** The slot a tag occupies, or `null` when rig does not model it. */
-function slotOf(tag: string[]): Slot | null {
-  switch (tag[0]) {
-    case 'd':
-      return 'd';
-    case 'name':
-      return 'name';
-    case 'description':
-      return 'description';
-    case MAINTAINERS_TAG:
-      return 'maintainers';
-    case PAYOUT_TAG:
-      return 'payout';
-    case RELAYS_TAG:
-      return 'relays';
-    case WEB_TAG:
-      return 'web';
-    case 'r':
-      // Only the euc marker is ours. Every other `r` tag is someone else's.
-      return tag[2] === EARLIEST_UNIQUE_COMMIT_MARKER ? 'euc' : null;
-    default:
-      return null;
-  }
-}
-
 /** The current announcement, as read off the relay. */
 export interface ExistingAnnouncement {
   tags: string[][];
@@ -133,43 +88,126 @@ function multiValueTag(name: string, values: readonly string[]): string[][] {
   return kept.length > 0 ? [[name, ...kept]] : [];
 }
 
-/** The tags each edited slot becomes — `[]` means "the edit removes it". */
-function rewrittenSlots(edits: AnnouncementEdits): Map<Slot, string[][]> {
-  const out = new Map<Slot, string[][]>();
-  out.set('d', [['d', edits.repoId]]);
-  if (edits.name !== undefined) out.set('name', [['name', edits.name]]);
-  if (edits.description !== undefined) {
-    out.set('description', [['description', edits.description]]);
+/**
+ * One tag slot rig models: how to recognize it on an existing announcement,
+ * and what an edit turns it into. Everything a slot knows lives in its entry,
+ * so adding a field to {@link AnnouncementEdits} is a one-place change.
+ */
+interface SlotSpec {
+  /** Does this tag occupy the slot? */
+  readonly matches: (tag: string[]) => boolean;
+  /**
+   * The tags the slot becomes for these edits — `[]` when the edit removes it,
+   * `null` when the edits leave the slot alone and it must be carried over.
+   */
+  readonly rewrite: (edits: AnnouncementEdits) => string[][] | null;
+}
+
+/** True for a tag named `name` — the common case. */
+const named =
+  (name: string) =>
+  (tag: string[]): boolean =>
+    tag[0] === name;
+
+/**
+ * Every slot this module models, in the order tags are emitted when the
+ * current announcement has no place to keep them (a first announcement, or a
+ * field being added). Anything NOT matched here is unknown by definition and
+ * is carried over untouched — that is the whole point of the module.
+ */
+const SLOTS = new Map<string, SlotSpec>([
+  ['d', { matches: named('d'), rewrite: (e) => [['d', e.repoId]] }],
+  [
+    'name',
+    {
+      matches: named('name'),
+      rewrite: (e) => (e.name === undefined ? null : [['name', e.name]]),
+    },
+  ],
+  [
+    'description',
+    {
+      matches: named('description'),
+      rewrite: (e) =>
+        e.description === undefined ? null : [['description', e.description]],
+    },
+  ],
+  [
+    'maintainers',
+    {
+      matches: named(MAINTAINERS_TAG),
+      rewrite: (e) => {
+        if (e.maintainers === undefined) return null;
+        // Normalize through the reader so writing and reading share one rule.
+        const declared = parseMaintainers([
+          [MAINTAINERS_TAG, ...e.maintainers],
+        ]);
+        return declared.length > 0 ? [[MAINTAINERS_TAG, ...declared]] : [];
+      },
+    },
+  ],
+  [
+    'payout',
+    {
+      matches: named(PAYOUT_TAG),
+      rewrite: (e) =>
+        e.payout === undefined
+          ? null
+          : e.payout
+            ? [[PAYOUT_TAG, e.payout.chain, e.payout.address]]
+            : [],
+    },
+  ],
+  [
+    'relays',
+    {
+      matches: named(RELAYS_TAG),
+      rewrite: (e) =>
+        e.relays === undefined
+          ? null
+          : e.relays
+            ? multiValueTag(RELAYS_TAG, e.relays)
+            : [],
+    },
+  ],
+  [
+    'web',
+    {
+      matches: named(WEB_TAG),
+      rewrite: (e) =>
+        e.web === undefined ? null : e.web ? multiValueTag(WEB_TAG, e.web) : [],
+    },
+  ],
+  [
+    'euc',
+    {
+      // Only the euc marker is ours. Every other `r` tag is someone else's.
+      matches: (tag) =>
+        tag[0] === 'r' && tag[2] === EARLIEST_UNIQUE_COMMIT_MARKER,
+      rewrite: (e) =>
+        e.earliestUniqueCommit === undefined
+          ? null
+          : e.earliestUniqueCommit
+            ? [['r', e.earliestUniqueCommit, EARLIEST_UNIQUE_COMMIT_MARKER]]
+            : [],
+    },
+  ],
+]);
+
+/** The slot a tag occupies, or `null` when rig does not model it. */
+function slotOf(tag: string[]): string | null {
+  for (const [slot, spec] of SLOTS) {
+    if (spec.matches(tag)) return slot;
   }
-  if (edits.maintainers !== undefined) {
-    // Normalize through the reader so writing and reading share one rule.
-    const declared = parseMaintainers([[MAINTAINERS_TAG, ...edits.maintainers]]);
-    out.set(
-      'maintainers',
-      declared.length > 0 ? [[MAINTAINERS_TAG, ...declared]] : []
-    );
-  }
-  if (edits.payout !== undefined) {
-    out.set(
-      'payout',
-      edits.payout
-        ? [[PAYOUT_TAG, edits.payout.chain, edits.payout.address]]
-        : []
-    );
-  }
-  if (edits.relays !== undefined) {
-    out.set('relays', edits.relays ? multiValueTag(RELAYS_TAG, edits.relays) : []);
-  }
-  if (edits.web !== undefined) {
-    out.set('web', edits.web ? multiValueTag(WEB_TAG, edits.web) : []);
-  }
-  if (edits.earliestUniqueCommit !== undefined) {
-    out.set(
-      'euc',
-      edits.earliestUniqueCommit
-        ? [['r', edits.earliestUniqueCommit, EARLIEST_UNIQUE_COMMIT_MARKER]]
-        : []
-    );
+  return null;
+}
+
+/** The tags each EDITED slot becomes; slots left alone are absent. */
+function rewrittenSlots(edits: AnnouncementEdits): Map<string, string[][]> {
+  const out = new Map<string, string[][]>();
+  for (const [slot, spec] of SLOTS) {
+    const next = spec.rewrite(edits);
+    if (next !== null) out.set(slot, next);
   }
   return out;
 }
@@ -182,7 +220,7 @@ function rewrittenSlots(edits: AnnouncementEdits): Map<Slot, string[][]> {
  * An edited slot is rewritten where the current announcement first mentions
  * it, so a republish moves nothing; repeated tags for one slot collapse into
  * the single edited value. Slots the current announcement lacks are appended
- * in {@link SLOT_ORDER}. `d` always leads.
+ * in {@link SLOTS} order. `d` always leads.
  *
  * @param current - The announcement being amended, or `null` for a repo's first.
  * @param edits - The fields to change; omitted fields are left as they are.
@@ -193,7 +231,7 @@ export function amendRepoAnnouncement(
 ): UnsignedEvent {
   const rewritten = rewrittenSlots(edits);
   const tags: string[][] = [['d', edits.repoId]];
-  const emitted = new Set<Slot>(['d']);
+  const emitted = new Set<string>(['d']);
 
   for (const tag of current?.tags ?? []) {
     const slot = slotOf(tag);
@@ -207,9 +245,8 @@ export function amendRepoAnnouncement(
     emitted.add(slot);
   }
 
-  for (const slot of SLOT_ORDER) {
-    const replacement = rewritten.get(slot);
-    if (replacement === undefined || emitted.has(slot)) continue;
+  for (const [slot, replacement] of rewritten) {
+    if (emitted.has(slot)) continue;
     for (const next of replacement) tags.push([...next]);
     emitted.add(slot);
   }

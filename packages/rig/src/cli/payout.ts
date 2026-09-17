@@ -323,15 +323,12 @@ async function runMutate(
       return 0;
     }
 
-    const name = remote.name ?? ctx.repoId;
-    const description = remote.description ?? '';
-    // Amend rather than rebuild (#154): the payout tag is the only thing this
-    // command edits, so the maintainers tag and every tag rig does not model
-    // survive the replaceable write instead of being destroyed by it.
+    // Amend rather than rebuild (#154): `payout` is the ONLY field this
+    // command edits, so name, description, the maintainers tag and every tag
+    // rig does not model survive the replaceable write verbatim instead of
+    // being destroyed by it. Passing a field here would rewrite it.
     const event = amendRepoAnnouncement(remote.announceEvent, {
       repoId: ctx.repoId,
-      name,
-      description,
       payout: nextPayout,
     });
     const fee = (await standaloneCtx.publisher.getFeeRates()).eventFee.toString();

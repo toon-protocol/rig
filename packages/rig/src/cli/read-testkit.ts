@@ -115,6 +115,47 @@ export function filterEvents(
 }
 
 // ---------------------------------------------------------------------------
+// Foreign announcement tags (#154)
+// ---------------------------------------------------------------------------
+
+/**
+ * Tags a kind:30617 can carry that rig does not model: another NIP-34
+ * client's maintainer role tags (nips PR #2324), `clone`, `blossoms`, `t`,
+ * `alt`, and one rig has never heard of. A republish must carry every one of
+ * them over verbatim, in THIS order (#154) — the array is the assertion.
+ *
+ * `<owner>` and `<peer>` placeholders are substituted by
+ * {@link foreignAnnouncementTags} so a test can use its own pubkeys.
+ */
+export function foreignAnnouncementTags(
+  owner: string,
+  peer: string
+): string[][] {
+  return [
+    ['clone', 'https://relay.ngit.dev/npub1abc/demo.git'],
+    ['M', owner],
+    ['m', peer],
+    ['o', peer],
+    ['blossoms', 'https://blossom.example'],
+    ['t', 'rust'],
+    ['alt', 'git repository: demo'],
+    ['x-rig-knows-nothing', 'keep', 'me'],
+  ];
+}
+
+/**
+ * The foreign tags as they survived a republish, in published order — compare
+ * against the same {@link foreignAnnouncementTags} array the fixture used.
+ */
+export function survivingForeignTags(
+  publishedTags: string[][],
+  foreign: string[][]
+): string[][] {
+  const names = new Set(foreign.map((t) => t[0]));
+  return publishedTags.filter((t) => names.has(t[0]));
+}
+
+// ---------------------------------------------------------------------------
 // Mock Arweave gateway
 // ---------------------------------------------------------------------------
 
