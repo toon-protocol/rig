@@ -33,8 +33,13 @@ import {
 } from './nip34-fixtures/index.js';
 import {
   amendRepoAnnouncement,
+  announcedEuc,
   buildRepoAnnouncement,
+  conformanceEdits,
+  diffAnnouncementTags,
+  earliestUniqueCommit,
 } from './repo-announcement.js';
+import { describeAnnouncementDiff } from './cli/render.js';
 
 const OWNER_PUBKEY =
   '55c2a467881059a942fdc6908b041273885b8720bfa8fcf2f5f9c20a73b0964d';
@@ -283,6 +288,205 @@ describe('amendRepoAnnouncement (kind:30617, #154)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('earliestUniqueCommit (#158)', () => {
+  const A = 'a'.repeat(40);
+  const B = 'b'.repeat(40);
+  const C = 'c'.repeat(40);
+
+  /** A reader whose `--all` and `HEAD` answers are fixed per test. */
+  function reader(all: string[], onHead: string[] = []) {
+    return {
+      rootCommits: async (rev?: string) => (rev === undefined ? all : onHead),
+    };
+  }
+
+  it('is the only root of a linear history', async () => {
+    await expect(earliestUniqueCommit(reader([B]))).resolves.toBe(B);
+  });
+
+  it('is null for a repo with no commits', async () => {
+    await expect(earliestUniqueCommit(reader([]))).resolves.toBeNull();
+  });
+
+  it('prefers a root reachable from the default branch over an orphan one', async () => {
+    // `A` sorts lowest but is NOT on the default branch — reachability wins.
+    await expect(earliestUniqueCommit(reader([A, C], [C]))).resolves.toBe(C);
+  });
+
+  it('breaks a remaining tie on the lexicographically lowest SHA', async () => {
+    await expect(earliestUniqueCommit(reader([C, B, A], [C, A]))).resolves.toBe(
+      A
+    );
+  });
+
+  it('falls back to all roots when HEAD resolves to nothing', async () => {
+    await expect(earliestUniqueCommit(reader([C, B], []))).resolves.toBe(B);
+  });
+
+  it('does not depend on rev-list ordering — the same set gives the same SHA', async () => {
+    const first = await earliestUniqueCommit(reader([A, B, C], [A, B, C]));
+    const second = await earliestUniqueCommit(reader([C, B, A], [C, B, A]));
+    expect(first).toBe(second);
+    expect(first).toBe(A);
+  });
+});
+
+describe('announcedEuc / conformanceEdits (#158)', () => {
+  const LOCAL_EUC = 'a'.repeat(40);
+  const ANNOUNCED = 'b'.repeat(40);
+  const FACTS = {
+    relays: ['wss://relay.test.example'],
+    web: 'https://rig.example/#/npub1/demo',
+    earliestUniqueCommit: LOCAL_EUC,
+  };
+
+  it('reads the euc an announcement already declares', () => {
+    expect(
+      announcedEuc({
+        tags: [
+          ['d', 'demo'],
+          ['r', 'refs/heads/main', 'deadbeef'],
+          ['r', ANNOUNCED, 'euc'],
+        ],
+      })
+    ).toBe(ANNOUNCED);
+    expect(announcedEuc({ tags: [['d', 'demo']] })).toBeNull();
+    expect(announcedEuc(null)).toBeNull();
+  });
+
+  it('backfills all three tags on an announcement that has none', () => {
+    expect(conformanceEdits({ tags: [['d', 'demo']] }, FACTS)).toEqual({
+      relays: FACTS.relays,
+      web: [FACTS.web],
+      earliestUniqueCommit: LOCAL_EUC,
+    });
+  });
+
+  it('NEVER recomputes an announced euc, even when local git disagrees', () => {
+    const edits = conformanceEdits(
+      { tags: [['d', 'demo'], ['r', ANNOUNCED, 'euc']] },
+      FACTS
+    );
+    // Omitted → amendRepoAnnouncement leaves the slot exactly as it is.
+    expect('earliestUniqueCommit' in edits).toBe(false);
+    const event = amendRepoAnnouncement(
+      { tags: [['d', 'demo'], ['r', ANNOUNCED, 'euc']] },
+      { repoId: 'demo', ...edits }
+    );
+    expect(event.tags).toContainEqual(['r', ANNOUNCED, 'euc']);
+    expect(event.tags).not.toContainEqual(['r', LOCAL_EUC, 'euc']);
+  });
+
+  it('omits the euc when there is no local repo to compute one from', () => {
+    const edits = conformanceEdits(null, { ...FACTS, earliestUniqueCommit: null });
+    expect('earliestUniqueCommit' in edits).toBe(false);
+    expect(edits.relays).toEqual(FACTS.relays);
+  });
+
+  it('omits web when no viewer URL can be derived, and relays when there are none', () => {
+    expect(conformanceEdits(null, { relays: [], web: null, earliestUniqueCommit: null })).toEqual(
+      {}
+    );
+  });
+
+  it('UNIONS relays and web with what another client already announced', () => {
+    const current = {
+      tags: [
+        ['d', 'demo'],
+        ['relays', 'wss://ngit.example', 'wss://shared.example'],
+        ['web', 'https://gitworkshop.example/demo'],
+      ],
+    };
+    const edits = conformanceEdits(current, {
+      ...FACTS,
+      relays: ['wss://shared.example', 'wss://relay.test.example'],
+    });
+    // ngit's entries survive, in their original order; rig's are appended once.
+    expect(edits.relays).toEqual([
+      'wss://ngit.example',
+      'wss://shared.example',
+      'wss://relay.test.example',
+    ]);
+    expect(edits.web).toEqual([
+      'https://gitworkshop.example/demo',
+      FACTS.web,
+    ]);
+  });
+
+  it('a republish that adds nothing new changes no tag', () => {
+    const current = {
+      tags: [
+        ['d', 'demo'],
+        ['relays', ...FACTS.relays],
+        ['web', FACTS.web],
+        ['r', ANNOUNCED, 'euc'],
+      ],
+    };
+    const next = amendRepoAnnouncement(current, {
+      repoId: 'demo',
+      ...conformanceEdits(current, FACTS),
+    });
+    expect(diffAnnouncementTags(current, next).unchanged).toBe(true);
+  });
+
+  it('never produces a clone tag', () => {
+    const event = amendRepoAnnouncement(
+      { tags: [['d', 'demo'], ['clone', 'https://ngit.example/demo.git']] },
+      { repoId: 'demo', ...conformanceEdits(null, FACTS) }
+    );
+    expect(event.tags.filter((t) => t[0] === 'clone')).toEqual([
+      ['clone', 'https://ngit.example/demo.git'],
+    ]);
+  });
+});
+
+describe('diffAnnouncementTags (#158)', () => {
+  const current = {
+    tags: [
+      ['d', 'demo'],
+      ['name', 'Demo'],
+      ['clone', 'https://ngit.example/demo.git'],
+    ] as string[][],
+  };
+
+  it('reports nothing changed for an identical republish', () => {
+    const next = amendRepoAnnouncement(current, { repoId: 'demo' });
+    const diff = diffAnnouncementTags(current, next);
+    expect(diff.unchanged).toBe(true);
+    expect(diff.added).toEqual([]);
+    expect(diff.removed).toEqual([]);
+  });
+
+  it('reports added tags, and a changed tag as a removal plus an addition', () => {
+    const next = amendRepoAnnouncement(current, {
+      repoId: 'demo',
+      name: 'Demo Repo',
+      relays: ['wss://relay.test.example'],
+    });
+    const diff = diffAnnouncementTags(current, next);
+    expect(diff.unchanged).toBe(false);
+    expect(diff.added).toEqual([
+      ['name', 'Demo Repo'],
+      ['relays', 'wss://relay.test.example'],
+    ]);
+    expect(diff.removed).toEqual([['name', 'Demo']]);
+    expect(describeAnnouncementDiff(diff)).toEqual([
+      '  - name Demo',
+      '  + name Demo Repo',
+      '  + relays wss://relay.test.example',
+    ]);
+  });
+
+  it('treats a first announcement as all-added', () => {
+    const next = amendRepoAnnouncement(null, { repoId: 'demo' });
+    expect(diffAnnouncementTags(null, next)).toMatchObject({
+      added: [['d', 'demo']],
+      removed: [],
+      unchanged: false,
+    });
   });
 });
 

@@ -2,7 +2,8 @@
  * `rig` subcommand dispatch (#250): rig-owned verbs first, git for the rest.
  *
  * rig owns exactly: init, identity, remote, clone, fetch, push, site, issue,
- * comment, pr, maintainers, channel (+ the `channels` list shorthand), fund,
+ * comment, pr, maintainers, payout, refresh, channel (+ the `channels` list
+ * shorthand), fund,
  * balance, chain, entry, name, ci, help/-h/--help, and --version. EVERY other
  * subcommand is executed as `git <argv...>` verbatim (./git-passthrough.ts)
  * — `rig status` IS `git status`, `rig add -p`, `rig commit`, `rig rebase
@@ -42,6 +43,7 @@ import { runGitPassthrough, type GitRunner } from './git-passthrough.js';
 import { runIdentity } from './identity-cmd.js';
 import { runInit } from './init.js';
 import { runMaintainers } from './maintainers.js';
+import { runRefresh } from './refresh.js';
 import { runName, type LoadArns } from './name.js';
 import { runPayout } from './payout.js';
 import { runPush, PUSH_USAGE } from './push.js';
@@ -95,6 +97,9 @@ Commands rig owns:
   maintainers add <pubkey>   remove republish the kind:30617 to change who may
   maintainers remove <pubkey>  author authoritative issue/PR status (owner is
                              always an implicit maintainer)
+  refresh                    republish the kind:30617 with no field edit to
+                             refresh its NIP-34 tags (relays, web, the euc fork
+                             identity) — PAID, and free when nothing changes
   payout show                show the repo's declared payout pointer (free);
   payout set <address>       set/clear republish the kind:30617 — no pointer
   payout clear               means the serving node keeps 100% of
@@ -237,6 +242,8 @@ export async function dispatch(
       return runMaintainers(rest, deps);
     case 'payout':
       return runPayout(rest, deps);
+    case 'refresh':
+      return runRefresh(rest, deps);
     case 'channel':
       return runChannel(rest, deps);
     case 'channels':

@@ -15,6 +15,7 @@ import { parseMaintainers, parsePayout } from '../nip34-events.js';
 import type { CliIo } from './output.js';
 import type { EventCommandDeps } from './events.js';
 import { runPayout } from './payout.js';
+import { repoWebUrl } from '../rig-pointer.js';
 import type { StandaloneContext } from './standalone-context.js';
 import {
   filterEvents,
@@ -375,6 +376,26 @@ describe('rig payout set/clear (paid, owner-only)', () => {
       executed: false,
       payout: { chain: 'evm', address: ADDR1 },
     });
+  });
+
+  it('backfills the #158 conformance tags on a republish', async () => {
+    const io = makeIo();
+    const fake = makeStandalone();
+    const LOCAL_ROOT = 'a1'.repeat(20);
+    const code = await runPayout(['set', ADDR1, ...ADDR, '--yes'], {
+      ...makeDeps(io, fake, [announcement(OWNER)]),
+      rootCommits: async () => [LOCAL_ROOT],
+    });
+    expect(code).toBe(0);
+    const tags = fake.published[0]?.event.tags ?? [];
+    expect(tags).toContainEqual(['relays', RELAY]);
+    expect(tags).toContainEqual([
+      'web',
+      repoWebUrl({ env: {}, relay: RELAY, ownerPubkey: OWNER, repoId: REPO }),
+    ]);
+    expect(tags).toContainEqual(['r', LOCAL_ROOT, 'euc']);
+    // …and the payout edit it was asked for still happened.
+    expect(parsePayout(tags)).toEqual({ chain: 'evm', address: ADDR1 });
   });
 
   it('validates the address and subcommand (exit 2)', async () => {

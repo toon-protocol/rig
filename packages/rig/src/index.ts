@@ -50,6 +50,9 @@ export {
 export {
   amendRepoAnnouncement,
   buildRepoAnnouncement,
+  EARLIEST_UNIQUE_COMMIT_MARKER,
+  RELAYS_TAG,
+  WEB_TAG,
   type AnnouncementEdits,
   type ExistingAnnouncement,
 } from './repo-announcement.js';

@@ -290,3 +290,215 @@ export function buildRepoAnnouncement(
     payout: payout ?? null,
   });
 }
+
+// ---------------------------------------------------------------------------
+// Earliest unique commit (#158)
+// ---------------------------------------------------------------------------
+
+/** The local-git capability {@link earliestUniqueCommit} needs. */
+export interface RootCommitSource {
+  /** Root (parentless) commits of the repo, or of `rev` when given. */
+  rootCommits(rev?: string): Promise<string[]>;
+}
+
+/**
+ * The repo's *earliest unique commit* — the SHA that goes in
+ * `["r", "<sha>", "euc"]` and groups a repo with its forks across NIP-34
+ * clients.
+ *
+ * Every collaborator must compute the SAME value from the same history, so
+ * the rule is total and has no dependence on rev-list ordering:
+ *
+ * 1. One root commit → that root.
+ * 2. Several roots → only the roots reachable from the default branch are
+ *    candidates; a repo whose default branch resolves to nothing falls back
+ *    to all roots.
+ * 3. Still several candidates → the lexicographically lowest SHA.
+ *
+ * "The default branch" is read as `HEAD`, because a local git repository has
+ * no other notion of one — `HEAD` IS the branch a clone lands on, and it is
+ * what ngit reads for the same tag. The residual ambiguity is narrow (a
+ * multi-root repo whose first push is made from a checked-out branch that
+ * reaches a different root than the default one does) and it closes after
+ * that first push: once an announcement carries an `euc`, every republish
+ * preserves it rather than recomputing, so the value can never drift.
+ *
+ * @returns The chosen SHA, or `null` for a repo with no commits.
+ */
+export async function earliestUniqueCommit(
+  reader: RootCommitSource
+): Promise<string | null> {
+  const all = await reader.rootCommits();
+  if (all.length === 0) return null;
+  if (all.length === 1) return all[0] ?? null;
+  const onDefaultBranch = await reader.rootCommits('HEAD');
+  const candidates = onDefaultBranch.length > 0 ? onDefaultBranch : all;
+  return [...candidates].sort()[0] ?? null;
+}
+
+/**
+ * The `euc` an announcement already declares, or `null`.
+ *
+ * A repo's fork identity must never change under its owner, so a republish
+ * reads this FIRST and recomputes nothing when it is non-null.
+ */
+export function announcedEuc(current: ExistingAnnouncement | null): string | null {
+  for (const tag of current?.tags ?? []) {
+    if (tag[0] === 'r' && tag[2] === EARLIEST_UNIQUE_COMMIT_MARKER) {
+      const sha = tag[1];
+      if (sha !== undefined && sha.length > 0) return sha;
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Conformance tags (#158)
+// ---------------------------------------------------------------------------
+
+/**
+ * What rig knows, at publish time, about where this repo lives — the inputs
+ * for the three NIP-34 conformance tags.
+ */
+export interface ConformanceFacts {
+  /** Relay URLs this publish is going to. Emitted as ONE `relays` tag. */
+  relays: readonly string[];
+  /** The repo's rig-web viewer URL, or `null` when it cannot be derived. */
+  web: string | null;
+  /**
+   * The `euc` computed from the LOCAL repository ({@link earliestUniqueCommit}),
+   * or `null` when there is no local repo to compute it from. Ignored when the
+   * announcement already carries one.
+   */
+  earliestUniqueCommit: string | null;
+}
+
+/**
+ * Every value a multi-valued tag already carries on `current`, in order,
+ * followed by `additions` that are not already there. Blank-stripped and
+ * deduped, so a repeat republish adds nothing.
+ */
+function unionValues(
+  current: ExistingAnnouncement | null,
+  name: string,
+  additions: readonly string[]
+): string[] {
+  const existing: string[] = [];
+  for (const tag of current?.tags ?? []) {
+    if (tag[0] === name) existing.push(...tag.slice(1));
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of [...existing, ...additions]) {
+    const trimmed = value.trim();
+    if (trimmed.length === 0 || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+/**
+ * The conformance-tag edits to fold into an {@link amendRepoAnnouncement}
+ * call — the backfill every owner-initiated republish performs.
+ *
+ * `relays` and `web` are UNIONED into what the announcement already declares,
+ * never substituted for it. rig's statement is "this repo also lives at this
+ * relay, and can also be browsed here" — a repo announced by another NIP-34
+ * client keeps that client's relay list and viewer URL, and gains rig's. The
+ * existing values lead, in their original order, so a second republish that
+ * adds nothing new is a no-op and costs nothing (see
+ * {@link diffAnnouncementTags}).
+ *
+ * Union, not rewrite, is what makes a rig republish safe on a repo rig does
+ * not exclusively own: dropping another client's relay would strand that
+ * client's readers, and #158's "the relay URLs the publish is going to" is
+ * satisfied as long as rig's relay is IN the list. Removing a stale relay or
+ * viewer URL is therefore never automatic — it is a deliberate edit.
+ *
+ * The `euc` is written only when the announcement does not already declare
+ * one: a repo's fork identity must never change under its owner, even if the
+ * local root commit differs (a shallow clone, a rewritten history, a
+ * different worktree). Omitted slots are left exactly as they are, which is
+ * what makes this composable with a `maintainers` or `payout` edit.
+ *
+ * `clone` is deliberately absent: rig has no git-clonable URL, and emitting
+ * one would send other clients to a fetch that cannot succeed. An existing
+ * `clone` tag is unknown to {@link SLOTS} and rides along verbatim.
+ */
+export function conformanceEdits(
+  current: ExistingAnnouncement | null,
+  facts: ConformanceFacts
+): Pick<AnnouncementEdits, 'relays' | 'web' | 'earliestUniqueCommit'> {
+  const edits: Pick<
+    AnnouncementEdits,
+    'relays' | 'web' | 'earliestUniqueCommit'
+  > = {};
+  const relays = unionValues(current, RELAYS_TAG, facts.relays);
+  if (relays.length > 0) edits.relays = relays;
+  const web = unionValues(current, WEB_TAG, facts.web === null ? [] : [facts.web]);
+  if (web.length > 0) edits.web = web;
+  if (announcedEuc(current) === null && facts.earliestUniqueCommit !== null) {
+    edits.earliestUniqueCommit = facts.earliestUniqueCommit;
+  }
+  return edits;
+}
+
+// ---------------------------------------------------------------------------
+// Diffing a republish (#158)
+// ---------------------------------------------------------------------------
+
+/** Tag-level difference between the current announcement and the next one. */
+export interface AnnouncementDiff {
+  /** Tags the republish adds (or changes into). */
+  added: string[][];
+  /** Tags the republish drops (or changes away from). */
+  removed: string[][];
+  /**
+   * True when the republish would change nothing on the wire — derived from
+   * `added`/`removed`, and named because "is this republish worth paying for?"
+   * is the question every caller actually asks.
+   */
+  unchanged: boolean;
+}
+
+/** A tag as a comparison key — tag values are ordered, so this is exact. */
+function tagKey(tag: string[]): string {
+  return JSON.stringify(tag);
+}
+
+/**
+ * What a republish would change, as a multiset difference over whole tags.
+ *
+ * This is what a confirmation gate shows the owner before they pay, and what
+ * lets a refresh publish nothing when there is nothing to change. Tag ORDER is
+ * not a difference — {@link amendRepoAnnouncement} already guarantees order is
+ * preserved, and an owner should not be charged for a reordering.
+ */
+export function diffAnnouncementTags(
+  current: ExistingAnnouncement | null,
+  next: UnsignedEvent
+): AnnouncementDiff {
+  const remaining = new Map<string, number>();
+  for (const tag of current?.tags ?? []) {
+    remaining.set(tagKey(tag), (remaining.get(tagKey(tag)) ?? 0) + 1);
+  }
+  const added: string[][] = [];
+  for (const tag of next.tags) {
+    const key = tagKey(tag);
+    const count = remaining.get(key) ?? 0;
+    if (count > 0) remaining.set(key, count - 1);
+    else added.push([...tag]);
+  }
+  const removed: string[][] = [];
+  for (const [key, count] of remaining) {
+    for (let i = 0; i < count; i += 1) {
+      removed.push(JSON.parse(key) as string[]);
+    }
+  }
+  return {
+    added,
+    removed,
+    unchanged: added.length === 0 && removed.length === 0,
+  };
+}

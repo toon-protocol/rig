@@ -396,3 +396,57 @@ describe('injection safety', () => {
     }
   });
 });
+
+describe('rootCommits (#158 — the euc source)', () => {
+  it('reports the single root of a linear history', async () => {
+    expect(await reader.rootCommits()).toEqual([commit1]);
+    expect(await reader.rootCommits('HEAD')).toEqual([commit1]);
+  });
+
+  it('reports every root, and only those reachable from a rev', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'toon-roots-'));
+    try {
+      git(['init', '--initial-branch=main'], dir);
+      writeFileSync(join(dir, 'a.txt'), 'a\n');
+      git(['add', '.'], dir);
+      git(['commit', '-m', 'main root'], dir);
+      const mainRoot = git(['rev-parse', 'HEAD'], dir);
+
+      // An UNRELATED history: a second root reachable only from `orphan`.
+      git(['checkout', '--orphan', 'orphan'], dir);
+      git(['rm', '-rf', '.'], dir);
+      writeFileSync(join(dir, 'b.txt'), 'b\n');
+      git(['add', '.'], dir);
+      git(['commit', '-m', 'orphan root'], dir);
+      const orphanRoot = git(['rev-parse', 'HEAD'], dir);
+      git(['checkout', 'main'], dir);
+
+      const roots = new GitRepoReader(dir);
+      expect(new Set(await roots.rootCommits())).toEqual(
+        new Set([mainRoot, orphanRoot])
+      );
+      // HEAD is main: the orphan root is not reachable from it.
+      expect(await roots.rootCommits('HEAD')).toEqual([mainRoot]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports no roots for a repo with no commits (unborn HEAD)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'toon-empty-'));
+    try {
+      git(['init', '--initial-branch=main'], dir);
+      const empty = new GitRepoReader(dir);
+      expect(await empty.rootCommits()).toEqual([]);
+      expect(await empty.rootCommits('HEAD')).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an option/shell-shaped revision before spawning git', async () => {
+    await expect(reader.rootCommits('--all')).rejects.toThrow(
+      /not a valid git revision/
+    );
+  });
+});

@@ -65,6 +65,9 @@ describe('dispatch precedence (rig-owned verbs never pass through)', () => {
     ['chain'],
     ['entry'],
     ['name'],
+    ['maintainers'],
+    ['payout'],
+    ['refresh'],
   ])('rig %s --help is answered by rig, not git', async (verb) => {
     const h = makeHarness();
     expect(await dispatch([verb, '--help'], h.deps)).toBe(0);

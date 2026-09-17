@@ -24,7 +24,11 @@
 
 import { parseArgs } from 'node:util';
 import { parseMaintainers } from '../nip34-events.js';
-import { amendRepoAnnouncement } from '../repo-announcement.js';
+import {
+  amendRepoAnnouncement,
+  conformanceEdits,
+  diffAnnouncementTags,
+} from '../repo-announcement.js';
 import { ownerToHex } from '../npub.js';
 import { fetchRemoteState } from '../remote-state.js';
 import {
@@ -33,14 +37,10 @@ import {
 } from '../routes.js';
 import type { EventCommandDeps } from './events.js';
 import { emitCliError, InvalidRelayUrlError } from './errors.js';
+import type { IdentityReport } from './push.js';
+import { describeAnnouncementDiff, feeLabel } from './render.js';
 import {
-  defaultLoadStandalone,
-  identityReport,
-  type IdentityReport,
-} from './push.js';
-import { feeLabel } from './render.js';
-import { singleRelayRefusal } from './remote.js';
-import {
+  openAnnouncementRepublish,
   pickRepoCommandFlags,
   REPO_COMMAND_OPTIONS,
   resolveRepoContext,
@@ -193,6 +193,12 @@ interface MaintJsonOutput {
   executed: boolean;
   feeEstimate: string | null;
   maintainers: string[];
+  /**
+   * Every tag the republish adds and drops (#158) — the maintainers edit plus
+   * the conformance backfill. A `--json` consumer sees exactly what the fee
+   * buys, the same as the human confirmation does.
+   */
+  changes: { added: string[][]; removed: string[][] };
   result?: GitEventResponse;
   hint?: string;
 }
@@ -235,65 +241,19 @@ async function runMutate(
 
   let standaloneCtx: StandaloneContext | undefined;
   try {
-    const ctx = await resolveRepoContext(flags, deps);
-    // A single relay for a paid publish (mirror push/events guard).
-    if (ctx.relays.length > 1) {
-      io.err(singleRelayRefusal(ctx.resolved, 'Nothing was published or paid.'));
-      return 1;
-    }
-    const relayUrl = ctx.relays[0];
-    if (relayUrl === undefined || !WS_URL_RE.test(relayUrl)) {
-      throw new InvalidRelayUrlError(
-        relayUrl ?? '',
-        'a paid publish needs a ws:// or wss:// relay'
-      );
-    }
-
-    // Standalone only: the daemon has no announcement route.
-    const load = deps.loadStandalone ?? defaultLoadStandalone;
-    standaloneCtx = await load({
-      env: deps.env,
-      cwd: deps.cwd,
-      warn: (line) => io.err(line),
-      relayUrl,
+    // Every money-safety refusal a paid republish must clear — one relay, the
+    // embedded publisher, owner-only, and no phantom 30617 on an unannounced
+    // repo — lives in ./repo-command.ts, shared with payout and refresh.
+    const opened = await openAnnouncementRepublish({
+      deps,
+      flags,
+      what: 'change the maintainer set',
+      before: 'before managing maintainers',
     });
-    const identity = identityReport(standaloneCtx);
+    standaloneCtx = opened.standalone;
+    if (!opened.ok) return opened.exitCode;
+    const { ctx, relayUrl, identity, remote, facts } = opened;
 
-    // Only the owner's 30617 is authoritative — refuse a non-owner republish.
-    if (identity.pubkey.toLowerCase() !== ctx.owner.toLowerCase()) {
-      io.err(
-        `rig: only the repo owner (${ctx.owner.slice(0, 8)}…) can change the ` +
-          `maintainer set — the active identity is ${identity.pubkey.slice(0, 8)}…. ` +
-          'A non-owner republish would write your own (ignored) announcement. ' +
-          'Nothing was published or paid.'
-      );
-      return 1;
-    }
-
-    // Read the current announcement to preserve name/description + base set.
-    const remote = await fetchRemoteState({
-      relayUrls: [relayUrl],
-      ownerPubkey: ctx.owner,
-      repoId: ctx.repoId,
-      ...(deps.webSocketFactory
-        ? { webSocketFactory: deps.webSocketFactory }
-        : {}),
-    });
-    // Refuse on an unannounced repo: republishing here would MINT a phantom
-    // kind:30617 with a placeholder name (= repoId) and empty description, for
-    // real money. Worse, `rig push` only announces when the repo is NOT already
-    // announced (see push.ts), so that placeholder would permanently shadow the
-    // real name/description the first push intended, with no way to fix it.
-    // Managing maintainers presupposes the repo exists — announce it first.
-    if (!remote.announced) {
-      io.err(
-        `rig: 30617:${ctx.owner.slice(0, 8)}…:${ctx.repoId} has no announcement ` +
-          'yet — run `rig push` to publish the repo (with its real ' +
-          'name/description) before managing maintainers. Nothing was published ' +
-          'or paid.'
-      );
-      return 1;
-    }
     const current = remote.announceEvent
       ? parseMaintainers(remote.announceEvent.tags)
       : [];
@@ -320,11 +280,19 @@ async function runMutate(
     // every tag rig does not model — another client's role tags, `clone`,
     // `blossoms`, … — ride along verbatim instead of being wiped by the
     // replaceable write. Passing a field here would rewrite it.
+    // #158: an owner-initiated republish also BACKFILLS the conformance tags
+    // (`relays`, `web`, and the `euc` when the announcement has none), so a
+    // repo announced before #158 becomes conformant without a special step.
     const event = amendRepoAnnouncement(remote.announceEvent, {
       repoId: ctx.repoId,
       maintainers: next,
+      ...conformanceEdits(remote.announceEvent, facts),
     });
-    const fee = (await standaloneCtx.publisher.getFeeRates()).eventFee.toString();
+    const diff = diffAnnouncementTags(remote.announceEvent, event);
+    const changes = { added: diff.added, removed: diff.removed };
+    const fee = (
+      await opened.standalone.publisher.getFeeRates()
+    ).eventFee.toString();
     const action = `kind:30617 maintainers ${op} ${pubkey.slice(0, 8)}…`;
 
     // ── Confirm gate ────────────────────────────────────────────────────────
@@ -332,6 +300,10 @@ async function runMutate(
       io.out(`Republish ${action}`);
       io.out(`Repo: 30617:${ctx.owner}:${ctx.repoId}`);
       io.out(`Maintainers after: ${next.length === 0 ? '(none)' : next.join(', ')}`);
+      if (!diff.unchanged) {
+        io.out('Tags changed:');
+        for (const line of describeAnnouncementDiff(diff)) io.out(line);
+      }
       io.out(`Fee: ${feeLabel(fee)}. Writes are permanent and non-refundable.`);
     }
     if (!flags.yes) {
@@ -343,6 +315,7 @@ async function runMutate(
           executed: false,
           feeEstimate: fee,
           maintainers: next,
+          changes,
           hint: 'estimate only — re-run with --yes to publish (permanent, non-refundable)',
         } satisfies MaintJsonOutput);
         return 0;
@@ -364,7 +337,7 @@ async function runMutate(
     }
 
     // ── Execute ───────────────────────────────────────────────────────────────
-    const receipt = await standaloneCtx.publisher.publishEvent(event, [
+    const receipt = await opened.standalone.publisher.publishEvent(event, [
       relayUrl,
     ]);
     const result = serializeEventReceipt(event.kind, receipt);
@@ -377,6 +350,7 @@ async function runMutate(
         executed: true,
         feeEstimate: fee,
         maintainers: next,
+        changes,
         result,
       } satisfies MaintJsonOutput);
     } else {

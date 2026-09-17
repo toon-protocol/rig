@@ -47,8 +47,12 @@ export interface GitEstimateRequest {
    * (forward-compat); defaults to the daemon's config-seeded relay.
    */
   relayUrls?: string[];
-  /** Repo name/description for the first-push kind:30617 announcement. */
-  announcement?: { name?: string; description?: string };
+  /**
+   * Repo metadata for the first-push kind:30617 announcement. `web` is the
+   * repo's rig-web viewer URL for the NIP-34 `web` tag (#158); a daemon that
+   * predates it simply ignores the field.
+   */
+  announcement?: { name?: string; description?: string; web?: string };
 }
 
 /** Pre-push fee table (all fees in base/micro units, decimal strings). */
@@ -84,7 +88,17 @@ export interface GitEstimateResponse {
   knownShaToTxId: Record<string, string>;
   /** True when no kind:30617 exists yet — the push announces first. */
   announceNeeded: boolean;
-  announcement: { name: string; description: string };
+  /**
+   * What the first announcement will carry. `web` and `earliestUniqueCommit`
+   * are the NIP-34 conformance tags (#158) and are absent when the planner
+   * could not derive them (no relay resolved, or a repo with no commits).
+   */
+  announcement: {
+    name: string;
+    description: string;
+    web?: string;
+    earliestUniqueCommit?: string;
+  };
   estimate: GitFeeEstimate;
 }
 
