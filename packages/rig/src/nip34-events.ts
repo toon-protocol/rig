@@ -311,7 +311,11 @@ export function buildComment(
  * @param repoId - Repository identifier
  * @param title - Patch/PR title (subject tag)
  * @param commits - Array of { sha, parentSha } for commit and parent-commit tags
- * @param branchTag - Branch name for the t tag
+ * @param branchTag - Branch name, written as the `branch-name` tag (#161) —
+ *                    the wider NIP-34 ecosystem's spelling (used verbatim by
+ *                    kind:1618 pull requests; confirmed against the NIP-34
+ *                    source at implementation time). Never written to `t`:
+ *                    that tag is reserved for real labels.
  * @param content - Real `git format-patch` text (NIP-34 patch body); defaults
  *                  to '' for callers that only reference commits by tag
  * @param description - PR body/cover text (`description` tag) — kept out of
@@ -342,7 +346,7 @@ export function buildPatch(
   }
 
   if (branchTag) {
-    tags.push(['t', branchTag]);
+    tags.push(['branch-name', branchTag]);
   }
 
   return {
