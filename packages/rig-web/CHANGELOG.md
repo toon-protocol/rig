@@ -8,6 +8,22 @@ this heading are recorded by hand; a changeset file is NOT the way to note a
 rig-web change, because an `ignore`d-only changeset is inert and blocks releases
 of `@toon-protocol/rig` (see the changeset gate in `.github/workflows/ci.yml`).
 
+- A job of a run has its own page, with its durable job log (rig#190). The run
+  page lists every job from the run's first Workflow Progress event — before any
+  Job Result exists — and links each to
+  `#/<owner>/<repo>/actions/<run-id>/jobs/<job-id>`, so a maintainer can send a
+  colleague the job that broke rather than the run and an instruction to scroll.
+  A job that has not started, one that is running and one that has concluded are
+  three different badges on both pages: the `in-progress` tag names every job
+  that has not FINISHED, so `deriveRunJobs` reads a job's state off the run and
+  off per-job evidence, never off membership in that tag. The job page reads the
+  durable log back from the `logs` URL — the first read of a job log anywhere in
+  the repo — through a streaming reader that stops at a 2 MiB client-side
+  ceiling (`job-log.ts`), cancels the body there, and says what it did not show
+  and by how much, because the coordinator that wrote the blob may not be one
+  that bounds its uploads. A job with no `logs` URL renders as a job without a
+  log, not as an error.
+
 - `VITE_ARWEAVE_GATEWAY` points rig-web at a self-hosted store gateway (rig#177).
   It is tried ahead of the three public Arweave gateways at
   `<gateway>/raw/<txId>`, with the public list kept behind it as a fallback, and

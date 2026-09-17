@@ -49,3 +49,17 @@ export function formatRelativeDate(timestamp: number): string {
   const years = Math.floor(days / 365);
   return years === 1 ? '1 year ago' : `${years} years ago`;
 }
+
+/** A span of seconds as `45s`, `3m 12s`, `1h 4m`. */
+export function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (m < 60) return `${m}m ${s}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/** A Unix timestamp (seconds) as the viewer's local wall clock, for a tooltip. */
+export function formatClock(timestamp: number): string {
+  return new Date(timestamp * 1000).toLocaleString();
+}

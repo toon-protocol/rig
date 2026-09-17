@@ -486,6 +486,13 @@ export interface CiArtifact {
   name: string;
 }
 
+/**
+ * A Job Result's content is `[log-tail omitted=<bytes>]\n<tail>` (the NIP's
+ * own shape). The header names how much of the job log precedes the excerpt,
+ * so a viewer is never shown a tail without being told what it is a tail of.
+ */
+const LOG_TAIL_HEADER = /^\[log-tail omitted=(\d+)\]\n?/;
+
 export interface CiJobResult {
   eventId: string;
   pubkey: string;
@@ -499,7 +506,10 @@ export interface CiJobResult {
   name?: string;
   conclusion: CiConclusion;
   logsUrl?: string;
+  /** The `[log-tail omitted=N]` excerpt with its header stripped. */
   logTail: string;
+  /** Bytes of job log that precede {@link logTail}; 0 when the header is absent. */
+  logOmittedBytes: number;
   artifacts: CiArtifact[];
   queuedAt?: number;
   startedAt?: number;
@@ -550,6 +560,11 @@ export function parseCiJobResult(event: NostrEvent): CiJobResult | null {
   const queuedAt = parseTimestamp(event.tags, 'queued_at');
   const startedAt = parseTimestamp(event.tags, 'started_at');
   const exitCode = parseTimestamp(event.tags, 'exit_code');
+  const header = LOG_TAIL_HEADER.exec(event.content);
+  const logOmittedBytes = header ? Number(header[1]) : 0;
+  const logTail = header
+    ? event.content.slice(header[0].length)
+    : event.content;
 
   return {
     eventId: event.id,
@@ -563,7 +578,8 @@ export function parseCiJobResult(event: NostrEvent): CiJobResult | null {
     ...(name !== undefined ? { name } : {}),
     conclusion: conclusion as CiConclusion,
     ...(logsUrl !== undefined ? { logsUrl } : {}),
-    logTail: event.content,
+    logTail,
+    logOmittedBytes,
     artifacts,
     ...(queuedAt !== undefined ? { queuedAt } : {}),
     ...(startedAt !== undefined ? { startedAt } : {}),
@@ -801,6 +817,94 @@ export function aggregateRunStatus(
     return 'failure';
   if (runs.some((r) => r.conclusion === 'success')) return 'success';
   return 'neutral';
+}
+
+// ---------------------------------------------------------------------------
+// The jobs of one run (rig#190)
+// ---------------------------------------------------------------------------
+
+/** Where one job of a run stands, as the relay describes it. */
+export type CiJobState = 'pending' | 'running' | 'concluded';
+
+/** One job of a run: listed from the first progress marker, result or not. */
+export interface CiRunJob {
+  jobId: string;
+  state: CiJobState;
+  /** The job's own name when its Job Result gives one, else its id. */
+  label: string;
+  /** The Job Result, once the client holds the event itself. */
+  result?: CiJobResult;
+}
+
+export interface DeriveRunJobsOptions {
+  /**
+   * Jobs with direct evidence of execution — today only a live log tail
+   * (rig#194) can supply it, since a job that has produced output has
+   * demonstrably started. When supplied, a job it does not name is pending.
+   */
+  startedJobIds?: Iterable<string>;
+}
+
+/**
+ * Every job of one run, concluded first, in the order the run reveals them.
+ *
+ * The job list is the union of the Workflow Progress `in-progress` tag and
+ * the `q` job quotes, so a run lists its jobs from its first in_progress
+ * marker onward — before any Job Result has arrived.
+ *
+ * `in-progress` names every job that has NOT FINISHED, not the jobs
+ * executing right now: rig's own coordinator puts the whole workflow in that
+ * tag when the run starts and removes each job as its result is published.
+ * So membership in it can never say whether a job has begun, and this
+ * derivation does not ask it to. A job is:
+ *
+ *  - `concluded` — its Job Result is on record, as the event itself or as a
+ *    `q` quote on the run (the quote is published with the result).
+ *  - `running` — the RUN is executing and the job has started. Absent a
+ *    per-job signal that is read off the run: a queued run has started
+ *    nothing, and an executing run is executing the jobs it has not yet
+ *    concluded. {@link DeriveRunJobsOptions.startedJobIds} refines it with
+ *    per-job evidence when a caller has any.
+ *  - `pending` — it has not started: the run is still queued, the evidence
+ *    says so, or the run ended without ever reaching this job.
+ */
+export function deriveRunJobs(
+  run: Pick<CiRun, 'status' | 'inProgress' | 'jobs'>,
+  results: readonly CiJobResult[] = [],
+  opts: DeriveRunJobsOptions = {}
+): CiRunJob[] {
+  const byId = new Map<string, CiJobResult>();
+  for (const result of results) {
+    if (!byId.has(result.jobId)) byId.set(result.jobId, result);
+  }
+  const quoted = new Set(run.jobs.map((q) => q.jobId));
+  const started = opts.startedJobIds ? new Set(opts.startedJobIds) : null;
+
+  const order: string[] = [];
+  const seen = new Set<string>();
+  for (const jobId of [...quoted, ...byId.keys(), ...run.inProgress]) {
+    if (jobId === '' || seen.has(jobId)) continue;
+    seen.add(jobId);
+    order.push(jobId);
+  }
+
+  return order.map((jobId) => {
+    const result = byId.get(jobId);
+    const concluded = result !== undefined || quoted.has(jobId);
+    const running =
+      run.status === 'in_progress' && (started === null || started.has(jobId));
+    const state: CiJobState = concluded
+      ? 'concluded'
+      : running
+        ? 'running'
+        : 'pending';
+    return {
+      jobId,
+      state,
+      label: result?.name ?? jobId,
+      ...(result ? { result } : {}),
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------

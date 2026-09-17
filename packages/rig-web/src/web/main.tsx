@@ -22,6 +22,7 @@ import { PRListPage } from '@/app/pages/pr-list-page';
 import { PRDetailPage } from '@/app/pages/pr-detail-page';
 import { ActionsPage } from '@/app/pages/actions-page';
 import { RunDetailPage } from '@/app/pages/run-detail-page';
+import { JobDetailPage } from '@/app/pages/job-detail-page';
 import { NotFoundPage } from '@/app/pages/not-found-page';
 import './globals.css';
 
@@ -68,6 +69,13 @@ createRoot(root).render(
                   {/* Actions (rig#125): NIP-C1 workflow runs, per repo and per run. */}
                   <Route path="actions" element={<ActionsPage />} />
                   <Route path="actions/:runId" element={<RunDetailPage />} />
+                  {/* One job of a run (rig#190). Addressed by the run id and
+                      the job id — both fixed for the life of the run, so the
+                      link survives exactly as ADR-0001 asks of rig-web URLs. */}
+                  <Route
+                    path="actions/:runId/jobs/:jobId"
+                    element={<JobDetailPage />}
+                  />
                 </Route>
                 {/* Catch-all: unmatched URLs render an inline card with the
                     header intact instead of an empty page (#277). */}
