@@ -228,6 +228,16 @@ export function buildRepoAnnouncement(
 /**
  * Build a kind:30618 repository refs/state event.
  *
+ * Writes each ref in BOTH shapes, with identical SHAs (rig#157, dual-write
+ * window): the NIP-34 shape `[<refPath>, <sha>]`, where the ref path IS the
+ * tag name — what ngit, gitworkshop.dev and every other conformant client
+ * read — alongside rig's legacy `["r", <refPath>, <sha>]`, so rig installs
+ * older than this release keep fetching. Both shapes are read by
+ * {@link parseStateRefTags} in `./nip34-refs.ts` and by any legacy-only
+ * reader that only knows the `r` shape. `HEAD` and `arweave` tags are
+ * unaffected by this dual-write. The legacy write is removed in a later,
+ * separately ticketed change once older rig versions are unsupported.
+ *
  * @param repoId - Repository identifier (d tag, matches kind:30617)
  * @param refs - Map of ref paths to commit SHAs (e.g., { 'refs/heads/main': 'abc123' })
  * @param arweaveMap - Map of git SHAs to Arweave transaction IDs
@@ -239,9 +249,10 @@ export function buildRepoRefs(
 ): UnsignedEvent {
   const tags: string[][] = [['d', repoId]];
 
-  // Add ref tags
+  // Add ref tags, dual-written in both shapes (rig#157).
   for (const [refPath, commitSha] of Object.entries(refs)) {
-    tags.push(['r', refPath, commitSha]);
+    tags.push([refPath, commitSha]); // NIP-34 shape: ref path is the tag name
+    tags.push(['r', refPath, commitSha]); // legacy shape, dual-write window
   }
 
   // Default HEAD to first ref (typically refs/heads/main)

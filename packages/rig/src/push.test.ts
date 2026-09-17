@@ -31,6 +31,7 @@ import {
 import { GitRepoReader } from './repo-reader.js';
 import type { RemoteState } from './remote-state.js';
 import { NonFastForwardError, executePush, planPush } from './push.js';
+import { parseStateRefTags } from './nip34-refs.js';
 
 // ---------------------------------------------------------------------------
 // Fixture repository
@@ -543,9 +544,13 @@ describe('executePush', () => {
 
     const refsEvent = publisher.published[1]!.event;
     expect(tagValues(refsEvent, 'd')[0]).toEqual([REPO_ID]);
+    // Legacy shape (rig#157: dual-write window).
     const rTags = new Map(tagValues(refsEvent, 'r').map(([k, v]) => [k, v]));
     expect(rTags.get('refs/heads/main')).toBe(commit2);
     expect(rTags.get('refs/tags/v1')).toBe(tagSha);
+    // NIP-34 shape, identical SHAs — the ref path IS the tag name.
+    expect(tagValues(refsEvent, 'refs/heads/main')[0]).toEqual([commit2]);
+    expect(tagValues(refsEvent, 'refs/tags/v1')[0]).toEqual([tagSha]);
     expect(tagValues(refsEvent, 'HEAD')[0]).toEqual(['ref: refs/heads/main']);
     const arweaveTags = new Map(
       tagValues(refsEvent, 'arweave').map(([k, v]) => [k, v])
@@ -559,6 +564,49 @@ describe('executePush', () => {
     expect(result.uploads.every((u) => !u.skipped)).toBe(true);
     expect(result.totalFeePaid).toBe(plan.estimate.totalFee);
     expect(result.arweaveMap.size).toBe(plan.objects.length);
+  });
+
+  it('the refs event a push hands to the Publisher round-trips through the #156 dual-shape reader AND a legacy-only reader (rig#157)', async () => {
+    const remote = cannedRemote();
+    const plan = await planPush({
+      repoReader: reader,
+      remoteState: remote,
+      feeRates: FEE_RATES,
+      repoId: REPO_ID,
+      refs: ['refs/heads/main', 'refs/tags/v1'],
+      announcement: { name: 'Push Fixture', description: 'a test repo' },
+    });
+    const publisher = new MockPublisher();
+    await executePush({
+      plan,
+      publisher,
+      remoteState: remote,
+      repoReader: reader,
+      relayUrls: RELAYS,
+    });
+
+    const refsEvent = publisher.published.find((p) => p.event.kind === 30618);
+    if (!refsEvent) throw new Error('expected a kind:30618 refs event');
+
+    const expected = {
+      'refs/heads/main': commit2,
+      'refs/tags/v1': tagSha,
+    };
+
+    // #156's shared reader sees identical refs via the NIP shape.
+    const { refs: viaDualShapeReader } = parseStateRefTags(
+      refsEvent.event.tags
+    );
+    expect(Object.fromEntries(viaDualShapeReader)).toEqual(expected);
+
+    // A reader that only knows the legacy ["r", <ref>, <sha>] shape — an
+    // older rig install — recovers the same refs with the same SHAs.
+    const viaLegacyOnlyReader = Object.fromEntries(
+      refsEvent.event.tags
+        .filter((t) => t[0] === 'r' && t[1] !== 'HEAD')
+        .map((t) => [t[1], t[2]])
+    );
+    expect(viaLegacyOnlyReader).toEqual(expected);
   });
 
   it('cumulative merge: prior arweave hints and unrelated remote refs survive', async () => {
@@ -600,6 +648,11 @@ describe('executePush', () => {
     const rTags = new Map(tagValues(refsEvent, 'r').map(([k, v]) => [k, v]));
     expect(rTags.get('refs/heads/main')).toBe(commit2);
     expect(rTags.get('refs/heads/legacy')).toBe(UNKNOWN_SHA);
+    // Same full state in the NIP-34 shape too, identical SHAs.
+    expect(tagValues(refsEvent, 'refs/heads/main')[0]).toEqual([commit2]);
+    expect(tagValues(refsEvent, 'refs/heads/legacy')[0]).toEqual([
+      UNKNOWN_SHA,
+    ]);
 
     // arweave tags = MERGE of old hints + new uploads (nothing dropped).
     const arweaveTags = new Map(
