@@ -34,6 +34,7 @@ import {
   parseCiWorkflowResult,
   repoAddress,
 } from '../ci/nip-c1-events.js';
+import { LOG_UPLOAD_CAP_BYTES } from '../ci/coordinator.js';
 import { FakeRunner, type RunnerRunResult } from '../ci/runner.js';
 import { sha256Hex } from '../ci/workflows.js';
 import type { NostrEvent } from '../remote-state.js';
@@ -964,13 +965,17 @@ describe('rig ci serve: --requester (story 21)', () => {
 describe('rig ci serve: the wallet check (story 15)', () => {
   const RATES = { uploadFee: 1000n, uploadPerKib: 10n, eventFee: 5n };
 
-  it('estimates a run as events × eventFee + uploads × the metered upload charge', () => {
-    // 4 events × 5 + 1 upload × (1000 + 10 × (⌊sealed(64 KiB)/1024⌋ + 1))
+  it('estimates a run as events × eventFee + uploads × the metered upload charge, at the actual upload cap (ADR-0003)', () => {
+    // 4 events × 5 + 1 upload × (1000 + 10 × (⌊sealed(cap)/1024⌋ + 1))
     expect(estimateRunCost({ events: 4, uploads: 1, rates: RATES })).toBe(
       20n +
         1000n +
         10n *
-          BigInt(Math.floor((Math.ceil((64 * 1024) / 3) * 4 + 704) / 1024) + 1)
+          BigInt(
+            Math.floor(
+              (Math.ceil(LOG_UPLOAD_CAP_BYTES / 3) * 4 + 704) / 1024
+            ) + 1
+          )
     );
   });
 
