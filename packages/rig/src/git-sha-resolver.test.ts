@@ -76,7 +76,11 @@ describe('gatewayShaResolver', () => {
     expect(await resolve(SHA, REPO)).toBe(TX);
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe(`${GATEWAY}/graphql`);
-    expect(calls.some((c) => c.url.includes('arweave.net'))).toBe(false);
+    // Compare the parsed host, not a substring: a URL merely containing
+    // 'arweave.net' anywhere is a different claim from one addressed to it.
+    expect(calls.map((c) => new URL(c.url).hostname)).not.toContain(
+      'arweave.net'
+    );
   });
 
   it('queries the Git-SHA + Repo tag pair the store stamps on uploads', async () => {
