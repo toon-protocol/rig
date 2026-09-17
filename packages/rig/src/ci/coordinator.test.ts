@@ -37,8 +37,10 @@ import {
 } from './ci-testkit.js';
 import {
   startCoordinator,
+  boundLogForUpload,
   logTail,
   movedRefs,
+  LOG_UPLOAD_CAP_BYTES,
   type CoordinatorHandle,
   type CoordinatorOptions,
 } from './coordinator.js';
@@ -1479,6 +1481,31 @@ describe('helpers', () => {
     expect(Buffer.byteLength(tail)).toBe(4096);
     expect(omitted).toBe(5003 - 4096);
     expect(logTail('short')).toEqual({ tail: 'short', omitted: 0 });
+  });
+
+  it('boundLogForUpload uploads a log under the cap whole, unchanged', () => {
+    const small = 'a small job log\n'.repeat(10);
+    const bounded = boundLogForUpload(small);
+    expect(bounded.toString('utf-8')).toBe(small);
+    expect(bounded.byteLength).toBeLessThan(LOG_UPLOAD_CAP_BYTES);
+  });
+
+  it('boundLogForUpload bounds an over-cap log to head + marker + tail, never exceeding the cap', () => {
+    const head = 'SETUP '.repeat(200_000); // well over 512 KiB on its own
+    const tail = 'FAILURE '.repeat(200_000); // well over 512 KiB on its own
+    const big = head + tail;
+    const bounded = boundLogForUpload(big);
+
+    expect(bounded.byteLength).toBeLessThanOrEqual(LOG_UPLOAD_CAP_BYTES);
+    const text = bounded.toString('utf-8');
+    expect(text.startsWith('SETUP ')).toBe(true);
+    expect(text.endsWith('FAILURE ')).toBe(true);
+
+    const markerMatch = /\[\.\.\. (\d+) bytes omitted/.exec(text);
+    expect(markerMatch).not.toBeNull();
+    const omitted = Number(markerMatch?.[1]);
+    expect(omitted).toBeGreaterThan(0);
+    expect(omitted).toBeLessThan(Buffer.byteLength(big));
   });
 
   it('movedRefs reports new and changed refs only', () => {

@@ -54,6 +54,7 @@ import {
   type NodeSelfDescription,
   type ToonClientConfig,
 } from '@toon-protocol/client';
+import { shaResolverFor } from '../git-sha-resolver.js';
 import { fetchRemoteState } from '../remote-state.js';
 import {
   ChannelMapStore,
@@ -523,7 +524,13 @@ export async function createStandaloneContext(
         identitySourceLabel: identity.sourceLabel,
         publisher: new UnconfiguredPublisher(missing),
         defaultRelayUrls,
-        fetchRemote: (args) => fetchRemoteState(args),
+        // SHAs the 30618 object map does not cover are resolved against
+        // the configured gateway's GraphQL endpoint, not arweave.net (#183).
+        fetchRemote: (args) =>
+          fetchRemoteState({
+            ...args,
+            resolveSha: shaResolverFor(undefined, env),
+          }),
         stop: () => Promise.resolve(),
       };
     }
@@ -638,7 +645,12 @@ export async function createStandaloneContext(
       identitySourceLabel: identity.sourceLabel,
       publisher,
       defaultRelayUrls,
-      fetchRemote: (args) => fetchRemoteState(args),
+      // As above (#183): the GraphQL fallback follows RIG_ARWEAVE_GATEWAY.
+      fetchRemote: (args) =>
+        fetchRemoteState({
+          ...args,
+          resolveSha: shaResolverFor(undefined, env),
+        }),
       money,
       stop,
     };

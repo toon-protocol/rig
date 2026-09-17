@@ -35,6 +35,7 @@ import {
 import {
   DEFAULT_CONCURRENCY,
   DEFAULT_RUN_TIMEOUT_MS,
+  LOG_UPLOAD_CAP_BYTES,
   startCoordinator,
   type CanAfford,
   type ConcludedRun,
@@ -55,6 +56,7 @@ import {
   configuredGateway,
   readGatewaysFor,
 } from '../gateway-preference.js';
+import { shaResolverFor } from '../git-sha-resolver.js';
 import { hexToNpub, ownerToHex } from '../npub.js';
 import type { CiDeps } from './ci.js';
 import { rigVersion } from './dispatch.js';
@@ -317,11 +319,14 @@ export function actRunnerOptions(
 
 /** What one run is estimated to cost, in the smallest asset unit. */
 export function estimateRunCost(estimate: RunCostEstimate): bigint {
-  // Logs and artifacts are metered per KiB on the store route; 64 KiB is a
-  // generous per-upload envelope for a log tail's full file.
+  // Logs and artifacts are metered per KiB on the store route. The
+  // per-upload envelope is LOG_UPLOAD_CAP_BYTES — the coordinator never
+  // uploads a job log larger than that (ADR-0003) — so this is an actual
+  // bound, not a guess.
   return (
     BigInt(estimate.events) * estimate.rates.eventFee +
-    BigInt(estimate.uploads) * uploadChargeFor(estimate.rates, 64 * 1024)
+    BigInt(estimate.uploads) *
+      uploadChargeFor(estimate.rates, LOG_UPLOAD_CAP_BYTES)
   );
 }
 
@@ -527,7 +532,10 @@ export async function runCiServe(
         ? { webSocketFactory: forced.webSocketFactory }
         : {}),
       ...(forced.fetchFn ? { fetchFn: forced.fetchFn } : {}),
-      ...(forced.resolveSha ? { resolveSha: forced.resolveSha } : {}),
+      // SHAs the object map does not cover are resolved against the SAME
+      // permaweb the objects are read from, not arweave.net (#183).
+      resolveSha:
+        forced.resolveSha ?? shaResolverFor(flags.gateway, forced.env),
       ...(forced.clock ? { clock: forced.clock } : {}),
       ...(firstRun
         ? { onRunConcluded: (run: ConcludedRun) => concludeFirstRun(run) }

@@ -7,7 +7,7 @@
  * the immediately-push-capable configuration (toon.* + origin remote).
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
@@ -20,6 +20,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { clearShaCache } from '@toon-protocol/arweave';
+import { clearGatewayShaCache } from '../git-sha-resolver.js';
 import { EMPTY_BLOB_SHA } from '../objects.js';
 import { hexToNpub } from '../npub.js';
 import type { NostrEvent } from '../remote-state.js';
@@ -48,6 +49,8 @@ const RELAY = 'wss://relay.test.example';
 const cleanups: string[] = [];
 afterEach(() => {
   clearShaCache();
+  clearGatewayShaCache();
+  vi.unstubAllGlobals();
   for (const dir of cleanups.splice(0))
     rmSync(dir, { recursive: true, force: true });
 });
@@ -723,6 +726,78 @@ describe('rig clone --gateway (#176)', () => {
     const code = await runClone([RELAY, `${OWNER}/${REPO}`], world.deps);
     expect(code).toBe(0);
     expect(world.gateway.requests.some((u) => u.includes('/raw/'))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The Git-SHA GraphQL fallback follows the same gateway (#183)
+// ---------------------------------------------------------------------------
+
+/**
+ * Record every GraphQL POST the process makes, answering each `Git-SHA` tag
+ * query the way a gateway holding the object would. The resolver reaches the
+ * network through the global fetch — the mock GATEWAY seam (`deps.fetchFn`)
+ * serves object bytes only — so this is where the endpoint becomes visible.
+ */
+function stubGraphqlEndpoint(): string[] {
+  const urls: string[] = [];
+  vi.stubGlobal('fetch', async (url: string, init: { body?: string }) => {
+    urls.push(String(url));
+    const { query } = JSON.parse(String(init.body)) as { query: string };
+    const sha = /values: \["([0-9a-f]{40})"\]/.exec(query)?.[1] ?? '';
+    return {
+      ok: true,
+      json: async () => ({
+        data: { transactions: { edges: [{ node: { id: txFor(sha) } }] } },
+      }),
+    };
+  });
+  return urls;
+}
+
+/** A clone whose 30618 map is missing one object: only GraphQL can place it. */
+function makeGapWorld(): CloneWorld {
+  const world = makeWorld();
+  const refsEvent = world.events[1] as NostrEvent;
+  const mapped = refsEvent.tags.filter((t) => t[0] === 'arweave');
+  const victim = mapped[mapped.length - 1] as string[];
+  refsEvent.tags = refsEvent.tags.filter((t) => t !== victim);
+  // The real resolver, not the test stub: that is what is under test here.
+  delete world.deps.resolveSha;
+  return world;
+}
+
+describe('the Git-SHA GraphQL fallback (#183)', () => {
+  it('asks the named gateway, never arweave.net', async () => {
+    const world = makeGapWorld();
+    const graphql = stubGraphqlEndpoint();
+
+    const code = await runClone(
+      [RELAY, `${OWNER}/${REPO}`, '--gateway', `${PRIVATE_GATEWAY}/`],
+      world.deps
+    );
+    expect(code).toBe(0);
+    expect(gitText(join(world.cwd, REPO), ['fsck', '--strict'])).toBe('');
+    expect(graphql).toEqual([`${PRIVATE_GATEWAY}/graphql`]);
+  });
+
+  it('follows RIG_ARWEAVE_GATEWAY when --gateway is absent', async () => {
+    const world = makeGapWorld();
+    world.deps.env = { RIG_ARWEAVE_GATEWAY: `${PRIVATE_GATEWAY}/` };
+    const graphql = stubGraphqlEndpoint();
+
+    const code = await runClone([RELAY, `${OWNER}/${REPO}`], world.deps);
+    expect(code).toBe(0);
+    expect(graphql).toEqual([`${PRIVATE_GATEWAY}/graphql`]);
+  });
+
+  it('is the shared arweave.net resolver when no gateway is configured', async () => {
+    const world = makeGapWorld();
+    const graphql = stubGraphqlEndpoint();
+
+    const code = await runClone([RELAY, `${OWNER}/${REPO}`], world.deps);
+    expect(code).toBe(0);
+    expect(graphql).toEqual(['https://arweave.net/graphql']);
   });
 });
 

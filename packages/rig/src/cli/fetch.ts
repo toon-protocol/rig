@@ -13,6 +13,7 @@
 
 import { parseArgs } from 'node:util';
 import { readGateways } from '../gateway-preference.js';
+import { shaResolverFor } from '../git-sha-resolver.js';
 import {
   isSafeRefname,
   runGit,
@@ -196,7 +197,9 @@ export async function runFetch(
       ...(deps.webSocketFactory
         ? { webSocketFactory: deps.webSocketFactory }
         : {}),
-      ...(deps.resolveSha ? { resolveSha: deps.resolveSha } : {}),
+      // The GraphQL fallback for SHAs the map does not cover asks the SAME
+      // permaweb the objects are read from (#183).
+      resolveSha: deps.resolveSha ?? shaResolverFor(gatewayFlag, deps.env),
     });
 
     // Plan the tracking-ref updates (hostile-relay refname gate included).
