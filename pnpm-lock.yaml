@@ -197,6 +197,9 @@ importers:
       marked:
         specifier: ^17.0.5
         version: 17.0.6
+      nostr-tools:
+        specifier: ^2.20.0
+        version: 2.24.1(typescript@5.9.3)
       tailwindcss:
         specifier: ^4.0.0
         version: 4.3.3
