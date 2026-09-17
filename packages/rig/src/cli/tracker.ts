@@ -6,8 +6,9 @@
  * encodings): kind:1621 issues / kind:1617 patches scoped to the repo by the
  * `#a` tag (`30617:<owner>:<repoId>`), kind:1630-1633 status events to derive
  * each item's state (LATEST-WINS: highest created_at, ties broken by lowest
- * id), and kind:1622 comments under `show`. No payments, no channel, no
- * identity — reads are free on TOON.
+ * id), and comments under `show` — NIP-22 kind:1111 (matched on the UPPERCASE
+ * `E` root tag) merged with legacy kind:1622 by `created_at` (#159). No
+ * payments, no channel, no identity — reads are free on TOON.
  *
  * State derivation mirrors rig-web's proven `resolvePRStatus`, upgraded to
  * latest-wins for issues too (a re-opened issue is open again).
@@ -23,7 +24,13 @@ import {
   STATUS_DRAFT_KIND,
   STATUS_OPEN_KIND,
 } from '@toon-protocol/core/nip34';
-import { COMMENT_KIND, authorizedStatusAuthors } from '../nip34-events.js';
+import {
+  COMMENT_KIND,
+  LEGACY_COMMENT_KIND,
+  authorizedStatusAuthors,
+  commentBelongsToThread,
+  firstTagValue,
+} from '../nip34-events.js';
 import { ownerToHex } from '../npub.js';
 import {
   queryRelay,
@@ -64,9 +71,10 @@ ${READ_COMMON_FLAGS}`;
 
 export const ISSUE_SHOW_USAGE = `Usage: rig issue show <event-id> [options]
 
-Show one issue (kind:1621): metadata, derived state, body, and its
-kind:1622 comments — FREE (relay reads only). <event-id> is the 64-char hex
-id \`rig issue create\` printed (also visible in \`rig issue list\`).
+Show one issue (kind:1621): metadata, derived state, body, and its comments
+— NIP-22 kind:1111 merged with legacy kind:1622 in time order — FREE (relay
+reads only). <event-id> is the 64-char hex id \`rig issue create\` printed
+(also visible in \`rig issue list\`).
 
 Options:
 ${READ_COMMON_FLAGS}`;
@@ -85,7 +93,8 @@ export const PR_SHOW_USAGE = `Usage: rig pr show <event-id> [options]
 
 Show one patch/PR (kind:1617): metadata, derived state, the FULL patch text
 (real \`git format-patch\` output — pipe it to \`git am\` to apply), and its
-kind:1622 comments — FREE (relay reads only).
+comments — NIP-22 kind:1111 merged with legacy kind:1622 in time order —
+FREE (relay reads only).
 
 Options:
 ${READ_COMMON_FLAGS}`;
@@ -110,9 +119,8 @@ const STATUS_KINDS = [
   STATUS_DRAFT_KIND,
 ];
 
-function tagValue(tags: string[][], name: string): string | undefined {
-  return tags.find((t) => t[0] === name)?.[1];
-}
+/** Local alias for the shared, case-sensitive tag reader (../nip34-events.ts). */
+const tagValue = firstTagValue;
 
 function tagValues(tags: string[][], name: string): string[] {
   return tags.filter((t) => t[0] === name && t[1]).map((t) => t[1] as string);
@@ -474,14 +482,25 @@ async function fetchItems(
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 
+/** One comment in a merged thread (NIP-22 kind:1111 ∪ legacy kind:1622). */
+interface ShownComment {
+  eventId: string;
+  authorPubkey: string;
+  createdAt: number;
+  content: string;
+  /** Wire kind this comment arrived as: 1111 (NIP-22) or 1622 (legacy). */
+  kind: number;
+  /**
+   * The event this comment replies to — the lowercase `e` tag. Equals the
+   * thread root for a top-level comment; another comment's id for a nested
+   * reply. `null` when the event carries no lowercase `e` (legacy shapes).
+   */
+  replyToEventId: string | null;
+}
+
 interface ShownItem {
   item: TrackerItem;
-  comments: {
-    eventId: string;
-    authorPubkey: string;
-    createdAt: number;
-    content: string;
-  }[];
+  comments: ShownComment[];
   repoATag: string | null;
 }
 
@@ -518,22 +537,27 @@ async function fetchItem(
       [{ kinds: STATUS_KINDS, '#e': [eventId] }],
       ctx.webSocketFactory
     ),
+    // One thread, two wire shapes (#159): NIP-22 kind:1111 comments hang off
+    // the root's UPPERCASE `E` tag (a nested reply's lowercase `e` names its
+    // parent comment, so `#e` would miss it); legacy kind:1622 comments only
+    // ever carry the lowercase `e`. Both are merged below by `created_at`.
     queryAll(
       ctx.relays,
-      [{ kinds: [COMMENT_KIND], '#e': [eventId] }],
+      [
+        { kinds: [COMMENT_KIND], '#E': [eventId] },
+        { kinds: [LEGACY_COMMENT_KIND], '#e': [eventId] },
+      ],
       ctx.webSocketFactory
     ),
   ]);
 
   const comments = [...commentEvents.values()]
-    .filter(
-      (e) =>
-        e.kind === COMMENT_KIND &&
-        e.tags.some((t) => t[0] === 'e' && t[1] === eventId)
-    )
+    .filter((e) => commentBelongsToThread(e, eventId))
     .sort((a, b) => a.created_at - b.created_at)
     .map((e) => ({
       eventId: e.id,
+      kind: e.kind,
+      replyToEventId: tagValue(e.tags, 'e') ?? null,
       authorPubkey: e.pubkey,
       createdAt: e.created_at,
       content: e.content,
@@ -751,9 +775,16 @@ async function runShow(
     io.out('');
     io.out(`Comments (${shown.comments.length}):`);
     for (const comment of shown.comments) {
+      // A nested reply's lowercase `e` names another comment, not the thread
+      // root — surface that so a NIP-22 thread reads as a conversation (#159).
+      const replyTo =
+        comment.replyToEventId !== null &&
+        comment.replyToEventId !== item.eventId
+          ? ` in reply to ${comment.replyToEventId.slice(0, 8)}`
+          : '';
       io.out(
         `--- ${comment.eventId.slice(0, 8)} by ${comment.authorPubkey.slice(0, 8)} ` +
-          `on ${isoDate(comment.createdAt)}`
+          `on ${isoDate(comment.createdAt)}${replyTo}`
       );
       for (const line of comment.content.split('\n')) io.out(line);
     }

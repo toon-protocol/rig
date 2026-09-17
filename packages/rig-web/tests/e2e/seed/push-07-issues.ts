@@ -2,7 +2,7 @@
  * Seed Script: Push 07 — Issues, Labels, Conversations
  *
  * Publishes 2 kind:1621 issue events with labels and multi-client
- * comment threads (kind:1622):
+ * comment threads (NIP-22 kind:1111):
  * - Issue #1: WebSocket reconnection (Alice, enhancement + networking labels)
  * - Issue #2: Deep path navigation (Bob, bug + rig-ui labels)
  *
@@ -10,7 +10,7 @@
  * - Issue #1: Bob, Alice, Charlie (3 comments)
  * - Issue #2: Alice, Bob (2 comments)
  *
- * No new git objects — only publishes kind:1621 issues and kind:1622 comments.
+ * No new git objects — only publishes kind:1621 issues and kind:1111 comments.
  *
  * Story 10.7
  */
@@ -137,45 +137,54 @@ export async function runPush07(
   // -------------------------------------------------------------------------
 
   // Comment 1: Bob on Issue #1
+  // NIP-22 root scope of Issue #1's thread: the issue itself (#159).
+  const issue1Root = {
+    eventId: issue1EventId,
+    kind: issue1Signed.kind,
+    authorPubkey: issue1Signed.pubkey,
+  };
+  const issue2Root = {
+    eventId: issue2EventId,
+    kind: issue2Signed.kind,
+    authorPubkey: issue2Signed.pubkey,
+  };
+
   const c1Unsigned = buildComment(
     push06State.ownerPubkey,
     REPO_ID,
-    issue1EventId,
-    issue1Signed.pubkey,
+    issue1Root,
     'Should we use exponential backoff?'
   );
   const c1Signed = finalizeEvent(c1Unsigned, bobSecretKey);
   const c1Result = await publishWithRetry(bobClient, c1Signed);
   if (!c1Result.success) {
-    throw new Error(`Failed to publish comment 1 on Issue #1 (kind:1622): ${c1Result.error}`);
+    throw new Error(`Failed to publish comment 1 on Issue #1 (kind:1111): ${c1Result.error}`);
   }
 
   // Comment 2: Alice on Issue #1
   const c2Unsigned = buildComment(
     push06State.ownerPubkey,
     REPO_ID,
-    issue1EventId,
-    issue1Signed.pubkey,
+    issue1Root,
     'Yes, with jitter. See RFC 6298.'
   );
   const c2Signed = finalizeEvent(c2Unsigned, aliceSecretKey);
   const c2Result = await publishWithRetry(aliceClient, c2Signed);
   if (!c2Result.success) {
-    throw new Error(`Failed to publish comment 2 on Issue #1 (kind:1622): ${c2Result.error}`);
+    throw new Error(`Failed to publish comment 2 on Issue #1 (kind:1111): ${c2Result.error}`);
   }
 
   // Comment 3: Charlie on Issue #1
   const c3Unsigned = buildComment(
     push06State.ownerPubkey,
     REPO_ID,
-    issue1EventId,
-    issue1Signed.pubkey,
+    issue1Root,
     'What about connection pooling?'
   );
   const c3Signed = finalizeEvent(c3Unsigned, charlieSecretKey);
   const c3Result = await publishWithRetry(charlieClient, c3Signed);
   if (!c3Result.success) {
-    throw new Error(`Failed to publish comment 3 on Issue #1 (kind:1622): ${c3Result.error}`);
+    throw new Error(`Failed to publish comment 3 on Issue #1 (kind:1111): ${c3Result.error}`);
   }
 
   // -------------------------------------------------------------------------
@@ -186,28 +195,26 @@ export async function runPush07(
   const c4Unsigned = buildComment(
     push06State.ownerPubkey,
     REPO_ID,
-    issue2EventId,
-    issue2Signed.pubkey,
+    issue2Root,
     'Reproduced at depth 3+'
   );
   const c4Signed = finalizeEvent(c4Unsigned, aliceSecretKey);
   const c4Result = await publishWithRetry(aliceClient, c4Signed);
   if (!c4Result.success) {
-    throw new Error(`Failed to publish comment 1 on Issue #2 (kind:1622): ${c4Result.error}`);
+    throw new Error(`Failed to publish comment 1 on Issue #2 (kind:1111): ${c4Result.error}`);
   }
 
   // Comment 5: Bob on Issue #2
   const c5Unsigned = buildComment(
     push06State.ownerPubkey,
     REPO_ID,
-    issue2EventId,
-    issue2Signed.pubkey,
+    issue2Root,
     'Root cause is in tree SHA resolution'
   );
   const c5Signed = finalizeEvent(c5Unsigned, bobSecretKey);
   const c5Result = await publishWithRetry(bobClient, c5Signed);
   if (!c5Result.success) {
-    throw new Error(`Failed to publish comment 2 on Issue #2 (kind:1622): ${c5Result.error}`);
+    throw new Error(`Failed to publish comment 2 on Issue #2 (kind:1111): ${c5Result.error}`);
   }
 
   // -------------------------------------------------------------------------

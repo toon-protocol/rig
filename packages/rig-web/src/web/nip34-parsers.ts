@@ -243,13 +243,39 @@ export interface PRMetadata {
   labels?: string[];
 }
 
-/** Parsed comment metadata from a kind:1622 event. */
+/**
+ * NIP-22 comment — the kind NIP-34's "Replies" clause mandates, and the only
+ * kind rig writes since rig#159.
+ */
+export const COMMENT_KIND = 1111;
+/**
+ * rig's pre-#159 comment dialect. READ-ONLY: never written again, merged with
+ * {@link COMMENT_KIND} by `createdAt` so old threads keep rendering.
+ */
+export const LEGACY_COMMENT_KIND = 1622;
+
+/** The only two kinds a comment can arrive as. */
+export type CommentKind = typeof COMMENT_KIND | typeof LEGACY_COMMENT_KIND;
+
+/** Parsed comment metadata from a kind:1111 or legacy kind:1622 event. */
 export interface CommentMetadata {
   eventId: string;
   content: string;
   authorPubkey: string;
   createdAt: number;
+  /**
+   * The item this comment replies to — the lowercase `e` tag. Equals
+   * {@link rootEventId} for a top-level comment; another comment's id for a
+   * nested reply.
+   */
   parentEventId: string;
+  /**
+   * The issue/patch at the top of the thread — the UPPERCASE `E` tag on a
+   * kind:1111, the lone `e` tag on a legacy kind:1622.
+   */
+  rootEventId: string;
+  /** Wire kind this comment arrived as: 1111 (NIP-22) or 1622 (legacy). */
+  kind: CommentKind;
 }
 
 /** Parse a kind:1621 issue event into IssueMetadata. */
@@ -406,12 +432,36 @@ function latestAuthorizedEvent(
   return latest;
 }
 
-/** Parse a kind:1622 comment event into CommentMetadata. */
+/**
+ * Parse a comment event into CommentMetadata — NIP-22 kind:1111 or the legacy
+ * kind:1622 dialect (rig#159).
+ *
+ * A kind:1111 carries BOTH scopes: the UPPERCASE `E` names the thread root
+ * (the issue or patch), the lowercase `e` its immediate parent (the root
+ * itself for a top-level comment, another comment for a reply). One without
+ * an `E` tag is not an issue/patch comment we can place and is rejected.
+ * Legacy kind:1622 has only the lowercase `e`, which IS its root.
+ */
 export function parseComment(event: NostrEvent): CommentMetadata | null {
-  if (event.kind !== 1622) return null;
+  if (event.kind === LEGACY_COMMENT_KIND) {
+    const parentEventId = getTagValue(event.tags, 'e');
+    if (!parentEventId) return null;
+    return {
+      eventId: event.id,
+      content: event.content,
+      authorPubkey: event.pubkey,
+      createdAt: event.created_at,
+      parentEventId,
+      rootEventId: parentEventId,
+      kind: LEGACY_COMMENT_KIND,
+    };
+  }
 
-  const parentEventId = getTagValue(event.tags, 'e');
-  if (!parentEventId) return null;
+  if (event.kind !== COMMENT_KIND) return null;
+
+  const rootEventId = getTagValue(event.tags, 'E');
+  if (!rootEventId) return null;
+  const parentEventId = getTagValue(event.tags, 'e') ?? rootEventId;
 
   return {
     eventId: event.id,
@@ -419,7 +469,30 @@ export function parseComment(event: NostrEvent): CommentMetadata | null {
     authorPubkey: event.pubkey,
     createdAt: event.created_at,
     parentEventId,
+    rootEventId,
+    kind: COMMENT_KIND,
   };
+}
+
+/**
+ * Does `event` belong to the comment thread rooted at `rootEventId`?
+ *
+ * kind:1111 membership is decided by the UPPERCASE `E` tag, matched
+ * case-sensitively — the same rule {@link parsePRUpdate} applies to kind:1619.
+ * A kind:1111 whose only match is a lowercase `e` replies to something else
+ * and is NOT in this thread.
+ */
+export function commentBelongsToThread(
+  event: NostrEvent,
+  rootEventId: string
+): boolean {
+  if (event.kind === COMMENT_KIND) {
+    return event.tags.some((t) => t[0] === 'E' && t[1] === rootEventId);
+  }
+  if (event.kind === LEGACY_COMMENT_KIND) {
+    return event.tags.some((t) => t[0] === 'e' && t[1] === rootEventId);
+  }
+  return false;
 }
 
 /** kind:1630-1633 → the PR status each one sets. */

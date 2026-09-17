@@ -45,15 +45,24 @@ import {
   STATUS_OPEN_KIND,
 } from '@toon-protocol/core/nip34';
 import {
+  COMMENT_KIND,
+  LEGACY_COMMENT_KIND,
   authorizedStatusAuthors,
   buildComment,
   buildIssue,
   buildPatch,
   buildStatus,
+  firstTagValue,
+  type CommentParent,
+  type CommentRoot,
   type StatusKind,
   type UnsignedEvent,
 } from '../nip34-events.js';
-import { fetchRemoteState } from '../remote-state.js';
+import {
+  defaultWebSocketFactory,
+  fetchRemoteState,
+  queryRelay,
+} from '../remote-state.js';
 import { GitRepoReader } from '../repo-reader.js';
 import {
   serializeEventReceipt,
@@ -153,18 +162,27 @@ Related (FREE reads — no payment):
   rig issue list [--state open|closed|all]   list the repo's issues
   rig issue show <event-id>                  one issue + its comments`;
 
-export const COMMENT_USAGE = `Usage: rig comment <root-event-id> --body <text> [options]
+export const COMMENT_USAGE = `Usage: rig comment <target-event-id> --body <text> [options]
 
-Comment (kind:1622) on an issue or patch — a paid publish; writes are
-permanent and non-refundable. <root-event-id> is the 64-char hex id of the
-kind:1621 issue / kind:1617 patch being commented on.
+Comment (NIP-22 kind:1111) on an issue or patch — a paid publish; writes are
+permanent and non-refundable. <target-event-id> is the 64-char hex id of
+either:
+
+  the kind:1621 issue / kind:1617 patch being commented on → a top-level
+    comment, whose NIP-22 root scope (E/K/P) and parent (e/k/p) both name it;
+  an existing kind:1111 comment → a REPLY: the comment becomes the lowercase
+    parent (k=1111) while the uppercase root stays the issue/patch it hangs
+    off.
+
+The target is read from the resolved relay first (a FREE read) so the root's
+kind and author are taken from the wire rather than guessed. The repo
+coordinate rides along as an \`a\` tag for subscription filtering.
+
+Older rig releases read only the legacy kind:1622 dialect and will NOT see
+comments published by this version.
 
 Options:
   --body <text>            comment body (Markdown) [required]
-  --parent-author <pubkey> pubkey of the TARGET event's author (p threading
-                           tag; default: the repo owner)
-  --marker <root|reply>    e-tag marker (default: root — commenting directly
-                           on the issue/patch)
 ${COMMON_FLAGS_USAGE}`;
 
 export const PR_CREATE_USAGE = `Usage: rig pr create --title <title> (--range <range> | --patch-file <path>) [options]
@@ -287,9 +305,14 @@ interface RunEventOptions {
    * publish payload, and the source of truth for the kind. May do real work
    * (pr runs format-patch here), so failures land in the normal error path.
    * ALWAYS called (both paths) — the kind drives rendering, and the daemon
-   * path reuses locally-derived values (e.g. the format-patch output).
+   * path reuses locally-derived values (e.g. the format-patch output, or
+   * `rig comment`'s relay-resolved NIP-22 root). `relayUrl` is the single
+   * resolved relay, `undefined` when none resolved.
    */
-  buildEvent: (addr: GitRepoAddr) => Promise<UnsignedEvent>;
+  buildEvent: (
+    addr: GitRepoAddr,
+    relayUrl: string | undefined
+  ) => Promise<UnsignedEvent>;
   /**
    * Drive the matching daemon `/git/*` route (#279 delegated fast path).
    * Called only after the same-identity check and the confirm gate.
@@ -413,7 +436,7 @@ async function runEvent(opts: RunEventOptions): Promise<number> {
     const addr: GitRepoAddr = { ownerPubkey: owner, repoId };
 
     // Built once: the publish payload AND the kind for rendering.
-    const event = await opts.buildEvent(addr);
+    const event = await opts.buildEvent(addr, relaysUsed[0]);
     const action = `kind:${event.kind} ${actionLabel}`;
 
     // ── Authority pre-check (#287) — warn (do not block) before the gate ────
@@ -619,6 +642,84 @@ export async function runIssue(
 // rig comment
 // ---------------------------------------------------------------------------
 
+/** How long to wait for the relay when resolving a comment's target (#159). */
+const TARGET_LOOKUP_TIMEOUT_MS = 10_000;
+
+/**
+ * Read the event a `rig comment` targets off the relay and derive the NIP-22
+ * threading it implies (#159).
+ *
+ * The root's KIND and AUTHOR are wire facts (`K`/`P`), not something the
+ * caller should have to type or the CLI should guess — so the target is
+ * fetched before anything is paid. Targeting a kind:1111 comment makes the
+ * new comment a reply: that comment becomes the lowercase parent, while the
+ * uppercase root is carried over from the parent's own `E`/`K`/`P`.
+ */
+async function resolveCommentTarget(
+  deps: EventCommandDeps,
+  targetEventId: string,
+  relayUrl: string | undefined
+): Promise<{ root: CommentRoot; parent?: CommentParent }> {
+  if (relayUrl === undefined) {
+    throw new Error(
+      'no relay resolved — a comment needs the target event to derive its ' +
+        'NIP-22 root; pass --relay <url> or configure a remote'
+    );
+  }
+  const found = await queryRelay(
+    relayUrl,
+    { ids: [targetEventId] },
+    TARGET_LOOKUP_TIMEOUT_MS,
+    deps.webSocketFactory ?? defaultWebSocketFactory
+  );
+  const target = found.find((e) => e.id === targetEventId);
+  if (!target) {
+    throw new Error(
+      `event ${targetEventId} not found on ${relayUrl} — nothing was published or paid`
+    );
+  }
+
+  if (target.kind === LEGACY_COMMENT_KIND) {
+    throw new Error(
+      `event ${targetEventId} is a legacy kind:1622 comment — replies to it ` +
+        'are not representable in NIP-22; comment on the issue or patch instead'
+    );
+  }
+
+  if (target.kind === COMMENT_KIND) {
+    // The root scope is carried over VERBATIM from the parent comment, so a
+    // reply lands in the same thread. The relay is permissionless: validate
+    // before copying a stranger's tags into an event we are about to pay for.
+    const rootEventId = firstTagValue(target.tags, 'E');
+    const rootKind = Number(firstTagValue(target.tags, 'K'));
+    const rootAuthor = firstTagValue(target.tags, 'P');
+    if (
+      rootEventId === undefined ||
+      !HEX64_RE.test(rootEventId) ||
+      !Number.isSafeInteger(rootKind) ||
+      rootAuthor === undefined ||
+      !HEX64_RE.test(rootAuthor)
+    ) {
+      throw new Error(
+        `kind:1111 comment ${targetEventId} carries no usable NIP-22 root ` +
+          'scope (E/K/P tags) — cannot derive the thread root to reply into'
+      );
+    }
+    return {
+      root: { eventId: rootEventId, kind: rootKind, authorPubkey: rootAuthor },
+      parent: { eventId: target.id, authorPubkey: target.pubkey },
+    };
+  }
+
+  return {
+    root: {
+      eventId: target.id,
+      kind: target.kind,
+      authorPubkey: target.pubkey,
+    },
+  };
+}
+
 /** Run `rig comment …`; returns the process exit code. */
 export async function runComment(
   args: string[],
@@ -627,16 +728,15 @@ export async function runComment(
   const { io } = deps;
 
   let flags: CommonFlags;
-  let rootEventId: string;
+  let targetEventId: string;
   let body: string;
-  let parentAuthor: string | undefined;
-  let marker: 'root' | 'reply';
   try {
     const { values, positionals } = parseArgs({
       args,
       options: {
         ...COMMON_OPTIONS,
         body: { type: 'string' },
+        // Retired by #159 — parsed only to explain the migration.
         'parent-author': { type: 'string' },
         marker: { type: 'string' },
       },
@@ -647,56 +747,69 @@ export async function runComment(
       io.out(COMMENT_USAGE);
       return 0;
     }
+    if (values.marker !== undefined || values['parent-author'] !== undefined) {
+      throw new Error(
+        '--marker and --parent-author were removed with the move to NIP-22 ' +
+          'kind:1111 (#159): pass the comment you are replying to as ' +
+          '<target-event-id> instead — its author and the thread root are ' +
+          'read from the relay'
+      );
+    }
     if (positionals.length !== 1) {
       throw new Error(
         positionals.length === 0
-          ? '<root-event-id> is required'
-          : `expected exactly one <root-event-id>, got ${positionals.length} positionals`
+          ? '<target-event-id> is required'
+          : `expected exactly one <target-event-id>, got ${positionals.length} positionals`
       );
     }
-    rootEventId = positionals[0] as string;
-    assertHex64(rootEventId, '<root-event-id>');
+    targetEventId = positionals[0] as string;
+    assertHex64(targetEventId, '<target-event-id>');
     if (values.body === undefined || values.body === '') {
       throw new Error('--body is required');
     }
     body = values.body;
-    parentAuthor = values['parent-author'];
-    if (parentAuthor !== undefined) assertHex64(parentAuthor, '--parent-author');
-    const rawMarker = values.marker ?? 'root';
-    if (rawMarker !== 'root' && rawMarker !== 'reply') {
-      throw new Error(`--marker must be root or reply (got ${JSON.stringify(rawMarker)})`);
-    }
-    marker = rawMarker;
   } catch (err) {
     io.err(err instanceof Error ? err.message : String(err));
     io.err(COMMENT_USAGE);
     return 2;
   }
 
+  // Resolved once in buildEvent (always called, both transports) and reused
+  // by the daemon request, so the CLI is the single place that reads the wire.
+  let threading: { root: CommentRoot; parent?: CommentParent } | undefined;
+
   return runEvent({
     command: 'comment',
     flags,
     deps,
-    actionLabel: `comment on ${rootEventId.slice(0, 8)}…`,
-    buildEvent: async (addr) =>
-      buildComment(
+    actionLabel: `comment on ${targetEventId.slice(0, 8)}…`,
+    buildEvent: async (addr, relayUrl) => {
+      threading = await resolveCommentTarget(deps, targetEventId, relayUrl);
+      return buildComment(
         addr.ownerPubkey,
         addr.repoId,
-        rootEventId,
-        parentAuthor ?? addr.ownerPubkey,
+        threading.root,
         body,
-        marker
-      ),
-    sendDaemon: (client, addr) =>
-      client.gitComment({
+        threading.parent
+      );
+    },
+    sendDaemon: (client, addr) => {
+      // runEvent always builds the event first, on both transports.
+      if (threading === undefined) {
+        throw new Error(
+          'internal: the comment target was not resolved before the publish'
+        );
+      }
+      const { root, parent } = threading;
+      return client.gitComment({
         repoAddr: addr,
-        rootEventId,
         body,
-        ...(parentAuthor !== undefined
-          ? { parentAuthorPubkey: parentAuthor }
-          : {}),
-        marker,
-      }),
+        rootEventId: root.eventId,
+        rootKind: root.kind,
+        rootAuthorPubkey: root.authorPubkey,
+        ...(parent !== undefined ? { parentComment: parent } : {}),
+      });
+    },
   });
 }
 

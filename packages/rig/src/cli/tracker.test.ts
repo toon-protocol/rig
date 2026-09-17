@@ -6,6 +6,14 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import {
+  NGIT_COMMENT_THREAD_COMMENTS,
+  NGIT_COMMENT_THREAD_COMMENT_EVENT_IDS,
+  NGIT_COMMENT_THREAD_NESTED_REPLY_ID,
+  NGIT_COMMENT_THREAD_NESTED_REPLY_PARENT_ID,
+  NGIT_COMMENT_THREAD_ROOT,
+  NGIT_COMMENT_THREAD_ROOT_EVENT_ID,
+} from '../nip34-fixtures/index.js';
 import type { NostrEvent } from '../remote-state.js';
 import type { CliIo } from './output.js';
 import {
@@ -628,5 +636,184 @@ describe('rig pr list/show', () => {
         description: 'Why: the feature was missing.',
       }),
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// NIP-22 comments (#159): kind:1111 ∪ legacy kind:1622 as ONE thread
+// ---------------------------------------------------------------------------
+
+describe('comment threads merge kind:1111 and legacy kind:1622 (#159)', () => {
+  /** A kind:1111 comment in the NIP-22 shape rig and ngit both write. */
+  function nip22Comment(opts: {
+    id: string;
+    createdAt: number;
+    content: string;
+    rootId: string;
+    rootKind: number;
+    parentId?: string;
+  }): NostrEvent {
+    const parentId = opts.parentId ?? opts.rootId;
+    return event({
+      id: opts.id,
+      kind: 1111,
+      created_at: opts.createdAt,
+      content: opts.content,
+      tags: [
+        ['E', opts.rootId, '', AUTHOR],
+        ['K', String(opts.rootKind)],
+        ['P', AUTHOR],
+        ['e', parentId, '', AUTHOR],
+        ['k', opts.parentId === undefined ? String(opts.rootKind) : '1111'],
+        ['p', AUTHOR],
+        ['a', A_TAG],
+      ],
+    });
+  }
+
+  it('issue show renders the captured ngit kind:1111 thread, nested reply included', async () => {
+    const io = makeTestIo();
+    const events = [NGIT_COMMENT_THREAD_ROOT, ...NGIT_COMMENT_THREAD_COMMENTS];
+    const code = await runIssueShow(
+      [NGIT_COMMENT_THREAD_ROOT_EVENT_ID, '--relay', RELAY, '--json'],
+      makeDeps(io, 'object', events)
+    );
+    expect(code).toBe(0);
+    const doc = io.jsonDocs[0] as {
+      comments: { eventId: string; kind: number; replyToEventId: string }[];
+    };
+    // All five captured comments, oldest first.
+    expect(doc.comments.map((c) => c.eventId)).toEqual(
+      NGIT_COMMENT_THREAD_COMMENT_EVENT_IDS
+    );
+    expect(doc.comments.every((c) => c.kind === 1111)).toBe(true);
+    // The genuine nested reply keeps its parent comment, not the root issue.
+    const reply = doc.comments.find(
+      (c) => c.eventId === NGIT_COMMENT_THREAD_NESTED_REPLY_ID
+    );
+    expect(reply).toBeDefined();
+    expect(reply?.replyToEventId).toBe(
+      NGIT_COMMENT_THREAD_NESTED_REPLY_PARENT_ID
+    );
+  });
+
+  it('issue show text output marks the nested reply', async () => {
+    const io = makeTestIo();
+    const code = await runIssueShow(
+      [NGIT_COMMENT_THREAD_ROOT_EVENT_ID, '--relay', RELAY],
+      makeDeps(io, 'object', [
+        NGIT_COMMENT_THREAD_ROOT,
+        ...NGIT_COMMENT_THREAD_COMMENTS,
+      ])
+    );
+    expect(code).toBe(0);
+    const text = io.outLines.join('\n');
+    expect(text).toContain('Comments (5):');
+    expect(text).toContain(
+      `in reply to ${NGIT_COMMENT_THREAD_NESTED_REPLY_PARENT_ID.slice(0, 8)}`
+    );
+  });
+
+  it('a mixed 1622 + 1111 thread reads as one conversation in time order', async () => {
+    const io = makeTestIo();
+    const LEGACY_ID = '7a'.repeat(32);
+    const NEW_ID = '7b'.repeat(32);
+    const events: NostrEvent[] = [
+      ...EVENTS,
+      // Legacy dialect, written before this release.
+      event({
+        id: LEGACY_ID,
+        kind: 1622,
+        created_at: 1200,
+        content: 'legacy comment',
+        tags: [
+          ['e', ISSUE_OPEN_ID, '', 'root'],
+          ['a', A_TAG],
+        ],
+      }),
+      nip22Comment({
+        id: NEW_ID,
+        createdAt: 1300,
+        content: 'nip-22 comment',
+        rootId: ISSUE_OPEN_ID,
+        rootKind: 1621,
+      }),
+    ];
+    const code = await runIssueShow(
+      [ISSUE_OPEN_ID, '--relay', RELAY, '--json'],
+      makeDeps(io, 'object', events)
+    );
+    expect(code).toBe(0);
+    const doc = io.jsonDocs[0] as {
+      comments: { eventId: string; kind: number; content: string }[];
+    };
+    expect(doc.comments).toEqual([
+      expect.objectContaining({
+        eventId: LEGACY_ID,
+        kind: 1622,
+        content: 'legacy comment',
+      }),
+      expect.objectContaining({
+        eventId: NEW_ID,
+        kind: 1111,
+        content: 'nip-22 comment',
+      }),
+    ]);
+  });
+
+  it('a kind:1111 matching only on a lowercase `e` is NOT in the thread', async () => {
+    const io = makeTestIo();
+    const OTHER_ROOT = '7c'.repeat(32);
+    const IMPOSTOR_ID = '7d'.repeat(32);
+    const events: NostrEvent[] = [
+      ...EVENTS,
+      // Root scope is ANOTHER thread; only its lowercase parent `e` names
+      // this issue. Case-sensitive `E` matching must exclude it.
+      event({
+        id: IMPOSTOR_ID,
+        kind: 1111,
+        created_at: 1250,
+        content: 'not part of this thread',
+        tags: [
+          ['E', OTHER_ROOT, '', AUTHOR],
+          ['K', '1621'],
+          ['P', AUTHOR],
+          ['e', ISSUE_OPEN_ID, '', AUTHOR],
+          ['k', '1621'],
+          ['p', AUTHOR],
+        ],
+      }),
+    ];
+    const code = await runIssueShow(
+      [ISSUE_OPEN_ID, '--relay', RELAY, '--json'],
+      makeDeps(io, 'object', events)
+    );
+    expect(code).toBe(0);
+    const doc = io.jsonDocs[0] as { comments: { eventId: string }[] };
+    expect(doc.comments).toEqual([]);
+  });
+
+  it('pr show merges a kind:1111 thread on a patch', async () => {
+    const io = makeTestIo();
+    const ON_PATCH_ID = '7e'.repeat(32);
+    const events: NostrEvent[] = [
+      ...EVENTS,
+      nip22Comment({
+        id: ON_PATCH_ID,
+        createdAt: 1600,
+        content: 'looks good',
+        rootId: PR_OPEN_ID,
+        rootKind: 1617,
+      }),
+    ];
+    const code = await runPrShow(
+      [PR_OPEN_ID, '--relay', RELAY, '--json'],
+      makeDeps(io, 'object', events)
+    );
+    expect(code).toBe(0);
+    const doc = io.jsonDocs[0] as { comments: { eventId: string }[] };
+    expect(doc.comments).toEqual([
+      expect.objectContaining({ eventId: ON_PATCH_ID, kind: 1111 }),
+    ]);
   });
 });

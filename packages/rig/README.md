@@ -212,7 +212,7 @@ rig pr status <event-id> applied
 | `rig issue list` / `rig issue show <id>` | free | the repo's issues + comments from the terminal |
 | `rig pr list` / `rig pr show <id>` | free | the repo's patches/PRs; `show` prints the full patch text (pipe to `git am`) |
 | `rig issue create` | **paid** | file an issue (kind:1621) |
-| `rig comment <root-event-id>` | **paid** | comment (kind:1622) on an issue/patch |
+| `rig comment <target-event-id>` | **paid** | comment (NIP-22 kind:1111) on an issue/patch, or reply to a comment |
 | `rig pr create` | **paid** | publish a patch (kind:1617) from real `git format-patch` |
 | `rig pr status <event-id> <state>` | **paid** | set issue/patch status (kind:1630–1633) |
 | `rig site publish [ref]` | **paid** | deploy a pushed repo as a permaweb site: build the ar.io path manifest (repo paths → Arweave txids) and upload it as one paid store write; prints the gateway URL |
@@ -744,7 +744,12 @@ per-event fee is quoted and confirmed before publishing; `--yes` skips, `--json`
 without `--yes` is a free estimate:
 
 - `rig issue create --title <t> [--body <b> | --body-file <f> | stdin] [--label <l>]…` — kind:1621.
-- `rig comment <root-event-id> --body <b> [--parent-author <pubkey>] [--marker root|reply]` — kind:1622.
+- `rig comment <target-event-id> --body <b>` — NIP-22 kind:1111. The target is the
+  kind:1621 issue / kind:1617 patch (a top-level comment) or an existing kind:1111
+  comment (a reply). rig reads the target off the relay first, for free, so the
+  thread root's kind and author come from the wire: root scope is uppercase
+  `E`/`K`/`P`, the parent lowercase `e`/`k`/`p`, plus the repo `a` tag. Comments
+  published this way are invisible to rig releases older than 4.6.
 - `rig pr create --title <t> (--range <A..B> | --patch-file <f>) [--body <b> | --body-file <f>] [--branch <name>]` —
   kind:1617; `--range` runs real `git format-patch --stdout` locally and derives the
   `commit`/`parent-commit` tags. A multi-commit range publishes ONE event carrying
@@ -770,8 +775,9 @@ delta: only locally-missing objects are downloaded, and `refs/remotes/<remote>/*
 (tags → `refs/tags/*`) move with a `git fetch`-style report.
 
 `rig issue list|show` and `rig pr list|show` are pure relay reads (kind:1621/1617 by
-the repo `#a` tag; state from kind:1630-1633, latest wins; kind:1622 comments under
-`show`).
+the repo `#a` tag; state from kind:1630-1633, latest wins; comments under `show` —
+NIP-22 kind:1111 matched on the uppercase `E` root tag, merged with legacy kind:1622
+by `created_at`).
 
 ## Library
 
@@ -784,7 +790,9 @@ it — that stays behind the `Publisher` seam:
   a deprecated alias; it is no longer a cap).
 - `nip34-events.ts` — NIP-34 event builders returning `UnsignedEvent`:
   `buildRepoAnnouncement` (30617), `buildRepoRefs` (30618), `buildIssue` (1621),
-  `buildComment` (1622), `buildPatch` (1617), `buildStatus` (1630–1633).
+  `buildComment` (NIP-22 1111; `LEGACY_COMMENT_KIND` = 1622 stays exported for
+  READING old threads and is never written), `buildPatch` (1617),
+  `buildStatus` (1630–1633).
 - `repo-reader.ts` — `GitRepoReader`, read-only local-repo access via injection-safe
   `execFile` git plumbing.
 - `remote-state.ts` — `fetchRemoteState`, the "what does the remote have?" reader.
