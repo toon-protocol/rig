@@ -1344,6 +1344,53 @@ describe('NIP-34 Parsers - 8.6-UNIT-005b: arweaveMap from kind:30618', () => {
     );
   });
 
+  it('[P1] parseRepoRefs caps arweaveMap at 2000 entries (#162 hostile relay)', () => {
+    // A relay is untrusted: a giant state event must not exhaust memory.
+    // Truncation is safe — arweave-client.ts resolves a missing SHA through
+    // the GraphQL Git-SHA resolver.
+    const flood = Array.from({ length: 2500 }, (_, i) => [
+      'arweave',
+      i.toString(16).padStart(40, '0'),
+      `tx${i.toString().padStart(41, '0')}`,
+    ]);
+    const event = createMockRefsEvent({
+      tags: [['d', 'my-repo'], ...flood, ['r', 'main', 'aaa111']],
+    });
+
+    const result = parseRepoRefs(event);
+
+    expect(result).not.toBeNull();
+    expect(result?.arweaveMap.size).toBe(2000);
+    expect(result?.arweaveMap.get('0'.repeat(40))).toBe(`tx${'0'.repeat(41)}`);
+    // Tags after the flood are still parsed — the cap skips surplus rows, it
+    // does not abandon the event.
+    expect(result?.refs.get('main')).toBe('aaa111');
+  });
+
+  it('[P1] parseRepoRefs still reads arweave tags past the 1000-ref cap (#162)', () => {
+    // Regression: the ref cap used to `break` the whole tag loop, so an event
+    // with more than 1000 `r` tags yielded an EMPTY object map.
+    const refFlood = Array.from({ length: 1200 }, (_, i) => [
+      'r',
+      `branch-${i}`,
+      i.toString(16).padStart(40, '0'),
+    ]);
+    const sha = 'ab'.repeat(20);
+    const event = createMockRefsEvent({
+      tags: [
+        ['d', 'my-repo'],
+        ...refFlood,
+        ['arweave', sha, 'txAfterTheRefCap'],
+      ],
+    });
+
+    const result = parseRepoRefs(event);
+
+    expect(result).not.toBeNull();
+    expect(result?.refs.size).toBe(1000);
+    expect(result?.arweaveMap.get(sha)).toBe('txAfterTheRefCap');
+  });
+
   it('[P1] parseRepoRefs returns empty arweaveMap when no arweave tags', () => {
     const event = createMockRefsEvent({
       tags: [

@@ -198,6 +198,51 @@ export function parsePayout(tags: string[][]): PayoutPointer | null {
 // ---------------------------------------------------------------------------
 
 /**
+ * Maximum number of `arweave` (git SHA → Arweave txId) tags on ONE kind:30618
+ * event, enforced on write (here and in `executePush`) and on read
+ * (`parseRefsEvent`, rig-web's `parseRepoRefs`). Before this cap the map was
+ * merged cumulatively on every push and bounded by nothing, so a large repo
+ * eventually produced an event relays reject (#162).
+ *
+ * WHY 2000 — the arithmetic, in the event's JSON serialization:
+ *
+ *   one arweave tag  `["arweave","<40-hex sha>","<43-char txId>"]`
+ *                    = 1 + 9 + 1 + 42 + 1 + 45 + 1 = 100 bytes, +1 comma = 101
+ *   2000 of them     = 202,000 bytes ≈ 197 KiB   ← the map's whole budget
+ *
+ * Which limit is that 197 KiB measured against? rig's own relay
+ * (`relay-ws.devnet.toonprotocol.dev`) advertises no `limitation` in its
+ * NIP-11 document — probed 2026-09-17, the HTTPS origin answers `Upgrade
+ * Required` rather than a relay-information document — so there is no
+ * self-declared number to size against. The smallest limit any relay surveyed
+ * for #153 declares is `relay.ngit.dev`'s 5 MiB message cap (probed the same
+ * day), and that is the figure used here: the map is capped at under 4% of
+ * it. That leaves the rest of the budget to the refs, which are the other
+ * term in the same event:
+ *
+ *   `["r","<refname>","<sha>"]`, and `isSafeRefname` admits refnames up to
+ *   1024 bytes → ≤ 1076 bytes each. Every rig reader ingests at most
+ *   MAX_REFS_PER_EVENT = 1000 of them, and 1000 at that adversarial width is
+ *   ≈ 1.03 MiB, so a readable event tops out near 1.23 MiB — a quarter of the
+ *   5 MiB limit. With realistic refnames (≤ 64 bytes) a full-cap event is
+ *   ≈ 260 KiB.
+ *
+ * NOTE the asymmetry: the 1000-ref cap is a READ-side constant. `buildRepoRefs`
+ * still writes every ref it is given, so a repo with more than 1000 refs can
+ * publish an event past the figures above — that is the ref tags' problem, not
+ * the map's, and it is the ref shape work's to fix (#153 §Repository state).
+ * This cap's job is to stop the OBJECT MAP being the term that grows without
+ * limit, which it was: it grew with the object count, not the ref count.
+ *
+ * Dropping an entry loses nothing: the object is still on Arweave under its
+ * `Git-SHA` / `Repo` tags and resolves through the GraphQL resolver, which is
+ * already the documented fallback (`RemoteState.resolveMissing`). The map is
+ * a cache, not the index — so push planning must treat "absent from the map"
+ * as "ask the resolver", NEVER as "needs upload".
+ */
+export const MAX_ARWEAVE_TAGS_PER_EVENT = 2000;
+
+/**
  * Build a kind:30618 repository refs/state event.
  *
  * Writes each ref in BOTH shapes, with identical SHAs (rig#157, dual-write
@@ -209,6 +254,11 @@ export function parsePayout(tags: string[][]): PayoutPointer | null {
  * reader that only knows the `r` shape. `HEAD` and `arweave` tags are
  * unaffected by this dual-write. The legacy write is removed in a later,
  * separately ticketed change once older rig versions are unsupported.
+ *
+ * At most {@link MAX_ARWEAVE_TAGS_PER_EVENT} `arweave` tags are emitted; a
+ * larger `arweaveMap` is truncated to its first entries in iteration order,
+ * so the caller decides priority (see `executePush`) and a repo under the cap
+ * publishes byte-identically to before the cap existed.
  *
  * @param repoId - Repository identifier (d tag, matches kind:30617)
  * @param refs - Map of ref paths to commit SHAs (e.g., { 'refs/heads/main': 'abc123' })
@@ -233,8 +283,12 @@ export function buildRepoRefs(
     tags.push(['HEAD', `ref: ${firstRef}`]);
   }
 
-  // Add arweave SHA-to-txId mapping tags
-  for (const [sha, txId] of Object.entries(arweaveMap)) {
+  // Add arweave SHA-to-txId mapping tags, bounded (#162).
+  const mapped = Object.entries(arweaveMap).slice(
+    0,
+    MAX_ARWEAVE_TAGS_PER_EVENT
+  );
+  for (const [sha, txId] of mapped) {
     tags.push(['arweave', sha, txId]);
   }
 

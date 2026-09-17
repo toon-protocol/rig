@@ -32,6 +32,7 @@ import {
 import { REPOSITORY_ANNOUNCEMENT_KIND } from '@toon-protocol/core/nip34';
 
 import {
+  MAX_ARWEAVE_TAGS_PER_EVENT,
   REPOSITORY_STATE_KIND,
   parseMaintainers,
   parsePayout,
@@ -124,7 +125,12 @@ export interface RemoteState {
   refs: Map<string, string>;
   /** HEAD symref target (e.g. `refs/heads/main`), or null if unset. */
   headSymref: string | null;
-  /** Git SHA → Arweave txId hints from the latest kind:30618 `arweave` tags. */
+  /**
+   * Git SHA → Arweave txId hints from the latest kind:30618 `arweave` tags,
+   * capped at `MAX_ARWEAVE_TAGS_PER_EVENT` (#162). A HINT MAP, not an index:
+   * a SHA missing from it is resolved via {@link RemoteState.resolveMissing},
+   * never assumed absent from Arweave.
+   */
   shaToTxId: Map<string, string>;
   /** The latest kind:30618 event, or null if the repo has no state yet. */
   refsEvent: NostrEvent | null;
@@ -352,13 +358,24 @@ interface ParsedRefs extends ParsedStateRefs {
  * (`./nip34-refs.ts`), so a state event written by ngit (or any other
  * conformant NIP-34 client) reads exactly like one written by rig — see that
  * module for the conflict, peeled-tag and cap rules (rig#156).
+ *
+ * Both tag lists are capped — refs at {@link MAX_REFS_PER_EVENT} inside that
+ * parser, the object map at {@link MAX_ARWEAVE_TAGS_PER_EVENT} here — so a
+ * hostile relay cannot exhaust memory with one giant state event (#162).
+ * Truncating the map is safe: a SHA it does not cover is resolved through the
+ * GraphQL `Git-SHA` resolver by {@link RemoteState.resolveMissing}.
  */
 function parseRefsEvent(event: NostrEvent): ParsedRefs {
   const { refs, headSymref } = parseStateRefTags(event.tags);
   const shaToTxId = new Map<string, string>();
 
   for (const tag of event.tags) {
-    if (tag[0] === 'arweave' && tag[1] && tag[2]) shaToTxId.set(tag[1], tag[2]);
+    if (tag[0] === 'arweave' && tag[1] && tag[2]) {
+      // Hostile-relay guard (#162): a relay may serve a state event with any
+      // number of `arweave` tags. Ingest no more than rig itself writes.
+      if (shaToTxId.size >= MAX_ARWEAVE_TAGS_PER_EVENT) continue;
+      shaToTxId.set(tag[1], tag[2]);
+    }
   }
 
   return { refs, headSymref, shaToTxId };

@@ -10,6 +10,7 @@ import {
   COMMENT_KIND,
   LEGACY_COMMENT_KIND,
   MAINTAINERS_TAG,
+  MAX_ARWEAVE_TAGS_PER_EVENT,
   PAYOUT_TAG,
   REPOSITORY_STATE_KIND,
   authorizedStatusAuthors,
@@ -672,6 +673,36 @@ describe('buildRepoRefs (kind:30618)', () => {
     expect(event.tags.filter((t) => t[0] === 'arweave')).toEqual([
       ['arweave', 'abc123', 'arweave-tx-1'],
     ]);
+  });
+
+  it('emits at most MAX_ARWEAVE_TAGS_PER_EVENT arweave tags, keeping the first (#162)', () => {
+    const arweaveMap: Record<string, string> = {};
+    for (let i = 0; i < MAX_ARWEAVE_TAGS_PER_EVENT + 250; i++) {
+      arweaveMap[i.toString(16).padStart(40, '0')] = `tx-${i}`;
+    }
+    const event = buildRepoRefs(
+      'hello-toon',
+      { 'refs/heads/main': 'abc123' },
+      arweaveMap
+    );
+
+    const arweaveTags = event.tags.filter((t) => t[0] === 'arweave');
+    expect(arweaveTags).toHaveLength(MAX_ARWEAVE_TAGS_PER_EVENT);
+    // Truncation keeps the caller's order — the caller owns the priority.
+    expect(arweaveTags[0]).toEqual(['arweave', '0'.repeat(40), 'tx-0']);
+    expect(arweaveTags.at(-1)).toEqual([
+      'arweave',
+      (MAX_ARWEAVE_TAGS_PER_EVENT - 1).toString(16).padStart(40, '0'),
+      `tx-${MAX_ARWEAVE_TAGS_PER_EVENT - 1}`,
+    ]);
+    // The ref/HEAD tags are unaffected.
+    expect(event.tags).toEqual(
+      expect.arrayContaining([
+        ['d', 'hello-toon'],
+        ['r', 'refs/heads/main', 'abc123'],
+        ['HEAD', 'ref: refs/heads/main'],
+      ])
+    );
   });
 });
 

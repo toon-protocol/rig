@@ -157,6 +157,16 @@ export function withTargetAuthor(
  */
 const MAX_REFS_PER_EVENT = 1000;
 
+/**
+ * Maximum number of `arweave` (git SHA → txId) tags to ingest from a single
+ * kind:30618 event — the read half of the object-map cap (#162), mirroring
+ * `MAX_ARWEAVE_TAGS_PER_EVENT` in `@toon-protocol/rig`. A relay is untrusted,
+ * so a giant state event must not be able to exhaust the browser's memory.
+ * Truncation costs nothing but a GraphQL `Git-SHA` lookup: the map is a cache
+ * over the resolver, and `arweave-client.ts` already falls back to it.
+ */
+const MAX_ARWEAVE_TAGS_PER_EVENT = 2000;
+
 /** Tag-name prefixes that make a NIP-34-shaped tag a ref. */
 const NIP_REF_PREFIXES = ['refs/heads/', 'refs/tags/'] as const;
 
@@ -243,6 +253,7 @@ export function parseRepoRefs(event: NostrEvent): RepoRefs | null {
         legacy.set(tag[1], tag[2]);
       }
     } else if (name === 'arweave' && tag[1] && tag[2]) {
+      if (arweaveMap.size >= MAX_ARWEAVE_TAGS_PER_EVENT) continue;
       arweaveMap.set(tag[1], tag[2]);
     } else if (
       tag[1] &&

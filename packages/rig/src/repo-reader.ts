@@ -375,6 +375,152 @@ export class GitRepoReader {
   }
 
   /**
+   * Run git and hand each stdout line to `visit` as it arrives, never holding
+   * the whole output in memory. Returning `false` from `visit` ends the walk:
+   * the child is killed and the promise resolves with what was seen.
+   *
+   * Every other git call here buffers into one `execFile` string, which is
+   * fine for bounded output. These object walks are not bounded — they grow
+   * with the size of the repository — so on a repo big enough to need the
+   * object-map cap they would be the thing that breaks (#162).
+   */
+  private streamLines(
+    args: string[],
+    visit: (line: string) => boolean
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const child = spawn('git', args, {
+        cwd: this.repoPath,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let pending = '';
+      let stderr = '';
+      let settled = false;
+
+      const finish = (err?: GitError): void => {
+        if (settled) return;
+        settled = true;
+        if (err) reject(err);
+        else resolve();
+      };
+
+      child.stdout.setEncoding('utf-8');
+      child.stdout.on('data', (chunk: string) => {
+        if (settled) return;
+        pending += chunk;
+        let idx = pending.indexOf('\n');
+        while (idx !== -1) {
+          const line = pending.slice(0, idx);
+          pending = pending.slice(idx + 1);
+          if (line && !visit(line)) {
+            child.kill('SIGTERM');
+            return finish();
+          }
+          idx = pending.indexOf('\n');
+        }
+      });
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString('utf-8');
+      });
+      child.on('error', (err) => {
+        finish(
+          new GitError(
+            `failed to spawn git ${args[0]}: ${err.message}`,
+            undefined,
+            ''
+          )
+        );
+      });
+      child.on('close', (code) => {
+        if (settled) return;
+        if (code !== 0) {
+          return finish(
+            new GitError(
+              `git ${args[0]} failed (exit ${code}): ${stderr.trim()}`,
+              code ?? undefined,
+              stderr.trim()
+            )
+          );
+        }
+        if (pending) visit(pending); // last line, unterminated
+        finish();
+      });
+    });
+  }
+
+  /**
+   * Every object SHA in the local object database, in no particular order
+   * (`git cat-file --batch-all-objects --batch-check`, no bodies read).
+   *
+   * This is the honest answer to "what does this repository already have",
+   * which `rig fetch` needs to compute its delta. It deliberately does NOT
+   * consult the remote's kind:30618 `arweave` map: that map is capped (#162)
+   * and is a hint cache, never an index of local presence.
+   *
+   * Streamed, so the listing never has to fit in one buffer.
+   */
+  async listAllObjectShas(): Promise<string[]> {
+    const shas: string[] = [];
+    await this.streamLines(
+      [
+        'cat-file',
+        '--batch-check=%(objectname)',
+        '--batch-all-objects',
+        '--unordered',
+      ],
+      (line) => {
+        shas.push(line);
+        return true;
+      }
+    );
+    return shas;
+  }
+
+  /**
+   * SHAs of every object reachable from `tips`, newest first: commits in
+   * reverse-chronological order, each commit immediately followed by the
+   * trees and blobs it is the first to reference
+   * (`git rev-list --objects --in-commit-order`).
+   *
+   * Used to rank the kind:30618 object map when it exceeds
+   * `MAX_ARWEAVE_TAGS_PER_EVENT` (#162): the entries most likely to be wanted
+   * by the next clone or fetch are the ones nearest the tips. Tips that do
+   * not resolve locally (a remote ref we never fetched) are dropped rather
+   * than failing the walk.
+   *
+   * `limit` stops the walk once that many SHAs have been seen — the ranking
+   * caller never needs more than the cap, and a full walk of a repository big
+   * enough to hit the cap is exactly the work worth not doing. The walk is
+   * streamed, so neither its output nor this array is ever bigger than that.
+   */
+  async reachableObjectsNewestFirst(
+    tips: string[],
+    limit = Infinity
+  ): Promise<string[]> {
+    for (const tip of tips) assertRevision(tip, 'tip');
+    const known = await this.filterExisting([...new Set(tips)]);
+    if (known.length === 0 || limit < 1) return [];
+
+    const shas: string[] = [];
+    await this.streamLines(
+      [
+        'rev-list',
+        '--objects',
+        '--in-commit-order',
+        ...known,
+        '--', // nothing user-supplied can become a pathspec
+      ],
+      (line) => {
+        // `--objects` lines are `<sha>` or `<sha> <path>`.
+        const spaceIdx = line.indexOf(' ');
+        shas.push(spaceIdx === -1 ? line : line.slice(0, spaceIdx));
+        return shas.length < limit;
+      }
+    );
+    return shas;
+  }
+
+  /**
    * List every blob (file) reachable from a ref's root tree, recursively,
    * with the path it is served at (#368: the ar.io site manifest join key).
    * Uses `git ls-tree -r -z` — NUL-terminated records so binary/spaced paths

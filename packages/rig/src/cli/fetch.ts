@@ -212,12 +212,11 @@ export async function runFetch(
     // ── Delta: download only what the local repository is missing ──────────
     const reader = new GitRepoReader(repoRoot);
     const tips = [...new Set(planned.map((p) => p.newSha))];
-    const candidates = [...new Set([...remoteState.shaToTxId.keys(), ...tips])];
-    const { missing: absent } = await reader.statObjects(candidates);
-    const absentSet = new Set(absent);
-    const presentLocally = new Set(
-      candidates.filter((sha) => !absentSet.has(sha))
-    );
+    // What the repository already has, read from the object database itself.
+    // NOT derived from the remote's `arweave` map: that map is capped (#162)
+    // and a SHA missing from it says nothing about local presence — deriving
+    // "have" from it would re-download history this repo already holds.
+    const presentLocally = new Set(await reader.listAllObjectShas());
 
     const collected = await collectRepoObjects({
       tips,
