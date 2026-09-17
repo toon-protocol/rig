@@ -657,9 +657,11 @@ async function runList(
     for (const item of items) {
       const labels =
         item.labels.length > 0 ? `  [${item.labels.join(', ')}]` : '';
+      // #161: kind:1617 items only — issues never set `.branch`.
+      const branch = item.branch !== undefined ? `  → ${item.branch}` : '';
       io.out(
         `${item.status.padEnd(7)}  ${item.eventId.slice(0, 8)}  ${item.title}` +
-          `  (${item.authorPubkey.slice(0, 8)}, ${isoDate(item.createdAt)})${labels}`
+          `  (${item.authorPubkey.slice(0, 8)}, ${isoDate(item.createdAt)})${labels}${branch}`
       );
     }
     io.out(

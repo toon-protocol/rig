@@ -575,6 +575,20 @@ describe('rig pr list/show', () => {
     ]);
   });
 
+  // #161: rig pr list (text mode) must display the branch too, not just
+  // pr show and rig-web.
+  it('renders a human table with the branch for patches that carry one', async () => {
+    const io = makeTestIo();
+    const code = await runPrList([...ADDR_FLAGS], makeDeps(io));
+    expect(code).toBe(0);
+    const text = io.outLines.join('\n');
+    expect(text).toContain('→ feature'); // PR_APPLIED_ID's branch tag
+    // The open PR carries no branch tag — no arrow for it.
+    const openLine = io.outLines.find((l) => l.includes('Pending patch'));
+    expect(openLine).toBeDefined();
+    expect(openLine).not.toContain('→');
+  });
+
   it('filters by --state applied', async () => {
     const io = makeTestIo();
     const code = await runPrList(
