@@ -33,5 +33,6 @@ describe('rig ci serve usage: operational defaults', () => {
     );
     expect(CI_SERVE_USAGE).toMatch(/--no-pull\s+never pull/);
     expect(CI_SERVE_USAGE).toContain('locally built');
+    expect(CI_SERVE_USAGE).toContain('--pull=false');
   });
 });

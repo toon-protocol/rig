@@ -101,7 +101,8 @@ Options:
   --pull                 pull the runner image before each run (act's default)
   --no-pull              never pull: run the image already on this host —
                          what a locally built or otherwise private runner
-                         image needs, since act cannot pull it
+                         image needs, since act cannot pull it (act's own
+                         spelling, --pull=false, is accepted too)
   --workdir <dir>        where commits are checked out for runs (default:
                          <state-dir>/work)
   --once                 stop after the first run concludes (its Workflow
@@ -126,7 +127,7 @@ half-published (story 15).
 
 Stop with Ctrl-C (SIGINT) or SIGTERM: active runs conclude \`cancelled\`.`;
 
-interface ServeFlags {
+export interface ServeFlags {
   relay: string;
   repos: CoordinatorRepo[];
   /** Operator-accepted requester pubkeys (lowercase hex). */
@@ -151,9 +152,25 @@ interface ServeFlags {
 
 class ServeUsageError extends Error {}
 
-function parseServeArgs(args: string[]): ServeFlags | 'help' {
+/**
+ * act spells the pull policy `--pull=false`, and so does the issue this flag
+ * came from (#175); node's `parseArgs` would reject that on a boolean option
+ * with "does not take an argument". Rewrite act's spelling to ours, and say
+ * what to type for anything else attached to `--pull`.
+ */
+function pullSpelling(arg: string): string {
+  if (!arg.startsWith('--pull=')) return arg;
+  const value = arg.slice('--pull='.length);
+  if (value === 'false') return '--no-pull';
+  if (value === 'true') return '--pull';
+  throw new ServeUsageError(
+    `--pull takes no value — use --pull or --no-pull, got ${JSON.stringify(arg)}`
+  );
+}
+
+export function parseServeArgs(args: string[]): ServeFlags | 'help' {
   const { values } = parseArgs({
-    args,
+    args: args.map(pullSpelling),
     options: {
       relay: { type: 'string' },
       repo: { type: 'string', multiple: true },
@@ -258,9 +275,7 @@ function parseServeArgs(args: string[]): ServeFlags | 'help' {
   if (values.pull && values['no-pull']) {
     throw new ServeUsageError('--pull and --no-pull cannot both be given');
   }
-  let pull: boolean | undefined;
-  if (values.pull) pull = true;
-  if (values['no-pull']) pull = false;
+  const pull = values.pull ? true : values['no-pull'] ? false : undefined;
 
   return {
     relay: values.relay,
@@ -283,11 +298,9 @@ function parseServeArgs(args: string[]): ServeFlags | 'help' {
  * did not give leaves no key behind, so ActRunner's own defaults (act on PATH,
  * the community ubuntu image, act's force-pull) stand.
  */
-export function actRunnerOptions(flags: {
-  actBin?: string;
-  platforms?: Record<string, string>;
-  pull?: boolean;
-}): ActRunnerOptions {
+export function actRunnerOptions(
+  flags: Pick<ServeFlags, 'actBin' | 'platforms' | 'pull'>
+): ActRunnerOptions {
   return {
     ...(flags.actBin !== undefined ? { actBin: flags.actBin } : {}),
     ...(flags.platforms ? { platforms: flags.platforms } : {}),

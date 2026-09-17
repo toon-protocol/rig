@@ -43,6 +43,7 @@ import {
   actRunnerOptions,
   estimateRunCost,
   makeAffordabilityCheck,
+  parseServeArgs,
   runCiServe,
 } from './ci-serve.js';
 import {
@@ -328,19 +329,46 @@ describe('rig ci serve: flags', () => {
       ).toBe(1);
       expect(recOne.err.join('\n')).toMatch(/act executable was not found/);
     }
+
+    // A value act does not use either: say what to type instead of letting
+    // node's parseArgs answer.
+    const recBad = makeIo();
+    expect(
+      await runCiServe(
+        ['--relay', RELAY, '--repo', REPO_FLAG, '--pull=maybe'],
+        { io: recBad.io, env: {}, cwd: '/x' }
+      )
+    ).toBe(2);
+    expect(recBad.err[0]).toContain('use --pull or --no-pull');
   });
 
-  it('maps the runner flags onto ActRunner options — --no-pull is the one a local image needs (#175)', () => {
-    expect(actRunnerOptions({ pull: false })).toEqual({ pull: false });
-    expect(actRunnerOptions({ pull: true })).toEqual({ pull: true });
+  it('carries the runner flags from argv into the ActRunner options — --no-pull is what a local image needs (#175)', () => {
+    const optionsFor = (extra: string[]): unknown => {
+      const flags = parseServeArgs([
+        '--relay',
+        RELAY,
+        '--repo',
+        REPO_FLAG,
+        ...extra,
+      ]);
+      if (flags === 'help') throw new Error('unexpected --help');
+      return actRunnerOptions(flags);
+    };
+    expect(optionsFor(['--no-pull'])).toEqual({ pull: false });
+    expect(optionsFor(['--pull'])).toEqual({ pull: true });
+    // act's own spelling of the same thing.
+    expect(optionsFor(['--pull=false'])).toEqual({ pull: false });
+    expect(optionsFor(['--pull=true'])).toEqual({ pull: true });
     // Neither flag: no `pull` key at all, so act's own default (pull) stands.
-    expect(actRunnerOptions({})).toEqual({});
+    expect(optionsFor([])).toEqual({});
     expect(
-      actRunnerOptions({
-        actBin: '/opt/act',
-        platforms: { 'ubuntu-latest': 'my-runner:1' },
-        pull: false,
-      })
+      optionsFor([
+        '--act-bin',
+        '/opt/act',
+        '--platform',
+        'ubuntu-latest=my-runner:1',
+        '--no-pull',
+      ])
     ).toEqual({
       actBin: '/opt/act',
       platforms: { 'ubuntu-latest': 'my-runner:1' },

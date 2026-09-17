@@ -14,5 +14,6 @@ relay as the Job Result. act's own `.actrc` was no escape hatch either, since
 act runs with the freshly materialized checkout as its working directory.
 
 `--no-pull` now runs the image already on the host; `--pull` states act's
-default explicitly. Giving both is a usage error, and giving neither leaves
-act's default untouched.
+default explicitly, and act's own spelling of the same thing (`--pull=false` /
+`--pull=true`) is accepted. Giving both flags is a usage error, and giving
+neither leaves act's default untouched.
