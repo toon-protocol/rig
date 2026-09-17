@@ -8,6 +8,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   COMMENT_KIND,
+  LEGACY_COMMENT_KIND,
   MAINTAINERS_TAG,
   PAYOUT_TAG,
   REPOSITORY_STATE_KIND,
@@ -17,10 +18,19 @@ import {
   buildPatch,
   buildRepoRefs,
   buildStatus,
+  commentBelongsToThread,
   parseMaintainers,
   parsePayout,
 } from './nip34-events.js';
 import { parseStateRefTags } from './nip34-refs.js';
+import {
+  NGIT_COMMENT_THREAD_COMMENTS,
+  NGIT_COMMENT_THREAD_COMMENT_EVENT_IDS,
+  NGIT_COMMENT_THREAD_NESTED_REPLY_ID,
+  NGIT_COMMENT_THREAD_NESTED_REPLY_PARENT_ID,
+  NGIT_COMMENT_THREAD_ROOT,
+  NGIT_COMMENT_THREAD_ROOT_EVENT_ID,
+} from './nip34-fixtures/index.js';
 import {
   amendRepoAnnouncement,
   buildRepoAnnouncement,
@@ -511,57 +521,166 @@ describe('buildIssue (kind:1621)', () => {
   });
 });
 
-describe('buildComment (kind:1622)', () => {
-  it('builds a comment with a/e/p tags', () => {
-    const event = buildComment(
-      OWNER_PUBKEY,
-      'hello-toon',
-      EVENT_ID,
-      AUTHOR_PUBKEY,
-      'Comment body',
-      'reply'
-    );
+describe('buildComment (NIP-22 kind:1111, rig#159)', () => {
+  const ROOT = {
+    eventId: EVENT_ID,
+    kind: 1621,
+    authorPubkey: AUTHOR_PUBKEY,
+  } as const;
 
-    expect(event.kind).toBe(1622);
-    expect(COMMENT_KIND).toBe(1622);
-    expect(event.content).toBe('Comment body');
-    expect(event.tags).toEqual(
-      expect.arrayContaining([
-        ['a', `30617:${OWNER_PUBKEY}:hello-toon`],
-        ['p', AUTHOR_PUBKEY],
-      ])
-    );
-    const eTag = event.tags.find((t) => t[0] === 'e' && t[1] === EVENT_ID);
-    expect(eTag).toBeDefined();
+  it('writes kind:1111 — never the legacy 1622 dialect', () => {
+    const event = buildComment(OWNER_PUBKEY, 'hello-toon', ROOT, 'Body');
+
+    expect(event.kind).toBe(1111);
+    expect(COMMENT_KIND).toBe(1111);
+    expect(LEGACY_COMMENT_KIND).toBe(1622);
+    expect(event.content).toBe('Body');
   });
 
-  it("defaults to the 'reply' marker when marker is omitted", () => {
+  it('a top-level comment repeats the root as its lowercase parent', () => {
     const event = buildComment(
       OWNER_PUBKEY,
       'hello-toon',
-      EVENT_ID,
-      AUTHOR_PUBKEY,
-      'Default marker'
+      ROOT,
+      'Comment body'
     );
 
-    const eTag = event.tags.find((t) => t[0] === 'e' && t[1] === EVENT_ID);
-    expect(eTag).toBeDefined();
-    expect(eTag?.[3]).toBe('reply');
+    expect(event.tags).toEqual([
+      ['E', EVENT_ID, '', AUTHOR_PUBKEY],
+      ['K', '1621'],
+      ['P', AUTHOR_PUBKEY],
+      ['e', EVENT_ID, '', AUTHOR_PUBKEY],
+      ['k', '1621'],
+      ['p', AUTHOR_PUBKEY],
+      ['a', `30617:${OWNER_PUBKEY}:hello-toon`],
+    ]);
   });
 
-  it("builds a comment with the 'root' marker", () => {
+  it('a reply parents the comment (k=1111) and still roots at the issue', () => {
+    const PARENT_ID = 'aa'.repeat(32);
+    const PARENT_AUTHOR = 'bb'.repeat(32);
+
     const event = buildComment(
       OWNER_PUBKEY,
       'hello-toon',
-      EVENT_ID,
-      AUTHOR_PUBKEY,
-      'Root comment',
-      'root'
+      ROOT,
+      'Reply body',
+      { eventId: PARENT_ID, authorPubkey: PARENT_AUTHOR }
     );
 
-    const eTag = event.tags.find((t) => t[0] === 'e' && t[1] === EVENT_ID);
-    expect(eTag).toBeDefined();
-    expect(eTag?.[3]).toBe('root');
+    expect(event.tags).toEqual([
+      ['E', EVENT_ID, '', AUTHOR_PUBKEY],
+      ['K', '1621'],
+      ['P', AUTHOR_PUBKEY],
+      ['e', PARENT_ID, '', PARENT_AUTHOR],
+      ['k', '1111'],
+      ['p', PARENT_AUTHOR],
+      ['a', `30617:${OWNER_PUBKEY}:hello-toon`],
+    ]);
+  });
+
+  it('roots a comment at a patch with K=1617', () => {
+    const event = buildComment(
+      OWNER_PUBKEY,
+      'hello-toon',
+      { eventId: EVENT_ID, kind: 1617, authorPubkey: AUTHOR_PUBKEY },
+      'On the patch'
+    );
+
+    expect(event.tags).toContainEqual(['K', '1617']);
+    expect(event.tags).toContainEqual(['k', '1617']);
+  });
+});
+
+describe('commentBelongsToThread (rig#159)', () => {
+  const ROOT_ID = 'cc'.repeat(32);
+  const OTHER_ID = 'dd'.repeat(32);
+
+  it('accepts a kind:1111 whose uppercase E names the root', () => {
+    const event = {
+      kind: 1111,
+      tags: [
+        ['E', ROOT_ID, '', AUTHOR_PUBKEY],
+        ['e', OTHER_ID, '', AUTHOR_PUBKEY],
+      ],
+    };
+    expect(commentBelongsToThread(event, ROOT_ID)).toBe(true);
+  });
+
+  it('REJECTS a kind:1111 whose only match is a lowercase e', () => {
+    const event = {
+      kind: 1111,
+      tags: [
+        ['E', OTHER_ID, '', AUTHOR_PUBKEY],
+        ['e', ROOT_ID, '', AUTHOR_PUBKEY],
+      ],
+    };
+    expect(commentBelongsToThread(event, ROOT_ID)).toBe(false);
+  });
+
+  it('accepts a legacy kind:1622 by its lowercase e tag', () => {
+    const event = { kind: 1622, tags: [['e', ROOT_ID, '', 'root']] };
+    expect(commentBelongsToThread(event, ROOT_ID)).toBe(true);
+  });
+
+  it('rejects any other kind', () => {
+    const event = { kind: 1621, tags: [['E', ROOT_ID]] };
+    expect(commentBelongsToThread(event, ROOT_ID)).toBe(false);
+  });
+});
+
+describe('buildComment against the captured ngit thread (rig#155 fixtures)', () => {
+  /** Just the NIP-22 threading tags — what must match ngit byte-for-byte. */
+  const threading = (tags: string[][]): string[][] =>
+    tags.filter((t) => ['E', 'K', 'P', 'e', 'k', 'p'].includes(t[0] as string));
+
+  it('reproduces the wire shape of a real ngit top-level comment', () => {
+    const rootAuthor = NGIT_COMMENT_THREAD_ROOT.pubkey;
+    const built = buildComment(
+      OWNER_PUBKEY,
+      'HydrusUI',
+      {
+        eventId: NGIT_COMMENT_THREAD_ROOT_EVENT_ID,
+        kind: NGIT_COMMENT_THREAD_ROOT.kind,
+        authorPubkey: rootAuthor,
+      },
+      'body'
+    );
+
+    const ngitTopLevel = NGIT_COMMENT_THREAD_COMMENTS.find(
+      (e) => e.id === NGIT_COMMENT_THREAD_COMMENT_EVENT_IDS[0]
+    );
+    expect(ngitTopLevel).toBeDefined();
+    // Every NIP-22 threading tag ngit emits, rig emits identically.
+    expect(threading(built.tags)).toEqual(threading(ngitTopLevel?.tags ?? []));
+  });
+
+  it('reproduces the wire shape of the real ngit nested reply', () => {
+    const ngitReply = NGIT_COMMENT_THREAD_COMMENTS.find(
+      (e) => e.id === NGIT_COMMENT_THREAD_NESTED_REPLY_ID
+    );
+    expect(ngitReply).toBeDefined();
+    const parentAuthor = NGIT_COMMENT_THREAD_COMMENTS.find(
+      (e) => e.id === NGIT_COMMENT_THREAD_NESTED_REPLY_PARENT_ID
+    )?.pubkey;
+    expect(parentAuthor).toBeDefined();
+
+    const built = buildComment(
+      OWNER_PUBKEY,
+      'HydrusUI',
+      {
+        eventId: NGIT_COMMENT_THREAD_ROOT_EVENT_ID,
+        kind: NGIT_COMMENT_THREAD_ROOT.kind,
+        authorPubkey: NGIT_COMMENT_THREAD_ROOT.pubkey,
+      },
+      'body',
+      {
+        eventId: NGIT_COMMENT_THREAD_NESTED_REPLY_PARENT_ID,
+        authorPubkey: parentAuthor ?? '',
+      }
+    );
+
+    expect(threading(built.tags)).toEqual(threading(ngitReply?.tags ?? []));
   });
 });
 

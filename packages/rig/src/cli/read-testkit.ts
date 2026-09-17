@@ -88,7 +88,12 @@ export function makeMockRelayFactory(
   return (url) => new FakeRelaySocket(url, handler, encoding);
 }
 
-/** Serve canned events with basic NIP-01 filter matching (kinds/ids/#a/#e/#d/authors). */
+/**
+ * Serve canned events with basic NIP-01 filter matching
+ * (kinds/ids/#a/#e/#E/#d/authors). Tag names are matched CASE-SENSITIVELY,
+ * exactly as a NIP-01 relay does: `#E` (NIP-22 root scope) never matches a
+ * lowercase `e` tag (#159).
+ */
 export function filterEvents(
   events: NostrEvent[],
   filter: NostrFilter
@@ -99,7 +104,7 @@ export function filterEvents(
     if (filter.authors && !filter.authors.includes(event.pubkey)) return false;
     if (filter.since !== undefined && event.created_at < filter.since)
       return false;
-    for (const tagName of ['a', 'e', 'd', 'c', 'p'] as const) {
+    for (const tagName of ['a', 'e', 'E', 'd', 'c', 'p'] as const) {
       const wanted = filter[`#${tagName}`];
       if (
         wanted &&

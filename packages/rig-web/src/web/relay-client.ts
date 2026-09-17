@@ -8,6 +8,7 @@
  */
 
 import { decode } from '@toon-format/toon';
+import { COMMENT_KIND, LEGACY_COMMENT_KIND } from './nip34-parsers.js';
 import type { NostrEvent, NostrFilter } from './nip34-parsers.js';
 import { isValidRelayUrl } from './url-utils.js';
 
@@ -54,10 +55,22 @@ export function buildIssueListFilter(
 }
 
 /**
- * Build a Nostr filter for querying comment events (kind:1622) by parent event IDs.
+ * Filters for a comment thread on the given issue/patch event ids (rig#159).
+ *
+ * TWO filters, because the two kinds hang off different tags and a NIP-01
+ * filter ANDs its conditions:
+ *
+ *   kind:1111 (NIP-22) → the UPPERCASE `E` root scope. A nested reply's
+ *     lowercase `e` names its parent comment, so an `#e` filter would drop it;
+ *   kind:1622 (legacy rig dialect) → the lowercase `e`, its only reference.
+ *
+ * Callers query both and merge the results by `createdAt`.
  */
-export function buildCommentFilter(eventIds: string[]): NostrFilter {
-  return { kinds: [1622], '#e': eventIds, limit: 500 };
+export function buildCommentFilters(eventIds: string[]): NostrFilter[] {
+  return [
+    { kinds: [COMMENT_KIND], '#E': eventIds, limit: 500 },
+    { kinds: [LEGACY_COMMENT_KIND], '#e': eventIds, limit: 500 },
+  ];
 }
 
 /**

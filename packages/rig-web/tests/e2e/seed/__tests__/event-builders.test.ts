@@ -79,7 +79,7 @@ describe('AC-1.6: Event Builders (event-builders.ts)', () => {
     );
   });
 
-  it('[P0] should export buildComment for kind:1622', async () => {
+  it('[P0] should export buildComment for NIP-22 kind:1111', async () => {
     const builders = await import('../lib/event-builders.js');
 
     expect(typeof builders.buildComment).toBe('function');
@@ -91,13 +91,11 @@ describe('AC-1.6: Event Builders (event-builders.ts)', () => {
     const event = builders.buildComment(
       ownerPubkey,
       'hello-toon',
-      issueEventId,
-      authorPubkey,
-      'Comment body',
-      'reply'
+      { eventId: issueEventId, kind: 1621, authorPubkey },
+      'Comment body'
     );
 
-    expect(event.kind).toBe(1622);
+    expect(event.kind).toBe(1111);
     expect(event.content).toBe('Comment body');
     // Should have 'a' tag referencing the repo
     expect(event.tags).toEqual(
@@ -105,11 +103,15 @@ describe('AC-1.6: Event Builders (event-builders.ts)', () => {
         ['a', `30617:${ownerPubkey}:hello-toon`],
       ])
     );
-    // Should have 'e' tag with reply marker
+    // NIP-22: uppercase root scope, lowercase parent — both the issue here
     const eTag = event.tags.find(
       (t: string[]) => t[0] === 'e' && t[1] === issueEventId
     );
     expect(eTag).toBeDefined();
+    const ETag = event.tags.find(
+      (t: string[]) => t[0] === 'E' && t[1] === issueEventId
+    );
+    expect(ETag).toBeDefined();
     // Should have 'p' tag for author
     expect(event.tags).toEqual(
       expect.arrayContaining([
@@ -274,34 +276,56 @@ describe('AC-1.6: Event Builders (event-builders.ts)', () => {
     expect(tTags).toHaveLength(0);
   });
 
-  it('[P1] should default to reply marker when marker is omitted in buildComment', async () => {
+  it('[P1] a top-level comment repeats its root as the lowercase parent', async () => {
     const builders = await import('../lib/event-builders.js');
 
     const ownerPubkey = '55c2a467881059a942fdc6908b041273885b8720bfa8fcf2f5f9c20a73b0964d';
     const eventId = 'deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678';
     const authorPubkey = '7937ffc0c5a0238768da798d26394a33b554926d739c445fd508e36642ebc286';
 
-    // Call without explicit marker — should default to 'reply'
-    const event = builders.buildComment(ownerPubkey, 'hello-toon', eventId, authorPubkey, 'Default marker');
+    // No parent comment → parent === root (NIP-22).
+    const event = builders.buildComment(
+      ownerPubkey,
+      'hello-toon',
+      { eventId, kind: 1621, authorPubkey },
+      'Top-level comment'
+    );
 
-    const eTag = event.tags.find((t: string[]) => t[0] === 'e' && t[1] === eventId);
-    expect(eTag).toBeDefined();
-    expect(eTag![3]).toBe('reply');
+    expect(event.tags).toEqual(
+      expect.arrayContaining([
+        ['E', eventId, '', authorPubkey],
+        ['K', '1621'],
+        ['e', eventId, '', authorPubkey],
+        ['k', '1621'],
+      ])
+    );
   });
 
-  it('[P1] should build comment with root marker', async () => {
+  it('[P1] a reply parents the comment replied to, with k = 1111', async () => {
     const builders = await import('../lib/event-builders.js');
 
     const ownerPubkey = '55c2a467881059a942fdc6908b041273885b8720bfa8fcf2f5f9c20a73b0964d';
     const eventId = 'deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678';
     const authorPubkey = '7937ffc0c5a0238768da798d26394a33b554926d739c445fd508e36642ebc286';
+    const parentId = 'ab'.repeat(32);
+    const parentAuthor = 'cd'.repeat(32);
 
-    const event = builders.buildComment(ownerPubkey, 'hello-toon', eventId, authorPubkey, 'Root comment', 'root');
+    const event = builders.buildComment(
+      ownerPubkey,
+      'hello-toon',
+      { eventId, kind: 1621, authorPubkey },
+      'A reply',
+      { eventId: parentId, authorPubkey: parentAuthor }
+    );
 
-    // e tag should have 'root' marker (4th element)
-    const eTag = event.tags.find((t: string[]) => t[0] === 'e' && t[1] === eventId);
-    expect(eTag).toBeDefined();
-    expect(eTag![3]).toBe('root');
+    expect(event.tags).toEqual(
+      expect.arrayContaining([
+        ['E', eventId, '', authorPubkey],
+        ['e', parentId, '', parentAuthor],
+        ['k', '1111'],
+        ['p', parentAuthor],
+      ])
+    );
   });
 
   it('[P1] should build repo refs with multiple refs and arweave mappings', async () => {

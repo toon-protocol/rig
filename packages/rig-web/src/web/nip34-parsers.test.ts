@@ -15,11 +15,18 @@ import {
   parsePR,
   parseComment,
   resolveIssueStatus,
+  commentBelongsToThread,
   resolvePRStatus,
   withTargetAuthor,
 } from './nip34-parsers.js';
 import type { NostrEvent } from './nip34-parsers.js';
-import { NGIT_STATE_NGIT } from './__fixtures__/ngit-wire.js';
+import {
+  NGIT_COMMENT_THREAD_COMMENTS,
+  NGIT_COMMENT_THREAD_NESTED_REPLY_ID,
+  NGIT_COMMENT_THREAD_NESTED_REPLY_PARENT_ID,
+  NGIT_COMMENT_THREAD_ROOT_EVENT_ID,
+  NGIT_STATE_NGIT,
+} from './__fixtures__/ngit-wire.js';
 
 // ============================================================================
 // Factories
@@ -495,6 +502,42 @@ function createMockCommentEvent(
 }
 
 /**
+ * Factory: a NIP-22 kind:1111 comment (#159). `parentEventId` makes it a
+ * nested reply — the lowercase `e`/`k`/`p` then name that comment while the
+ * uppercase `E`/`K`/`P` still name the thread root.
+ */
+function createMockNip22CommentEvent(overrides: {
+  id?: string;
+  pubkey?: string;
+  rootEventId: string;
+  rootKind?: number;
+  rootAuthorPubkey?: string;
+  parentEventId?: string;
+  created_at?: number;
+  content?: string;
+}): NostrEvent {
+  const rootAuthor = overrides.rootAuthorPubkey ?? 'ab'.repeat(32);
+  const rootKind = overrides.rootKind ?? 1621;
+  const isReply = overrides.parentEventId !== undefined;
+  return {
+    id: overrides.id ?? 'e'.repeat(64),
+    pubkey: overrides.pubkey ?? 'cd'.repeat(32),
+    created_at: overrides.created_at ?? 1700001000,
+    kind: 1111,
+    tags: [
+      ['E', overrides.rootEventId, '', rootAuthor],
+      ['K', String(rootKind)],
+      ['P', rootAuthor],
+      ['e', overrides.parentEventId ?? overrides.rootEventId, '', rootAuthor],
+      ['k', isReply ? '1111' : String(rootKind)],
+      ['p', rootAuthor],
+    ],
+    content: overrides.content ?? 'Comment text',
+    sig: 'f'.repeat(128),
+  };
+}
+
+/**
  * Factory: creates a status event (kind:1630-1633).
  */
 function createMockStatusEvent(overrides: {
@@ -678,7 +721,7 @@ describe('NIP-34 Parsers - parseComment', () => {
     expect(result!.parentEventId).toBe(parentId);
   });
 
-  it('[P1] returns null for non-1622 events', () => {
+  it('[P1] returns null for events of neither comment kind', () => {
     const event = createMockCommentEvent({ kind: 1 });
 
     const result = parseComment(event);
@@ -693,6 +736,135 @@ describe('NIP-34 Parsers - parseComment', () => {
     const result = parseComment(event);
 
     expect(result).toBeNull();
+  });
+
+  // ── NIP-22 kind:1111 (rig#159) ────────────────────────────────────────────
+
+  it('[P1] a legacy kind:1622 comment roots at its lone e tag', () => {
+    const parentId = 'parent'.repeat(10) + 'bbbb';
+    const event = createMockCommentEvent({ parentEventId: parentId });
+
+    const result = parseComment(event);
+
+    expect(result).not.toBeNull();
+    expect(result?.kind).toBe(1622);
+    expect(result?.rootEventId).toBe(parentId);
+    expect(result?.parentEventId).toBe(parentId);
+  });
+
+  it('[P1] a top-level kind:1111 roots and parents at the issue', () => {
+    const rootId = 'a1'.repeat(32);
+    const event = createMockNip22CommentEvent({ rootEventId: rootId });
+
+    const result = parseComment(event);
+
+    expect(result).not.toBeNull();
+    expect(result?.kind).toBe(1111);
+    expect(result?.rootEventId).toBe(rootId);
+    expect(result?.parentEventId).toBe(rootId);
+  });
+
+  it('[P1] a nested kind:1111 reply keeps the issue as its root', () => {
+    const rootId = 'a1'.repeat(32);
+    const parentId = 'b2'.repeat(32);
+    const event = createMockNip22CommentEvent({
+      rootEventId: rootId,
+      parentEventId: parentId,
+    });
+
+    const result = parseComment(event);
+
+    expect(result?.rootEventId).toBe(rootId);
+    expect(result?.parentEventId).toBe(parentId);
+  });
+
+  it('[P1] rejects a kind:1111 with no UPPERCASE E root scope', () => {
+    const event = createMockNip22CommentEvent({ rootEventId: 'a1'.repeat(32) });
+    event.tags = event.tags.filter((t) => t[0] !== 'E');
+
+    expect(parseComment(event)).toBeNull();
+  });
+});
+
+describe('NIP-34 Parsers - commentBelongsToThread (#159)', () => {
+  const rootId = 'a1'.repeat(32);
+  const otherRoot = 'c3'.repeat(32);
+
+  it('[P1] matches a kind:1111 on the UPPERCASE E tag', () => {
+    const event = createMockNip22CommentEvent({ rootEventId: rootId });
+
+    expect(commentBelongsToThread(event, rootId)).toBe(true);
+  });
+
+  it('[P1] a kind:1111 matching ONLY on a lowercase e is NOT in the thread', () => {
+    // Root scope is another thread; the lowercase `e` (its parent comment)
+    // happens to be this thread's root id. Case-sensitive matching excludes it.
+    const event = createMockNip22CommentEvent({
+      rootEventId: otherRoot,
+      parentEventId: rootId,
+    });
+
+    expect(commentBelongsToThread(event, rootId)).toBe(false);
+  });
+
+  it('[P1] matches a legacy kind:1622 on its lowercase e tag', () => {
+    const event = createMockCommentEvent({ parentEventId: rootId });
+
+    expect(commentBelongsToThread(event, rootId)).toBe(true);
+  });
+});
+
+describe('NIP-34 Parsers - the captured ngit kind:1111 thread (#155/#159)', () => {
+  it('[P1] parses all five captured comments into one thread', () => {
+    const parsed = NGIT_COMMENT_THREAD_COMMENTS.map((e) => parseComment(e));
+
+    expect(parsed.every((c) => c !== null)).toBe(true);
+    expect(
+      parsed.every(
+        (c) => c?.rootEventId === NGIT_COMMENT_THREAD_ROOT_EVENT_ID
+      )
+    ).toBe(true);
+    expect(
+      NGIT_COMMENT_THREAD_COMMENTS.every((e) =>
+        commentBelongsToThread(e, NGIT_COMMENT_THREAD_ROOT_EVENT_ID)
+      )
+    ).toBe(true);
+  });
+
+  it('[P1] the genuine nested reply parents at another comment', () => {
+    const reply = NGIT_COMMENT_THREAD_COMMENTS.find(
+      (e) => e.id === NGIT_COMMENT_THREAD_NESTED_REPLY_ID
+    );
+    expect(reply).toBeDefined();
+
+    const parsed = reply ? parseComment(reply) : null;
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.parentEventId).toBe(
+      NGIT_COMMENT_THREAD_NESTED_REPLY_PARENT_ID
+    );
+    expect(parsed?.rootEventId).toBe(NGIT_COMMENT_THREAD_ROOT_EVENT_ID);
+  });
+
+  it('[P1] a mixed 1622 + 1111 thread merges in createdAt order', () => {
+    const legacy = createMockCommentEvent({
+      id: 'd4'.repeat(32),
+      parentEventId: NGIT_COMMENT_THREAD_ROOT_EVENT_ID,
+      created_at: 1, // older than every captured comment
+      content: 'legacy',
+    });
+
+    const merged = [...NGIT_COMMENT_THREAD_COMMENTS, legacy]
+      .filter((e) =>
+        commentBelongsToThread(e, NGIT_COMMENT_THREAD_ROOT_EVENT_ID)
+      )
+      .map((e) => parseComment(e))
+      .filter((c): c is NonNullable<typeof c> => c !== null)
+      .sort((a, b) => a.createdAt - b.createdAt);
+
+    expect(merged).toHaveLength(6);
+    expect(merged[0]?.kind).toBe(1622);
+    expect(merged.slice(1).every((c) => c.kind === 1111)).toBe(true);
   });
 });
 

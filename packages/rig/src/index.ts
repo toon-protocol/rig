@@ -25,6 +25,7 @@ export {
 
 export {
   COMMENT_KIND,
+  LEGACY_COMMENT_KIND,
   MAINTAINERS_TAG,
   PAYOUT_TAG,
   REPOSITORY_STATE_KIND,
@@ -34,9 +35,12 @@ export {
   buildPatch,
   buildRepoRefs,
   buildStatus,
+  commentBelongsToThread,
   isValidEvmPayoutAddress,
   parseMaintainers,
   parsePayout,
+  type CommentParent,
+  type CommentRoot,
   type PayoutChain,
   type PayoutPointer,
   type StatusKind,

@@ -64,6 +64,12 @@ export interface NostrFilter {
   '#a'?: string[];
   /** Event-reference tag filter (#278 tracker: statuses + comments). */
   '#e'?: string[];
+  /**
+   * NIP-22 UPPERCASE root-scope reference — distinct from `#e` and matched
+   * case-sensitively (#159: kind:1111 comments hang off their thread root's
+   * `E` tag, while `e` names the immediate parent).
+   */
+  '#E'?: string[];
   /** Commit tag filter (#125 CI: results/progress/jobs for one commit). */
   '#c'?: string[];
   /** Addressee tag filter (#125 CI: a coordinator's inbox — 9843/9844/9840/29846). */

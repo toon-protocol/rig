@@ -23,8 +23,18 @@ import type {
 // Kinds not (yet) exported by @toon-protocol/core/nip34:
 /** Repository State (refs) — replaceable, pairs with kind:30617 via `d` tag. */
 export const REPOSITORY_STATE_KIND = 30618;
-/** Comment on an issue or patch (NIP-22 style threading within NIP-34). */
-export const COMMENT_KIND = 1622;
+/**
+ * Comment on an issue or patch — NIP-22 `kind:1111`, which NIP-34's "Replies"
+ * clause mandates ("Replies … should follow NIP-22 comment"). This is the kind
+ * rig WRITES (rig#159).
+ */
+export const COMMENT_KIND = 1111;
+/**
+ * rig's pre-#159 private comment dialect. READ-ONLY: never written again, kept
+ * so threads published before that release keep rendering. Every reader merges
+ * it with {@link COMMENT_KIND} by `created_at`.
+ */
+export const LEGACY_COMMENT_KIND = 1622;
 
 // ---------------------------------------------------------------------------
 // UnsignedEvent type (subset of nostr-tools — no id, sig, or pubkey)
@@ -53,6 +63,18 @@ export interface UnsignedEvent {
 export const MAINTAINERS_TAG = 'maintainers';
 
 const HEX64 = /^[0-9a-f]{64}$/;
+
+/**
+ * First value of the named tag, or `undefined`. Tag names are matched
+ * CASE-SENSITIVELY, exactly as NIP-01 defines them: `E` (a NIP-22 root scope)
+ * is a different tag from `e` (the parent item).
+ */
+export function firstTagValue(
+  tags: string[][],
+  name: string
+): string | undefined {
+  return tags.find((t) => t[0] === name)?.[1];
+}
 
 /**
  * Collect the declared maintainer pubkeys (lowercased hex) from a kind:30617
@@ -260,37 +282,113 @@ export function buildIssue(
 }
 
 // ---------------------------------------------------------------------------
-// kind:1622 — Comment (on issue or PR)
+// kind:1111 — NIP-22 comment (on an issue or patch)
 // ---------------------------------------------------------------------------
 
 /**
- * Build a kind:1622 comment event.
+ * The event a comment thread hangs off: the kind:1621 issue or kind:1617
+ * patch being discussed — NEVER the repository. Becomes the comment's
+ * uppercase NIP-22 root scope (`E`/`K`/`P`).
+ */
+export interface CommentRoot {
+  /** Event id of the issue/patch (uppercase `E`). */
+  eventId: string;
+  /** Kind of that event, e.g. 1621 or 1617 (uppercase `K`). */
+  kind: number;
+  /** Pubkey of that event's author (uppercase `P`). */
+  authorPubkey: string;
+}
+
+/**
+ * The kind:1111 comment being replied to, when the new comment is a nested
+ * reply rather than a top-level comment. Becomes the lowercase parent
+ * (`e`/`k`/`p`), with `k` always {@link COMMENT_KIND}.
+ */
+export interface CommentParent {
+  /** Event id of the comment replied to (lowercase `e`). */
+  eventId: string;
+  /** Pubkey of that comment's author (lowercase `p`). */
+  authorPubkey: string;
+}
+
+/**
+ * Build a NIP-22 kind:1111 comment on a NIP-34 issue or patch (rig#159).
+ *
+ * NIP-22: "Comments MUST point to the root scope using uppercase tag names
+ * (e.g. `K`, `E`, `A` or `I`)" and "MUST point to the parent item with
+ * lowercase ones (e.g. `k`, `e`, `a` or `i`)", with "`P` for the root scope
+ * and `p` for the author of the parent item". So:
+ *
+ * - top-level comment → parent === root: `e`/`k`/`p` repeat `E`/`K`/`P`;
+ * - reply → `e` is the parent comment, `k` is `1111`, `p` its author, while
+ *   `E`/`K`/`P` still name the issue/patch at the top of the thread.
+ *
+ * The repo coordinate rides along as an ordinary lowercase `a` tag so a
+ * subscription can scope a whole repo's comments with one `#a` filter (spec
+ * rig#153). It is deliberately NOT the NIP-22 parent pointer — the parent is
+ * the `e` tag — so it is emitted last, after the six threading tags.
  *
  * @param repoOwnerPubkey - Pubkey of the repository owner
- * @param repoId - Repository identifier
- * @param issueOrPrEventId - Event ID of the issue or PR being commented on
- * @param authorPubkey - Pubkey of the issue/PR author (NIP-34 `p` tag for threading), NOT the comment author
+ * @param repoId - Repository identifier (NIP-34 `d` tag)
+ * @param root - The issue/patch the thread hangs off
  * @param body - Comment body (Markdown content)
- * @param marker - Event reference marker: 'root' or 'reply' (default: 'reply')
+ * @param parent - The kind:1111 comment being replied to; omit for a
+ *   top-level comment, whose parent is the root itself
  */
 export function buildComment(
   repoOwnerPubkey: string,
   repoId: string,
-  issueOrPrEventId: string,
-  authorPubkey: string,
+  root: CommentRoot,
   body: string,
-  marker: 'root' | 'reply' = 'reply'
+  parent?: CommentParent
 ): UnsignedEvent {
+  const parentTags: string[][] =
+    parent === undefined
+      ? [
+          ['e', root.eventId, '', root.authorPubkey],
+          ['k', String(root.kind)],
+          ['p', root.authorPubkey],
+        ]
+      : [
+          ['e', parent.eventId, '', parent.authorPubkey],
+          ['k', String(COMMENT_KIND)],
+          ['p', parent.authorPubkey],
+        ];
+
   return {
     kind: COMMENT_KIND,
     content: body,
     tags: [
+      ['E', root.eventId, '', root.authorPubkey],
+      ['K', String(root.kind)],
+      ['P', root.authorPubkey],
+      ...parentTags,
       ['a', `${REPOSITORY_ANNOUNCEMENT_KIND}:${repoOwnerPubkey}:${repoId}`],
-      ['e', issueOrPrEventId, '', marker],
-      ['p', authorPubkey],
     ],
     created_at: Math.floor(Date.now() / 1000),
   };
+}
+
+/**
+ * Does `event` belong to the comment thread rooted at `rootEventId`?
+ *
+ * kind:1111 membership is decided by the **uppercase** `E` tag, matched
+ * case-sensitively — the same rule rig already applies to kind:1619 PR
+ * updates. A kind:1111 whose only match is a lowercase `e` is a reply to
+ * something else and is NOT part of this thread. Legacy kind:1622 has no
+ * uppercase form: its `e` tag is the thread root.
+ */
+export function commentBelongsToThread(
+  event: { kind: number; tags: string[][] },
+  rootEventId: string
+): boolean {
+  if (event.kind === COMMENT_KIND) {
+    return event.tags.some((t) => t[0] === 'E' && t[1] === rootEventId);
+  }
+  if (event.kind === LEGACY_COMMENT_KIND) {
+    return event.tags.some((t) => t[0] === 'e' && t[1] === rootEventId);
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
