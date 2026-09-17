@@ -8,6 +8,12 @@ this heading are recorded by hand; a changeset file is NOT the way to note a
 rig-web change, because an `ignore`d-only changeset is inert and blocks releases
 of `@toon-protocol/rig` (see the changeset gate in `.github/workflows/ci.yml`).
 
+- The clone box's command names the configured store gateway (rig#185). When
+  `VITE_ARWEAVE_GATEWAY` is set, the copied (and displayed) command gains
+  `--gateway <url>`, so the paste reads objects from the same gateway the page
+  rendered from instead of 404ing against the public list. With no override the
+  command is byte-for-byte what it was.
+
 - `VITE_ARWEAVE_GATEWAY` points rig-web at a self-hosted store gateway (rig#177).
   It is tried ahead of the three public Arweave gateways at
   `<gateway>/raw/<txId>`, with the public list kept behind it as a fallback, and
