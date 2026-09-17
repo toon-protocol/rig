@@ -194,6 +194,43 @@ describe('rig fetch', () => {
     expect(gitText(cloneDir, ['fsck', '--strict'])).toBe('');
   });
 
+  it('fetches the delta through the resolver when the map was capped (#162)', async () => {
+    const world = new World();
+    const cloneDir = await world.clone();
+
+    writeFileSync(join(world.srcDir, 'new.txt'), 'delta\n');
+    git(['add', '.'], world.srcDir);
+    git(['commit', '-m', 'second'], world.srcDir);
+    world.publish();
+    const newMain = gitText(world.srcDir, ['rev-parse', 'main']);
+
+    // The write-side cap evicted every `arweave` tag from the state event.
+    const refsEvent = world.events.find((e) => e.kind === 30618) as NostrEvent;
+    refsEvent.tags = refsEvent.tags.filter((t) => t[0] !== 'arweave');
+
+    const resolved: string[] = [];
+    const io = makeTestIo();
+    const code = await runFetch(['--json'], {
+      ...world.deps(io, cloneDir),
+      // The objects are still on Arweave under their Git-SHA tags.
+      resolveSha: async (sha) => {
+        resolved.push(sha);
+        return txFor(sha);
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(io.errLines.join('\n')).toBe('');
+    expect(resolved.length).toBeGreaterThan(0);
+    const doc = io.jsonDocs[0] as { objectsDownloaded: number };
+    // Same delta as with a full map: 1 commit + 1 tree + 1 blob.
+    expect(doc.objectsDownloaded).toBe(3);
+    expect(gitText(cloneDir, ['rev-parse', 'refs/remotes/origin/main'])).toBe(
+      newMain
+    );
+    expect(gitText(cloneDir, ['fsck', '--strict'])).toBe('');
+  });
+
   it('is idempotent: a second fetch reports up to date and downloads nothing', async () => {
     const world = new World();
     const cloneDir = await world.clone();

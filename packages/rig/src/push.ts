@@ -16,6 +16,14 @@
  * `r` tags are the full new ref state. On a first push it publishes the
  * kind:30617 announcement before the refs event.
  *
+ * That merge is bounded at `MAX_ARWEAVE_TAGS_PER_EVENT` (#162): an unbounded
+ * map eventually produces an event relays reject. Over the cap, entries are
+ * kept in priority order (this push's objects, then objects reachable from
+ * the new tips newest-first); under it, the published map is byte-identical
+ * to what earlier releases published. A dropped entry is a cache miss, never
+ * a lost object — it is still on Arweave under its `Git-SHA` / `Repo` tags
+ * and still resolves through the GraphQL resolver.
+ *
  * Resume safety: uploads are content-addressed (Git-SHA-tagged), so re-running
  * `executePush` after a crash is safe — it consults the merged
  * remote + planned sha→txId map before paying for any upload, and a re-plan
@@ -23,7 +31,11 @@
  * objects via GraphQL) skips them entirely.
  */
 
-import { buildRepoAnnouncement, buildRepoRefs } from './nip34-events.js';
+import {
+  MAX_ARWEAVE_TAGS_PER_EVENT,
+  buildRepoAnnouncement,
+  buildRepoRefs,
+} from './nip34-events.js';
 import {
   EMPTY_BLOB_SHA,
   MAX_OBJECT_SIZE,
@@ -456,8 +468,11 @@ export interface PushResult {
   /** kind:30618 (cumulative refs + arweave map) receipt. */
   refsReceipt: PublishReceipt;
   /**
-   * The full sha→txId map published in the refs event: remote hints +
-   * resolver finds + this push's uploads.
+   * The sha→txId map actually published in the refs event: remote hints +
+   * resolver finds + this push's uploads, bounded to
+   * `MAX_ARWEAVE_TAGS_PER_EVENT` in priority order (#162). Entries dropped by
+   * the cap are still on Arweave and still resolve through the GraphQL
+   * `Git-SHA` resolver.
    */
   arweaveMap: Map<string, string>;
   /** Total fees actually paid (uploads + events), smallest asset unit. */
@@ -480,6 +495,59 @@ export interface ExecutePushOptions {
 
 /** How many object bodies to hold in memory at once between read and upload. */
 const READ_BATCH_SIZE = 100;
+
+/**
+ * Choose the at-most-{@link MAX_ARWEAVE_TAGS_PER_EVENT} sha→txId entries to
+ * publish on the kind:30618 (#162).
+ *
+ * Under the cap this is the identity: the merged map, in merge order, exactly
+ * as every release before the cap published it. Over the cap, entries are
+ * kept in priority order —
+ *
+ *   1. objects this push introduced (they are what a reader wants next);
+ *   2. objects reachable from the new ref tips, newest first (the common
+ *      clone / shallow-history path);
+ *   3. whatever merge-order hints still fit, so a spare slot is never wasted.
+ *
+ * Dropping an entry costs a GraphQL `Git-SHA` lookup on read and nothing
+ * else — the object is on Arweave either way. It NEVER costs a re-upload:
+ * `planPush` asks `resolveMissing` about every SHA the map does not cover
+ * before it plans a single paid upload.
+ */
+async function boundObjectMap(
+  merged: Map<string, string>,
+  plan: PushPlan,
+  repoReader: GitRepoReader
+): Promise<Map<string, string>> {
+  if (merged.size <= MAX_ARWEAVE_TAGS_PER_EVENT) return merged;
+
+  const kept = new Map<string, string>();
+  const take = (sha: string): void => {
+    if (kept.size >= MAX_ARWEAVE_TAGS_PER_EVENT || kept.has(sha)) return;
+    const txId = merged.get(sha);
+    if (txId !== undefined) kept.set(sha, txId);
+  };
+
+  // 1. This push's own objects, first and unconditionally.
+  for (const object of plan.objects) take(object.sha);
+
+  // 2. Reachable from the new ref tips, newest commit first.
+  if (kept.size < MAX_ARWEAVE_TAGS_PER_EVENT) {
+    const tips = [...new Set(Object.values(plan.newRefs))];
+    for (const sha of await repoReader.reachableObjectsNewestFirst(tips)) {
+      if (kept.size >= MAX_ARWEAVE_TAGS_PER_EVENT) break;
+      take(sha);
+    }
+  }
+
+  // 3. Fill any remaining room with the rest of the merged map, in order.
+  for (const [sha, txId] of merged) {
+    if (kept.size >= MAX_ARWEAVE_TAGS_PER_EVENT) break;
+    if (!kept.has(sha)) kept.set(sha, txId);
+  }
+
+  return kept;
+}
 
 /**
  * Execute a {@link PushPlan}: upload objects (ref tips last), then publish
@@ -573,11 +641,15 @@ export async function executePush(
   }
 
   // ONE cumulative kind:30618: full ref state + MERGED arweave map (NIP-33
-  // replaceable — dropping prior tags would orphan earlier sha→txId hints).
+  // replaceable — dropping prior tags would orphan earlier sha→txId hints),
+  // bounded to MAX_ARWEAVE_TAGS_PER_EVENT in priority order (#162) so the
+  // event stays a size relays accept. Orphaning is survivable precisely
+  // because the map is a cache over the GraphQL `Git-SHA` resolver.
+  const published = await boundObjectMap(merged, plan, repoReader);
   const refsEvent = buildRepoRefs(
     plan.repoId,
     plan.newRefs,
-    Object.fromEntries(merged)
+    Object.fromEntries(published)
   );
   const refsReceipt = await publisher.publishEvent(refsEvent, relayUrls);
   totalFeePaid += refsReceipt.feePaid;
@@ -594,7 +666,7 @@ export async function executePush(
     uploads,
     announceReceipt,
     refsReceipt,
-    arweaveMap: merged,
+    arweaveMap: published,
     totalFeePaid,
   };
 }

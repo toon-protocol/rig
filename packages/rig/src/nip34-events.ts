@@ -226,7 +226,46 @@ export function buildRepoAnnouncement(
 // ---------------------------------------------------------------------------
 
 /**
+ * Maximum number of `arweave` (git SHA → Arweave txId) tags on ONE kind:30618
+ * event, enforced on write (here and in `executePush`) and on read
+ * (`parseRefsEvent`, rig-web's `parseRepoRefs`). Before this cap the map was
+ * merged cumulatively on every push and bounded by nothing, so a large repo
+ * eventually produced an event relays reject (#162).
+ *
+ * WHY 2000 — the arithmetic, worst case, in the event's JSON serialization:
+ *
+ *   one arweave tag  `["arweave","<40-hex sha>","<43-char txId>"]`
+ *                    = 1 + 9 + 1 + 42 + 1 + 45 + 1 = 100 bytes, +1 comma = 101
+ *   2000 of them     = 202,000 bytes ≈ 197 KiB   ← the map's whole budget
+ *
+ *   the rest of the same event, at ITS caps:
+ *   1000 ref tags    (MAX_REFS_PER_EVENT) `["r","<refname>","<sha>"]`, and
+ *                    `isSafeRefname` admits refnames up to 1024 bytes
+ *                    → ≤ 1076 bytes each ≈ 1.03 MiB
+ *   HEAD + d + id/pubkey/sig/kind/created_at/content   ≈ 1.5 KiB
+ *
+ *   worst-case event ≈ 1.03 MiB + 197 KiB ≈ 1.23 MiB
+ *
+ * The strictest relay surveyed for #153 (relay.ngit.dev, 2026-09-17) accepts
+ * 5 MiB messages, so even that adversarial event sits at ~25% of the smallest
+ * known limit, and the object map is only ~16% of the event. With realistic
+ * refnames (≤ 64 bytes) a full-cap event is ≈ 260 KiB.
+ *
+ * Dropping an entry loses nothing: the object is still on Arweave under its
+ * `Git-SHA` / `Repo` tags and resolves through the GraphQL resolver, which is
+ * already the documented fallback (`RemoteState.resolveMissing`). The map is
+ * a cache, not the index — so push planning must treat "absent from the map"
+ * as "ask the resolver", NEVER as "needs upload".
+ */
+export const MAX_ARWEAVE_TAGS_PER_EVENT = 2000;
+
+/**
  * Build a kind:30618 repository refs/state event.
+ *
+ * At most {@link MAX_ARWEAVE_TAGS_PER_EVENT} `arweave` tags are emitted; a
+ * larger `arweaveMap` is truncated to its first entries in iteration order,
+ * so the caller decides priority (see `executePush`) and a repo under the cap
+ * publishes byte-identically to before the cap existed.
  *
  * @param repoId - Repository identifier (d tag, matches kind:30617)
  * @param refs - Map of ref paths to commit SHAs (e.g., { 'refs/heads/main': 'abc123' })
@@ -250,9 +289,12 @@ export function buildRepoRefs(
     tags.push(['HEAD', `ref: ${firstRef}`]);
   }
 
-  // Add arweave SHA-to-txId mapping tags
+  // Add arweave SHA-to-txId mapping tags, bounded (#162).
+  let arweaveTagCount = 0;
   for (const [sha, txId] of Object.entries(arweaveMap)) {
+    if (arweaveTagCount >= MAX_ARWEAVE_TAGS_PER_EVENT) break;
     tags.push(['arweave', sha, txId]);
+    arweaveTagCount++;
   }
 
   return {

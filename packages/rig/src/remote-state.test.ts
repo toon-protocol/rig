@@ -12,6 +12,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { WebSocketServer } from 'ws';
 import type { AddressInfo } from 'node:net';
 
+import { MAX_ARWEAVE_TAGS_PER_EVENT } from './nip34-events.js';
 import { fetchRemoteState, type NostrEvent } from './remote-state.js';
 
 // ---------------------------------------------------------------------------
@@ -500,5 +501,78 @@ describe('fetchRemoteState', () => {
     // The symref row must not leak into the ref map
     expect(state.refs.has('HEAD')).toBe(false);
     expect(state.refs.size).toBe(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // Object-map cap on read (#162)
+  // -------------------------------------------------------------------------
+
+  it('ingests at most MAX_ARWEAVE_TAGS_PER_EVENT arweave tags from one event', async () => {
+    const flood = Array.from(
+      { length: MAX_ARWEAVE_TAGS_PER_EVENT + 500 },
+      (_, i) => [
+        'arweave',
+        i.toString(16).padStart(40, '0'),
+        `Tx${i.toString().padStart(41, '0')}`,
+      ]
+    );
+    const refsEvent = makeRefsEvent({
+      tags: [
+        ['d', REPO],
+        ...flood,
+        // Tags AFTER the flood must still be parsed — the cap skips surplus
+        // `arweave` rows, it does not abandon the event.
+        ['r', 'refs/heads/main', SHA_MAIN],
+        ['HEAD', 'ref: refs/heads/main'],
+      ],
+    });
+    const r = await relay([refsEvent]);
+
+    const state = await fetchRemoteState({
+      relayUrls: [r.url],
+      ownerPubkey: OWNER,
+      repoId: REPO,
+      resolveSha: async () => null,
+    });
+
+    expect(state.shaToTxId.size).toBe(MAX_ARWEAVE_TAGS_PER_EVENT);
+    // The kept entries are the first ones on the wire.
+    expect(state.shaToTxId.get('0'.repeat(40))).toBe(`Tx${'0'.repeat(41)}`);
+    expect(state.refs.get('refs/heads/main')).toBe(SHA_MAIN);
+    expect(state.headSymref).toBe('refs/heads/main');
+  });
+
+  it('a SHA dropped by the read cap still resolves through the GraphQL resolver', async () => {
+    const dropped = 'de'.repeat(20);
+    const flood = Array.from(
+      { length: MAX_ARWEAVE_TAGS_PER_EVENT },
+      (_, i) => [
+        'arweave',
+        i.toString(16).padStart(40, '0'),
+        `Tx${i.toString().padStart(41, '0')}`,
+      ]
+    );
+    const refsEvent = makeRefsEvent({
+      tags: [
+        ['d', REPO],
+        ['r', 'refs/heads/main', SHA_MAIN],
+        ...flood,
+        // Over the cap — never ingested from the tags…
+        ['arweave', dropped, TX_DEV],
+      ],
+    });
+    const r = await relay([refsEvent]);
+
+    const state = await fetchRemoteState({
+      relayUrls: [r.url],
+      ownerPubkey: OWNER,
+      repoId: REPO,
+      resolveSha: async (sha) => (sha === dropped ? TX_GRAPHQL : null),
+    });
+
+    expect(state.shaToTxId.has(dropped)).toBe(false);
+    // …but the resolver finds it, so nothing is unreachable.
+    const resolved = await state.resolveMissing([dropped]);
+    expect(resolved.get(dropped)).toBe(TX_GRAPHQL);
   });
 });

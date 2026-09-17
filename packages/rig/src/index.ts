@@ -26,6 +26,7 @@ export {
 export {
   COMMENT_KIND,
   MAINTAINERS_TAG,
+  MAX_ARWEAVE_TAGS_PER_EVENT,
   PAYOUT_TAG,
   REPOSITORY_STATE_KIND,
   authorizedStatusAuthors,

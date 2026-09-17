@@ -375,6 +375,64 @@ export class GitRepoReader {
   }
 
   /**
+   * Every object SHA in the local object database, in no particular order
+   * (`git cat-file --batch-all-objects --batch-check`, no bodies read).
+   *
+   * This is the honest answer to "what does this repository already have",
+   * which `rig fetch` needs to compute its delta. It deliberately does NOT
+   * consult the remote's kind:30618 `arweave` map: that map is capped (#162)
+   * and is a hint cache, never an index of local presence.
+   */
+  async listAllObjectShas(): Promise<string[]> {
+    const { stdout } = await this.git([
+      'cat-file',
+      '--batch-check=%(objectname)',
+      '--batch-all-objects',
+      '--unordered',
+    ]);
+    const shas: string[] = [];
+    for (const line of stdout.split('\n')) {
+      if (line) shas.push(line);
+    }
+    return shas;
+  }
+
+  /**
+   * SHAs of every object reachable from `tips`, newest first: commits in
+   * reverse-chronological order, each commit immediately followed by the
+   * trees and blobs it is the first to reference
+   * (`git rev-list --objects --in-commit-order`).
+   *
+   * Used to rank the kind:30618 object map when it exceeds
+   * `MAX_ARWEAVE_TAGS_PER_EVENT` (#162): the entries most likely to be wanted
+   * by the next clone or fetch are the ones nearest the tips. Tips that do
+   * not resolve locally (a remote ref we never fetched) are dropped rather
+   * than failing the walk.
+   */
+  async reachableObjectsNewestFirst(tips: string[]): Promise<string[]> {
+    for (const tip of tips) assertRevision(tip, 'tip');
+    const known = await this.filterExisting([...new Set(tips)]);
+    if (known.length === 0) return [];
+
+    const { stdout } = await this.git([
+      'rev-list',
+      '--objects',
+      '--in-commit-order',
+      ...known,
+      '--', // nothing user-supplied can become a pathspec
+    ]);
+
+    const shas: string[] = [];
+    for (const line of stdout.split('\n')) {
+      if (!line) continue;
+      // `--objects` lines are `<sha>` or `<sha> <path>`.
+      const spaceIdx = line.indexOf(' ');
+      shas.push(spaceIdx === -1 ? line : line.slice(0, spaceIdx));
+    }
+    return shas;
+  }
+
+  /**
    * List every blob (file) reachable from a ref's root tree, recursively,
    * with the path it is served at (#368: the ar.io site manifest join key).
    * Uses `git ls-tree -r -z` — NUL-terminated records so binary/spaced paths

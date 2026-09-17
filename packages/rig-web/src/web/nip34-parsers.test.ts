@@ -951,6 +951,29 @@ describe('NIP-34 Parsers - 8.6-UNIT-005b: arweaveMap from kind:30618', () => {
     );
   });
 
+  it('[P1] parseRepoRefs caps arweaveMap at 2000 entries (#162 hostile relay)', () => {
+    // A relay is untrusted: a giant state event must not exhaust memory.
+    // Truncation is safe — arweave-client.ts resolves a missing SHA through
+    // the GraphQL Git-SHA resolver.
+    const flood = Array.from({ length: 2500 }, (_, i) => [
+      'arweave',
+      i.toString(16).padStart(40, '0'),
+      `tx${i.toString().padStart(41, '0')}`,
+    ]);
+    const event = createMockRefsEvent({
+      tags: [['d', 'my-repo'], ...flood, ['r', 'main', 'aaa111']],
+    });
+
+    const result = parseRepoRefs(event);
+
+    expect(result).not.toBeNull();
+    expect(result!.arweaveMap.size).toBe(2000);
+    expect(result!.arweaveMap.get('0'.repeat(40))).toBe(`tx${'0'.repeat(41)}`);
+    // Tags after the flood are still parsed — the cap skips surplus rows, it
+    // does not abandon the event.
+    expect(result!.refs.get('main')).toBe('aaa111');
+  });
+
   it('[P1] parseRepoRefs returns empty arweaveMap when no arweave tags', () => {
     const event = createMockRefsEvent({
       tags: [

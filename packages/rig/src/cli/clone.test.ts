@@ -370,6 +370,51 @@ describe('rig clone failure modes', () => {
     expect(resolved).toContain(victim.sha);
     expect(gitText(join(cwd, REPO), ['fsck', '--strict'])).toBe('');
   });
+
+  it('clones identically when the object map was capped down to the tips (#162)', async () => {
+    // A repo whose 30618 map the write-side cap has evicted almost entirely:
+    // only the ref tips remain as `arweave` tags. Everything else must come
+    // back through the GraphQL resolver, with NO user-visible difference.
+    const srcDir = makeSourceRepo();
+    const { announce, refsEvent, objects } = repoStateEvents({
+      repoDir: srcDir,
+      owner: OWNER,
+      repoId: REPO,
+    });
+    const tips = new Set(
+      refsEvent.tags.filter((t) => t[0] === 'r').map((t) => t[2] as string)
+    );
+    refsEvent.tags = refsEvent.tags.filter(
+      (t) => t[0] !== 'arweave' || tips.has(t[1] as string)
+    );
+    expect(refsEvent.tags.filter((t) => t[0] === 'arweave').length).toBe(
+      tips.size
+    );
+
+    const gateway = makeMockGateway(storeFromObjects(objects));
+    const io = makeTestIo();
+    const cwd = makeTempDir('toon-rig-clone-dst-');
+    const code = await runClone([RELAY, `${OWNER}/${REPO}`], {
+      io,
+      env: {},
+      cwd,
+      webSocketFactory: makeMockRelayFactory((filter) =>
+        filterEvents([announce, refsEvent], filter)
+      ),
+      fetchFn: gateway.fetchFn,
+      // The objects the cap dropped are still on Arweave.
+      resolveSha: async (sha) => txFor(sha),
+    });
+
+    expect(code).toBe(0);
+    expect(io.errLines.join('\n')).toBe('');
+    const dest = join(cwd, REPO);
+    expect(gitText(dest, ['fsck', '--strict'])).toBe('');
+    expect(gitText(dest, ['rev-list', '--all', '--objects'])).toBe(
+      gitText(srcDir, ['rev-list', '--all', '--objects'])
+    );
+    expect(gitText(dest, ['status', '--porcelain'])).toBe('');
+  });
 });
 
 // ---------------------------------------------------------------------------
