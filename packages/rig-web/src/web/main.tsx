@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { HashRouter, Routes, Route } from 'react-router';
 import { normalizeRelayFragment } from '@/relay-fragment';
+import { applyPreferredTheme } from '@/theme';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { RigConfigProvider } from '@/hooks/use-rig-config';
 import { ProfileCacheProvider } from '@/hooks/use-profile-cache';
@@ -28,6 +29,10 @@ import './globals.css';
 // the fragment — rewrite it to the router-safe `#/?relay=…` BEFORE the
 // router mounts, or the app blank-pages on an unmatched route.
 normalizeRelayFragment();
+
+// Tailwind's dark variant needs a `dark` class on <html>; no UI sets it since
+// the header went, so apply the stored-or-system choice before the first paint.
+applyPreferredTheme();
 
 const root = document.getElementById('app');
 if (!root) throw new Error('Root element #app not found');
