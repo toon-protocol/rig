@@ -22,16 +22,42 @@ export {
   seedShaCache,
 } from '@toon-protocol/arweave';
 import {
-  ARWEAVE_GATEWAYS,
   ARWEAVE_FETCH_TIMEOUT_MS,
   isValidArweaveTxId,
 } from '@toon-protocol/arweave';
+import {
+  normalizeGateway,
+  objectFetchUrls,
+  objectImageUrl,
+} from './arweave-gateway.js';
+
+/**
+ * The store gateway this build reads from before the public list, or null.
+ *
+ * Read per call rather than once at module load: Vite replaces the expression
+ * with a literal at build time either way, and a function keeps the value
+ * stubbable (`vi.stubEnv`) in tests. See `arweave-gateway.ts` for why an
+ * override exists at all.
+ */
+function configuredGateway(): string | null {
+  return normalizeGateway(import.meta.env.VITE_ARWEAVE_GATEWAY);
+}
+
+/**
+ * The URL to RENDER for an object's bytes (an `<img src>` resolved out of the
+ * git tree). Points at `VITE_ARWEAVE_GATEWAY` when one is configured, and at
+ * the first public gateway otherwise.
+ */
+export function arweaveObjectUrl(txId: string): string {
+  return objectImageUrl(txId, configuredGateway());
+}
 
 /**
  * Fetch a raw object from an Arweave gateway by transaction ID.
  *
- * Tries the primary gateway first, then falls back to secondary gateways.
- * Returns null if all gateways fail (404, network error, timeout).
+ * Tries `VITE_ARWEAVE_GATEWAY` first when one is configured, then each public
+ * gateway in turn. Returns null if all of them fail (404, network error,
+ * timeout).
  *
  * @param txId - Arweave transaction ID (43-character base64url string)
  * @returns Raw bytes as Uint8Array, or null if unavailable
@@ -43,9 +69,8 @@ export async function fetchArweaveObject(
     return null;
   }
 
-  for (const gateway of ARWEAVE_GATEWAYS) {
+  for (const url of objectFetchUrls(txId, configuredGateway())) {
     try {
-      const url = `${gateway}/${txId}`;
       const response = await fetch(url, {
         signal: AbortSignal.timeout(ARWEAVE_FETCH_TIMEOUT_MS),
       });

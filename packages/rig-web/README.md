@@ -7,6 +7,7 @@ The Rig — a browser-only SPA that renders TOON Protocol events (NIP-34 git voc
 ```bash
 pnpm dev                                          # connects to ws://localhost:7100
 VITE_DEFAULT_RELAY=wss://relay.example pnpm dev   # override the default relay
+VITE_ARWEAVE_GATEWAY=http://localhost:3000 pnpm dev   # read objects from a self-hosted store
 ```
 
 ## Relay resolution order
@@ -19,6 +20,33 @@ VITE_DEFAULT_RELAY=wss://relay.example pnpm dev   # override the default relay
    `[?&]relay=` inside the fragment.
 2. Query param — `?relay=…` (legacy)
 3. Build-time default — `VITE_DEFAULT_RELAY` baked into the bundle
+
+## Store gateway resolution order
+
+Git objects are content-addressed, so every gateway that has the bytes serves
+the same bytes and rig-web simply tries gateways in order until one answers:
+
+1. `VITE_ARWEAVE_GATEWAY` — a self-hosted store or a sandbox, addressed at
+   `<gateway>/raw/<txId>`. Optional; unset by default.
+2. The public Arweave gateways from `@toon-protocol/arweave`
+   (`ar-io.dev`, `arweave.net`, `permagate.io`), addressed at `<gateway>/<txId>`.
+
+The public list always stays behind the override as a fallback, so a stopped
+sandbox degrades to mainnet rather than going dark.
+
+Setting `VITE_ARWEAVE_GATEWAY` also widens the CSP: `vite.config.ts` splices
+that gateway's origin into the `connect-src` and `img-src` of the
+`Content-Security-Policy` meta tag in `index.html`, in dev and in build. Both
+halves are needed — without the CSP the browser blocks a correctly addressed
+fetch, and the page renders its relay data (refs, announcement, issues) while
+every tree read fails with "Could not resolve commit tree" (rig#177).
+
+```bash
+# Against the local TOON sandbox:
+VITE_DEFAULT_RELAY=ws://localhost:7100 \
+VITE_ARWEAVE_GATEWAY=http://localhost:3000 \
+  pnpm --filter @toon-protocol/rig-web dev
+```
 
 ## Production build
 
