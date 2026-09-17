@@ -388,7 +388,14 @@ export function parsePR(event: NostrEvent): PRMetadata | null {
 
   const title = getTagValue(event.tags, 'subject') ?? '';
   const commitShas = getTagValues(event.tags, 'commit');
-  const baseBranch = getTagValue(event.tags, 'branch') ?? 'main';
+  // #161: `branch-name` is what new patches (and kind:1618 PRs, per NIP-34)
+  // write; `branch` is the legacy spelling rig used to read (and still may,
+  // on old events). Never fall back to `t` — a legacy patch that only
+  // carries the branch there is not guessed at.
+  const baseBranch =
+    getTagValue(event.tags, 'branch-name') ??
+    getTagValue(event.tags, 'branch') ??
+    'main';
   const description = getTagValue(event.tags, 'description');
 
   return {

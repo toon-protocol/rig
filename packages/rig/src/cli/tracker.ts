@@ -402,7 +402,13 @@ interface TrackerItem {
   content: string;
   /** kind:1617 only: `commit` tag SHAs. */
   commitShas?: string[];
-  /** kind:1617 only: `branch` tag. */
+  /**
+   * kind:1617 only: branch name, read from `branch-name` first (#161 — the
+   * tag new patches write), falling back to the legacy `branch` tag. Never
+   * read from `t`: a legacy patch that only carries the branch in `t` is not
+   * guessed at and renders as it always has (unlabeled branch, `t` as a
+   * label).
+   */
   branch?: string;
   /**
    * kind:1617 only: the PR body from the `description` tag (#280). Separate
@@ -429,7 +435,8 @@ function parseTrackerItem(
   };
   if (event.kind === PATCH_KIND) {
     item.commitShas = tagValues(event.tags, 'commit');
-    const branch = tagValue(event.tags, 'branch');
+    const branch =
+      tagValue(event.tags, 'branch-name') ?? tagValue(event.tags, 'branch');
     if (branch !== undefined) item.branch = branch;
     const description = tagValue(event.tags, 'description');
     if (description !== undefined) item.description = description;
@@ -680,9 +687,11 @@ async function runList(
     for (const item of items) {
       const labels =
         item.labels.length > 0 ? `  [${item.labels.join(', ')}]` : '';
+      // #161: kind:1617 items only — issues never set `.branch`.
+      const branch = item.branch !== undefined ? `  → ${item.branch}` : '';
       io.out(
         `${item.status.padEnd(7)}  ${item.eventId.slice(0, 8)}  ${item.title}` +
-          `  (${item.authorPubkey.slice(0, 8)}, ${isoDate(item.createdAt)})${labels}`
+          `  (${item.authorPubkey.slice(0, 8)}, ${isoDate(item.createdAt)})${labels}${branch}`
       );
     }
     io.out(

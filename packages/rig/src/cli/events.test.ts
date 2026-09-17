@@ -519,7 +519,10 @@ describe('rig pr create (real format-patch)', () => {
     expect(event.content).toContain('+the feature');
     expect(event.tags).toContainEqual(['commit', second]);
     expect(event.tags).toContainEqual(['parent-commit', first]);
-    expect(event.tags).toContainEqual(['t', 'feature']);
+    // #161: --branch writes the `branch-name` tag, never `t` — a patch's
+    // branch used to be misreported as a label.
+    expect(event.tags).toContainEqual(['branch-name', 'feature']);
+    expect(event.tags.filter((tag) => tag[0] === 't')).toHaveLength(0);
     expect(h.out.join('\n')).toContain('kind:1617');
   });
 

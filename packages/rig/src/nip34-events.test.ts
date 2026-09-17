@@ -20,6 +20,7 @@ import {
   parseMaintainers,
   parsePayout,
 } from './nip34-events.js';
+import { parseStateRefTags } from './nip34-refs.js';
 import {
   amendRepoAnnouncement,
   buildRepoAnnouncement,
@@ -375,7 +376,7 @@ describe('payout pointer (rig#92)', () => {
 });
 
 describe('buildRepoRefs (kind:30618)', () => {
-  it('builds repo refs with r/HEAD/arweave tags', () => {
+  it('builds repo refs with dual-shape ref tags plus HEAD/arweave tags', () => {
     const refs = { 'refs/heads/main': 'abc123' };
     const arweaveMap = { abc123: 'arweave-tx-1' };
     const event = buildRepoRefs('hello-toon', refs, arweaveMap);
@@ -385,6 +386,9 @@ describe('buildRepoRefs (kind:30618)', () => {
     expect(event.tags).toEqual(
       expect.arrayContaining([
         ['d', 'hello-toon'],
+        // NIP-34 shape (rig#157): ref path is the tag name.
+        ['refs/heads/main', 'abc123'],
+        // Legacy shape, still written during the dual-write window.
         ['r', 'refs/heads/main', 'abc123'],
         ['HEAD', 'ref: refs/heads/main'],
         ['arweave', 'abc123', 'arweave-tx-1'],
@@ -392,7 +396,7 @@ describe('buildRepoRefs (kind:30618)', () => {
     );
   });
 
-  it('supports multiple refs and arweave mappings', () => {
+  it('supports multiple refs and arweave mappings, each ref in both shapes with identical SHAs', () => {
     const refs = {
       'refs/heads/main': 'abc123',
       'refs/heads/dev': 'def456',
@@ -406,12 +410,54 @@ describe('buildRepoRefs (kind:30618)', () => {
 
     expect(event.tags).toEqual(
       expect.arrayContaining([
+        ['refs/heads/main', 'abc123'],
         ['r', 'refs/heads/main', 'abc123'],
+        ['refs/heads/dev', 'def456'],
         ['r', 'refs/heads/dev', 'def456'],
         ['arweave', 'abc123', 'arweave-tx-1'],
         ['arweave', 'def456', 'arweave-tx-2'],
       ])
     );
+  });
+
+  it('round-trips through the #156 dual-shape reader and through a legacy-only reader', () => {
+    const refs = {
+      'refs/heads/main': 'abc123',
+      'refs/tags/v1': 'def456',
+    };
+    const event = buildRepoRefs('hello-toon', refs);
+
+    // #156's shared reader (nip34-refs.ts): sees the NIP-shape entries
+    // (which win ties) and the legacy entries alike — same refs either way.
+    const { refs: parsed } = parseStateRefTags(event.tags);
+    expect(Object.fromEntries(parsed)).toEqual(refs);
+
+    // A legacy-only reader — one that has never heard of the NIP shape and
+    // understands only rig's original ["r", <ref>, <sha>] tags — still
+    // recovers every ref with the same SHAs, because the legacy write is
+    // untouched.
+    const legacyOnly = Object.fromEntries(
+      event.tags
+        .filter((t) => t[0] === 'r' && t[1] !== 'HEAD')
+        .map((t) => [t[1], t[2]])
+    );
+    expect(legacyOnly).toEqual(refs);
+  });
+
+  it('leaves HEAD and arweave tags unaffected by the dual-shape ref write', () => {
+    const refs = {
+      'refs/heads/main': 'abc123',
+      'refs/heads/dev': 'def456',
+    };
+    const arweaveMap = { abc123: 'arweave-tx-1' };
+    const event = buildRepoRefs('hello-toon', refs, arweaveMap);
+
+    expect(event.tags.filter((t) => t[0] === 'HEAD')).toEqual([
+      ['HEAD', 'ref: refs/heads/main'],
+    ]);
+    expect(event.tags.filter((t) => t[0] === 'arweave')).toEqual([
+      ['arweave', 'abc123', 'arweave-tx-1'],
+    ]);
   });
 });
 
@@ -522,7 +568,7 @@ describe('buildComment (kind:1622)', () => {
 describe('buildPatch (kind:1617)', () => {
   const commits = [{ sha: 'abc123', parentSha: 'def456' }];
 
-  it('builds a patch with a/p/subject/commit/parent-commit/t tags', () => {
+  it('builds a patch with a/p/subject/commit/parent-commit/branch-name tags', () => {
     const event = buildPatch(
       OWNER_PUBKEY,
       'hello-toon',
@@ -539,14 +585,31 @@ describe('buildPatch (kind:1617)', () => {
         ['subject', 'Fix readme'],
         ['commit', 'abc123'],
         ['parent-commit', 'def456'],
-        ['t', 'feature/fix'],
+        ['branch-name', 'feature/fix'],
       ])
     );
   });
 
-  it('omits the branch t tag when branchTag is not provided', () => {
+  // #161: the branch NEVER lands in `t` — that tag is reserved for real
+  // labels, and a patch's branch used to be misreported as one.
+  it('writes the branch to branch-name, never to t', () => {
+    const event = buildPatch(
+      OWNER_PUBKEY,
+      'hello-toon',
+      'Fix readme',
+      commits,
+      'feature/fix'
+    );
+
+    const tTags = event.tags.filter((t) => t[0] === 't');
+    expect(tTags).toHaveLength(0);
+  });
+
+  it('omits the branch-name tag when branchTag is not provided', () => {
     const event = buildPatch(OWNER_PUBKEY, 'hello-toon', 'Fix readme', commits);
 
+    const branchNameTags = event.tags.filter((t) => t[0] === 'branch-name');
+    expect(branchNameTags).toHaveLength(0);
     const tTags = event.tags.filter((t) => t[0] === 't');
     expect(tTags).toHaveLength(0);
   });
@@ -619,7 +682,7 @@ describe('buildPatch (kind:1617)', () => {
       expect.arrayContaining([
         ['subject', 'Fix readme'],
         ['commit', 'abc123'],
-        ['t', 'feature/fix'],
+        ['branch-name', 'feature/fix'],
       ])
     );
   });
