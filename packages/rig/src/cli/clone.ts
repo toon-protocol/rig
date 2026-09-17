@@ -22,6 +22,7 @@ import { mkdtemp, mkdir, readdir, rename, rm, rmdir } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { readGateways } from '../gateway-preference.js';
+import { shaResolverFor } from '../git-sha-resolver.js';
 import {
   setHeadSymref,
   isSafeRefname,
@@ -211,7 +212,9 @@ export async function runClone(
       ...(deps.webSocketFactory
         ? { webSocketFactory: deps.webSocketFactory }
         : {}),
-      ...(deps.resolveSha ? { resolveSha: deps.resolveSha } : {}),
+      // The GraphQL fallback for SHAs the map does not cover asks the SAME
+      // permaweb the objects are read from (#183).
+      resolveSha: deps.resolveSha ?? shaResolverFor(parsed.gateway, deps.env),
     });
     if (!remoteState.announced && remoteState.refsEvent === null) {
       throw new RepoNotFoundError(relayUrl, owner, repoId);

@@ -5,12 +5,13 @@
  * mirror clone's (missing objects are honest and nothing half-lands).
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { clearShaCache } from '@toon-protocol/arweave';
+import { clearGatewayShaCache } from '../git-sha-resolver.js';
 import type { NostrEvent } from '../remote-state.js';
 import { runClone } from './clone.js';
 import { runFetch } from './fetch.js';
@@ -34,6 +35,8 @@ const RELAY = 'wss://relay.test.example';
 const cleanups: string[] = [];
 afterEach(() => {
   clearShaCache();
+  clearGatewayShaCache();
+  vi.unstubAllGlobals();
   for (const dir of cleanups.splice(0))
     rmSync(dir, { recursive: true, force: true });
 });
@@ -456,5 +459,40 @@ describe('rig fetch --gateway (#176)', () => {
     expect(code).toBe(0);
     expect(world.gateway.requests.length).toBeGreaterThan(0);
     expect(world.gateway.requests.some((u) => u.includes('/raw/'))).toBe(false);
+  });
+
+  // The Git-SHA GraphQL fallback follows the same gateway (#183).
+  it('resolves SHAs the map does not cover against the named gateway', async () => {
+    const world = new World();
+    const cloneDir = await cloneThenAdvance(world);
+    // The write-side cap evicted the map: the delta can only be placed by the
+    // GraphQL fallback — which must ask the gateway we named, not arweave.net.
+    const refsEvent = world.events.find((e) => e.kind === 30618) as NostrEvent;
+    refsEvent.tags = refsEvent.tags.filter((t) => t[0] !== 'arweave');
+
+    const graphql: string[] = [];
+    vi.stubGlobal('fetch', async (url: string, init: { body?: string }) => {
+      graphql.push(String(url));
+      const { query } = JSON.parse(String(init.body)) as { query: string };
+      const sha = /values: \["([0-9a-f]{40})"\]/.exec(query)?.[1] ?? '';
+      return {
+        ok: true,
+        json: async () => ({
+          data: { transactions: { edges: [{ node: { id: txFor(sha) } }] } },
+        }),
+      };
+    });
+
+    const io = makeTestIo();
+    const deps = world.deps(io, cloneDir);
+    delete deps.resolveSha; // the real resolver is what is under test
+    const code = await runFetch(['--gateway', PRIVATE_GATEWAY], deps);
+
+    expect(code).toBe(0);
+    expect(graphql.length).toBeGreaterThan(0);
+    expect(graphql.every((u) => u === `${PRIVATE_GATEWAY}/graphql`)).toBe(true);
+    expect(gitText(cloneDir, ['rev-parse', 'refs/remotes/origin/main'])).toBe(
+      gitText(world.srcDir, ['rev-parse', 'main'])
+    );
   });
 });
