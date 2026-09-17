@@ -12,6 +12,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   mkdtempSync,
   mkdirSync,
   rmSync,
@@ -33,7 +34,10 @@ import {
   summarizeActRun,
   type ActLine,
 } from './act-runner.js';
-import type { CiTriggerContext } from './nip-c1-events.js';
+import {
+  CI_RUNNER_CHANNEL_KEY,
+  type CiTriggerContext,
+} from './nip-c1-events.js';
 import type { RunnerRequest } from './runner.js';
 
 // ---------------------------------------------------------------------------
@@ -417,6 +421,145 @@ describe('extractZip / collectArtifacts', () => {
 
   it('returns [] for a missing artifact dir', () => {
     expect(collectArtifacts(join(tmp('rig-art-'), 'nope'))).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ActRunner.run against a FAKE act binary (rig#191) — no Docker required.
+// The binary is a tiny Node script standing in for `act`, so these exercise
+// the real spawn/stdout/stderr plumbing without touching Docker.
+// ---------------------------------------------------------------------------
+
+/** A Node script, run in place of `act`, writing fixed stdout/stderr then exiting. */
+function fakeActScript(
+  stdout: string,
+  stderr = '',
+  exitCode = 0,
+  delayMs = 0
+): string {
+  return `#!/usr/bin/env node
+process.stdout.write(${JSON.stringify(stdout)});
+process.stderr.write(${JSON.stringify(stderr)});
+setTimeout(() => process.exit(${exitCode}), ${delayMs});
+`;
+}
+
+function writeFakeAct(dir: string, script: string): string {
+  const path = join(dir, 'fake-act.js');
+  writeFileSync(path, script);
+  chmodSync(path, 0o755);
+  return path;
+}
+
+function checkoutWithWorkflow(): string {
+  const dir = tmp('rig-act-fake-');
+  mkdirSync(join(dir, '.github', 'workflows'), { recursive: true });
+  writeFileSync(
+    join(dir, TRIGGER.workflow.path),
+    'on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n  failing:\n    runs-on: ubuntu-latest\n'
+  );
+  return dir;
+}
+
+describe('ActRunner.run — runner channel routing (rig#191, fakes the act binary)', () => {
+  it('routes lines that do not parse as act JSON to the runner channel, leaves act JSON output and the durable summary unchanged, and never reports the runner channel as a job', async () => {
+    const dir = checkoutWithWorkflow();
+    const dockerFailure =
+      'Error response from daemon: pull access denied for catthehacker/ubuntu';
+    const noJobId = '{"level":"info","msg":"Start server"}';
+    const crash = 'panic: unexpected act crash';
+
+    const stdout =
+      `${dockerFailure}\n` +
+      `${LINES[0]}\n${LINES[1]}\n${LINES[2]}\n` +
+      `${noJobId}\n` +
+      `${LINES[3]}\n${LINES[4]}\n${LINES[5]}\n${LINES[6]}\n`;
+
+    const actBin = writeFakeAct(dir, fakeActScript(stdout, `${crash}\n`, 0));
+    const chunks: { jobId: string; chunk: string }[] = [];
+    const result = await new ActRunner({ actBin }).run({
+      checkoutDir: dir,
+      workflow: TRIGGER.workflow,
+      trigger: TRIGGER,
+      secrets: {},
+      timeoutMs: 30_000,
+      onLog: (jobId, chunk) => chunks.push({ jobId, chunk }),
+    });
+
+    const runnerChunks = chunks
+      .filter((c) => c.jobId === CI_RUNNER_CHANNEL_KEY)
+      .map((c) => c.chunk)
+      .join('');
+    expect(runnerChunks).toContain(dockerFailure);
+    expect(runnerChunks).toContain(noJobId);
+    expect(runnerChunks).toContain(crash);
+
+    // Output that DOES parse as act JSON still reaches onLog under its own
+    // job, unaffected by the interleaved noise.
+    const buildChunks = chunks
+      .filter((c) => c.jobId === 'build')
+      .map((c) => c.chunk)
+      .join('');
+    expect(buildChunks).toContain('hello');
+    expect(buildChunks).not.toContain(dockerFailure);
+    expect(buildChunks).not.toContain(crash);
+
+    // The runner channel is never reported as a job.
+    expect(result.jobs.map((j) => j.jobId)).not.toContain(
+      CI_RUNNER_CHANNEL_KEY
+    );
+
+    // The durable path is untouched: byte-for-byte what summarizing the
+    // clean fixture lines alone (no injected noise) produces.
+    const parsed = LINES.map(parseActJsonLine).filter(
+      (l): l is ActLine => l !== null
+    );
+    const expected = summarizeActRun(parsed, {
+      exitCode: 0,
+      timedOut: false,
+      cancelled: false,
+    });
+    expect(result.conclusion).toBe(expected.conclusion);
+    for (const job of expected.jobs) {
+      const actual = result.jobs.find((j) => j.jobId === job.jobId);
+      expect(actual?.log).toBe(job.log);
+      expect(actual?.conclusion).toBe(job.conclusion);
+      expect(actual?.exitCode).toBe(job.exitCode);
+      expect(actual?.startedAt).toBe(job.startedAt);
+      expect(actual?.finishedAt).toBe(job.finishedAt);
+    }
+  });
+
+  it('keeps routing container cleanup notes to the runner channel after a timeout', async () => {
+    const dir = checkoutWithWorkflow();
+    // Outputs nothing act-shaped and outlives the wall clock, so the runner
+    // has to kill it and then attempt cleanup.
+    const actBin = writeFakeAct(dir, fakeActScript('', '', 0, 5_000));
+    const chunks: { jobId: string; chunk: string }[] = [];
+    const result = await new ActRunner({
+      actBin,
+      // Guaranteed not to exist, so cleanup deterministically fails and
+      // reports through `note` regardless of whether Docker is installed.
+      dockerBin: join(dir, 'no-such-docker-binary'),
+      killGraceMs: 50,
+    }).run({
+      checkoutDir: dir,
+      workflow: TRIGGER.workflow,
+      trigger: TRIGGER,
+      secrets: {},
+      timeoutMs: 100,
+      onLog: (jobId, chunk) => chunks.push({ jobId, chunk }),
+    });
+
+    expect(result.conclusion).toBe('timed_out');
+    const runnerChunks = chunks
+      .filter((c) => c.jobId === CI_RUNNER_CHANNEL_KEY)
+      .map((c) => c.chunk)
+      .join('');
+    expect(runnerChunks).toMatch(/container/);
+    expect(result.jobs.map((j) => j.jobId)).not.toContain(
+      CI_RUNNER_CHANNEL_KEY
+    );
   });
 });
 

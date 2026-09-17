@@ -21,7 +21,14 @@
  *     head/base so `github.*` context in workflows is truthful.
  *   - Logs are act's `--json` line stream, grouped per `jobID`; the
  *     terminal `jobResult` field is each job's conclusion, passed through
- *     as NIP-C1 wants ("preserve the execution backend's conclusion").
+ *     as NIP-C1 wants ("preserve the execution backend's conclusion"). A
+ *     line that does not parse as act JSON — an image pull failure, a
+ *     refused Docker daemon, act itself crashing — never reaches the
+ *     durable per-job log, but is still forwarded live to `onLog` under
+ *     {@link CI_RUNNER_CHANNEL_KEY}, the runner channel, alongside this
+ *     runner's own cleanup notes (below). Per ADR-0002 the runner channel
+ *     is not a job: it carries no result, never concludes, and is never
+ *     addressable as one.
  *   - Artifacts: `--artifact-server-path` makes `actions/upload-artifact`
  *     work; act stores each named artifact as ONE zip under
  *     `<dir>/<run>/<name>/<name>.zip`, which is unpacked here so every file
@@ -59,7 +66,11 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { inflateRawSync } from 'node:zlib';
 import { accessSync, constants } from 'node:fs';
-import type { CiConclusion, CiTriggerContext } from './nip-c1-events.js';
+import {
+  CI_RUNNER_CHANNEL_KEY,
+  type CiConclusion,
+  type CiTriggerContext,
+} from './nip-c1-events.js';
 import type {
   Runner,
   RunnerArtifact,
@@ -627,7 +638,14 @@ export class ActRunner implements Runner {
             const line = buffered.slice(0, nl);
             buffered = buffered.slice(nl + 1);
             const parsedLine = parseActJsonLine(line);
-            if (!parsedLine) continue;
+            if (!parsedLine) {
+              // Not an act JSON line — image pull failures, a refused Docker
+              // daemon, or act crashing all look like this. Route it to the
+              // runner channel instead of dropping it (ADR-0002) rather than
+              // losing it before the streaming sink ever sees it.
+              request.onLog?.(CI_RUNNER_CHANNEL_KEY, `${line}\n`);
+              continue;
+            }
             lines.push(parsedLine);
             if (request.onLog && parsedLine.exitCode === undefined) {
               request.onLog(
@@ -641,7 +659,11 @@ export class ActRunner implements Runner {
         });
         stream.on('end', () => {
           const parsedLine = parseActJsonLine(buffered);
-          if (parsedLine) lines.push(parsedLine);
+          if (parsedLine) {
+            lines.push(parsedLine);
+          } else if (buffered !== '') {
+            request.onLog?.(CI_RUNNER_CHANNEL_KEY, buffered);
+          }
         });
       };
       consume(child.stdout);
@@ -662,7 +684,7 @@ export class ActRunner implements Runner {
         startedAtMs,
         (note) => {
           this.options.warn?.(note);
-          request.onLog?.('runner', `${note}\n`);
+          request.onLog?.(CI_RUNNER_CHANNEL_KEY, `${note}\n`);
         }
       );
     }
