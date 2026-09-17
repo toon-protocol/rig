@@ -147,6 +147,48 @@ describe('FakeRunner', () => {
     ]);
   });
 
+  it('does not replay a job whose log the script already streamed', async () => {
+    const runner = new FakeRunner((request) => {
+      request.onLog?.('build', 'compiling\n');
+      request.onLog?.('build', 'linking\n');
+      return {
+        conclusion: 'success',
+        startedAt: 10,
+        finishedAt: 20,
+        jobs: [
+          {
+            jobId: 'build',
+            conclusion: 'success',
+            startedAt: 10,
+            finishedAt: 15,
+            log: 'compiling\nlinking\n',
+            artifacts: [],
+          },
+          {
+            jobId: 'docs',
+            conclusion: 'success',
+            startedAt: 15,
+            finishedAt: 20,
+            log: 'rendered\n',
+            artifacts: [],
+          },
+        ],
+      };
+    });
+    const seen: [string, string][] = [];
+    await runner.run({
+      ...REQUEST,
+      onLog: (jobId, chunk) => seen.push([jobId, chunk]),
+    });
+    // `build` streamed itself, so replaying its log would double every byte;
+    // `docs` did not, so it is still replayed.
+    expect(seen).toEqual([
+      ['build', 'compiling\n'],
+      ['build', 'linking\n'],
+      ['docs', 'rendered\n'],
+    ]);
+  });
+
   it('streams the scripted job logs to onLog when a sink is given', async () => {
     const runner = new FakeRunner();
     const seen: [string, string][] = [];

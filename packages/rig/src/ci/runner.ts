@@ -69,7 +69,12 @@ export interface RunnerRequest {
   env?: Record<string, string>;
   /** Wall-clock budget for the whole run; exceeding it concludes `timed_out`. */
   timeoutMs: number;
-  /** Streaming log sink (per job). */
+  /**
+   * Streaming log sink, called with a job id as output is produced. Output
+   * the runner attributes to no job — its own account of executing the run —
+   * goes to the RUNNER CHANNEL: the reserved key `CI_RUNNER_CHANNEL_KEY`
+   * exported by ./nip-c1-events.ts, which no workflow job id can equal.
+   */
   onLog?: (jobId: string, chunk: string) => void;
   /** Cancels the run (concludes `cancelled`). */
   signal?: AbortSignal;
@@ -130,10 +135,30 @@ export class FakeRunner implements Runner {
   ) {}
 
   async run(request: RunnerRequest): Promise<RunnerRunResult> {
-    this.requests.push(request);
-    const result = await this.script(request);
-    if (request.onLog) {
-      for (const job of result.jobs) request.onLog(job.jobId, job.log);
+    const sink = request.onLog;
+    // A script that streams nothing still gets its jobs' logs replayed
+    // through the sink, so a test that only scripts an outcome still
+    // exercises a coordinator's streaming path. A script that DOES stream
+    // (chunk by chunk, while the test drives the clock) is left alone: the
+    // replay would double-emit every byte it had already sent, which no real
+    // runner does. The two are told apart per job, so a script may stream
+    // some jobs and let the rest replay.
+    const streamed = new Set<string>();
+    const scripted: RunnerRequest = sink
+      ? {
+          ...request,
+          onLog: (jobId, chunk) => {
+            streamed.add(jobId);
+            sink(jobId, chunk);
+          },
+        }
+      : request;
+    this.requests.push(scripted);
+    const result = await this.script(scripted);
+    if (sink) {
+      for (const job of result.jobs) {
+        if (!streamed.has(job.jobId)) sink(job.jobId, job.log);
+      }
     }
     return result;
   }
