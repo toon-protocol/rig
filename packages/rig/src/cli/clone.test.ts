@@ -643,6 +643,89 @@ describe('rig clone empty-blob reconstruction', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// The read-path gateway override (#176)
+// ---------------------------------------------------------------------------
+
+const PRIVATE_GATEWAY = 'https://gw.test';
+
+/**
+ * A gateway shaped like the TOON dev sandbox's (and any ar.io node behind a
+ * sandboxing redirect): plain `/<txId>` is NOT served, only the store's
+ * raw-bytes route `/raw/<txId>`, and no other host answers at all. A clone
+ * can only succeed by reading through the gateway it was told about.
+ */
+function rawRouteOnlyGateway(world: CloneWorld): string[] {
+  const seen: string[] = [];
+  world.deps.fetchFn = async (url, init) => {
+    seen.push(url);
+    const parsed = new URL(url);
+    const raw = /^\/raw\/([^/]+)$/.exec(parsed.pathname);
+    if (parsed.host !== 'gw.test' || raw === null) {
+      return { ok: false, arrayBuffer: async () => new ArrayBuffer(0) };
+    }
+    return world.gateway.fetchFn(`${PRIVATE_GATEWAY}/${raw[1]}`, init);
+  };
+  return seen;
+}
+
+describe('rig clone --gateway (#176)', () => {
+  it('reads objects through the named gateway (<url>/raw/<txId>) before the public list', async () => {
+    const world = makeWorld();
+    const seen = rawRouteOnlyGateway(world);
+    const code = await runClone(
+      [RELAY, `${OWNER}/${REPO}`, '--gateway', `${PRIVATE_GATEWAY}/`],
+      world.deps
+    );
+    expect(code).toBe(0);
+    expect(gitText(join(world.cwd, REPO), ['fsck', '--strict'])).toBe('');
+    // Every byte came from the named gateway's raw route; the public list was
+    // never needed — the objects exist nowhere else.
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((u) => u.startsWith(`${PRIVATE_GATEWAY}/raw/`))).toBe(
+      true
+    );
+  });
+
+  it('RIG_ARWEAVE_GATEWAY names the gateway when --gateway is absent', async () => {
+    const world = makeWorld();
+    const seen = rawRouteOnlyGateway(world);
+    world.deps.env = { RIG_ARWEAVE_GATEWAY: PRIVATE_GATEWAY };
+    const code = await runClone([RELAY, `${OWNER}/${REPO}`], world.deps);
+    expect(code).toBe(0);
+    expect(gitText(join(world.cwd, REPO), ['fsck', '--strict'])).toBe('');
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((u) => u.startsWith(`${PRIVATE_GATEWAY}/raw/`))).toBe(
+      true
+    );
+  });
+
+  it('keeps the public gateway list as the fallback when the named one has nothing', async () => {
+    // The mock gateway serves `/<txId>` on every public host, so the named
+    // gateway's `/raw/` route finds nothing and the chain walks on.
+    const world = makeWorld();
+    const code = await runClone(
+      [RELAY, `${OWNER}/${REPO}`, '--gateway', PRIVATE_GATEWAY],
+      world.deps
+    );
+    expect(code).toBe(0);
+    expect(gitText(join(world.cwd, REPO), ['fsck', '--strict'])).toBe('');
+    expect(world.gateway.requests[0]).toMatch(
+      new RegExp(`^${PRIVATE_GATEWAY}/raw/`)
+    );
+    expect(world.gateway.requests.some((u) => u.includes('ar-io.dev'))).toBe(
+      true
+    );
+  });
+
+  it('leaves the public list untouched when no gateway is configured', async () => {
+    const world = makeWorld();
+    const code = await runClone([RELAY, `${OWNER}/${REPO}`], world.deps);
+    expect(code).toBe(0);
+    expect(world.gateway.requests.some((u) => u.includes('/raw/'))).toBe(false);
+  });
+});
+
 /** SHAs of every object in `repoDir` except `exclude`. */
 function objects_excluding(repoDir: string, exclude: string): string[] {
   return gitText(repoDir, [
