@@ -94,7 +94,8 @@ function job(overrides: Partial<CiJobResult> = {}): CiJobResult {
     name: 'Build',
     conclusion: 'success',
     logsUrl: 'http://localhost:3000/raw/tx-log',
-    logTail: '[log-tail omitted=120]\nnpm run build\ndone',
+    logTail: 'npm run build\ndone',
+    logOmittedBytes: 120,
     artifacts: [
       {
         url: 'http://localhost:3000/raw/tx-art',
@@ -265,6 +266,66 @@ describe('[P1] RunDetailPage', () => {
     expect(screen.getByText('build')).toBeInTheDocument();
     expect(screen.getByText('test')).toBeInTheDocument();
     expect(screen.getAllByText('in progress').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('links every job of the run to its own page from the first progress marker', () => {
+    mockUseCiRun.mockReturnValue({
+      run: run({
+        status: 'in_progress',
+        conclusion: undefined,
+        inProgress: ['build', 'test', 'lint'],
+        jobs: [],
+      }),
+      jobs: [],
+      loading: false,
+      error: null,
+    });
+    renderAt('/npub1owner/demo/actions/run-1');
+    for (const id of ['build', 'test', 'lint']) {
+      expect(screen.getByRole('link', { name: id })).toHaveAttribute(
+        'href',
+        `/npub1owner/demo/actions/run-1/jobs/${id}`
+      );
+    }
+  });
+
+  it('shows a concluded job and an unfinished one as different states, side by side', () => {
+    mockUseCiRun.mockReturnValue({
+      run: run({
+        status: 'in_progress',
+        conclusion: undefined,
+        inProgress: ['test'],
+        jobs: run().jobs,
+      }),
+      jobs: [job()],
+      loading: false,
+      error: null,
+    });
+    renderAt('/npub1owner/demo/actions/run-1');
+    expect(
+      screen.getAllByText('success', { selector: '[data-slot="badge"]' })
+    ).toHaveLength(1);
+    expect(screen.getByRole('link', { name: 'test' })).toBeInTheDocument();
+    expect(
+      screen.getAllByText('in progress', { selector: '[data-slot="badge"]' })
+    ).toHaveLength(2); // the run itself, and its unfinished job
+  });
+
+  it('a queued run has started none of its jobs, whatever the in-progress tag lists', () => {
+    mockUseCiRun.mockReturnValue({
+      run: run({
+        status: 'queued',
+        conclusion: undefined,
+        inProgress: ['build', 'test'],
+        jobs: [],
+      }),
+      jobs: [],
+      loading: false,
+      error: null,
+    });
+    renderAt('/npub1owner/demo/actions/run-1');
+    expect(screen.getAllByText('not started')).toHaveLength(2);
+    expect(screen.queryByText('in progress')).toBeNull();
   });
 
   it('says so when the run is unknown', () => {

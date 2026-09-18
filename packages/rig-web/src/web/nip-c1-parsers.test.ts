@@ -8,9 +8,12 @@
 
 import { describe, it, expect } from 'vitest';
 import type { NostrEvent } from './nip34-parsers.js';
+import type { CiJobResult } from './nip-c1-parsers.js';
 import {
   CI_ADVERTISEMENT_KIND,
   CI_JOB_RESULT_KIND,
+  CI_LIVE_LOG_TAIL_KIND,
+  CI_RUNNER_CHANNEL_KEY,
   CI_SERVICE_REQUEST_KIND,
   CI_SERVICE_STOP_KIND,
   CI_WORKFLOW_PROGRESS_KIND,
@@ -18,9 +21,11 @@ import {
   aggregateRunStatus,
   buildCiRuns,
   controlOrder,
+  deriveRunJobs,
   deriveTrustLevel,
   parseCiAdvertisement,
   parseCiJobResult,
+  parseCiLiveLogTail,
   parseCiServiceControl,
   parseCiTriggerContext,
   parseCiWorkflowProgress,
@@ -498,7 +503,8 @@ describe('parseCiJobResult (9841)', () => {
       name: 'Unit tests',
       conclusion: 'success',
       logsUrl: 'http://localhost:3000/raw/tx1',
-      logTail: '[log-tail omitted=1200]\nnpm test\nok',
+      logTail: 'npm test\nok',
+      logOmittedBytes: 1200,
       artifacts: [
         {
           url: 'http://localhost:3000/raw/tx2',
@@ -510,6 +516,23 @@ describe('parseCiJobResult (9841)', () => {
       startedAt: 1710,
       exitCode: 0,
       runsOn: ['ubuntu-latest'],
+    });
+  });
+
+  it('reads a tail with no omitted-bytes header as a whole log', () => {
+    const ev = event({
+      kind: CI_JOB_RESULT_KIND,
+      content: 'npm test\nok',
+      tags: [
+        ...COMMON_PUSH_TAGS,
+        ['q', `39842:${COORD}:${RUN_ID}`, RELAY],
+        ['job', 'test'],
+        ['conclusion', 'success'],
+      ],
+    });
+    expect(parseCiJobResult(ev)).toMatchObject({
+      logTail: 'npm test\nok',
+      logOmittedBytes: 0,
     });
   });
 
@@ -772,6 +795,97 @@ describe('buildCiRuns + aggregateRunStatus', () => {
   });
 });
 
+describe('deriveRunJobs (rig#190)', () => {
+  const quote = (jobId: string) => ({
+    eventId: `${jobId}-evt`,
+    relayUrl: RELAY,
+    pubkey: COORD,
+    jobId,
+  });
+  const result = (jobId: string) =>
+    ({
+      eventId: `${jobId}-evt`,
+      pubkey: COORD,
+      createdAt: 1800,
+      progressAddress: `39842:${COORD}:${RUN_ID}`,
+      coordinator: COORD,
+      runId: RUN_ID,
+      jobId,
+      name: `${jobId} job`,
+      conclusion: 'success',
+      logTail: 'ok',
+      logOmittedBytes: 0,
+      artifacts: [],
+      runsOn: [],
+    }) as unknown as CiJobResult;
+
+  it('lists every job of a run that has published no job result yet', () => {
+    const jobs = deriveRunJobs({
+      status: 'in_progress',
+      inProgress: ['build', 'test', 'lint'],
+      jobs: [],
+    });
+    expect(jobs.map((j) => j.jobId)).toEqual(['build', 'test', 'lint']);
+  });
+
+  it('a queued run has started nothing, even though its jobs are in the in-progress tag', () => {
+    const jobs = deriveRunJobs({
+      status: 'queued',
+      inProgress: ['build', 'test'],
+      jobs: [],
+    });
+    expect(jobs.map((j) => j.state)).toEqual(['pending', 'pending']);
+  });
+
+  it('an executing run is running the jobs it has not concluded', () => {
+    const jobs = deriveRunJobs(
+      { status: 'in_progress', inProgress: ['test'], jobs: [quote('build')] },
+      [result('build')]
+    );
+    expect(jobs).toMatchObject([
+      { jobId: 'build', state: 'concluded', label: 'build job' },
+      { jobId: 'test', state: 'running', label: 'test' },
+    ]);
+  });
+
+  it('per-job evidence of execution tells a started job from one that has not', () => {
+    const jobs = deriveRunJobs(
+      { status: 'in_progress', inProgress: ['build', 'test'], jobs: [] },
+      [],
+      { startedJobIds: ['build'] }
+    );
+    expect(jobs.map((j) => [j.jobId, j.state])).toEqual([
+      ['build', 'running'],
+      ['test', 'pending'],
+    ]);
+  });
+
+  it('a quote alone concludes a job whose result event is not in hand', () => {
+    const jobs = deriveRunJobs({
+      status: 'concluded',
+      inProgress: [],
+      jobs: [quote('build')],
+    });
+    expect(jobs).toMatchObject([{ jobId: 'build', state: 'concluded' }]);
+    expect(jobs[0]?.result).toBeUndefined();
+  });
+
+  it('a job the run never reached is pending once the run is over, and ids are listed once', () => {
+    const jobs = deriveRunJobs(
+      {
+        status: 'concluded',
+        inProgress: ['deploy', 'build'],
+        jobs: [quote('build')],
+      },
+      [result('build')]
+    );
+    expect(jobs.map((j) => [j.jobId, j.state])).toEqual([
+      ['build', 'concluded'],
+      ['deploy', 'pending'],
+    ]);
+  });
+});
+
 describe('parseCiAdvertisement (19843)', () => {
   const NOW = 1_700_000_000;
   const SECRETS_KEY = '77'.repeat(32);
@@ -851,6 +965,137 @@ describe('parseCiAdvertisement (19843)', () => {
     };
     for (const [label, ev] of Object.entries(cases)) {
       expect(parseCiAdvertisement(ev), label).toBeNull();
+    }
+  });
+});
+
+describe('parseCiLiveLogTail (39841, rig#194)', () => {
+  const CREATED = 1_700_000_000;
+  const tailTags = (): string[][] => [
+    ...COMMON_PUSH_TAGS,
+    ['d', RUN_ID],
+    ['expiration', String(CREATED + 600)],
+  ];
+  const without = (tags: string[][], name: string) =>
+    tags.filter((t) => t[0] !== name);
+  const tailEvent = (
+    tags: string[][] = tailTags(),
+    body: unknown = {
+      jobs: [{ job: 'build', tail: 'compiling…', omitted: 12 }],
+    }
+  ): NostrEvent =>
+    event({
+      kind: CI_LIVE_LOG_TAIL_KIND,
+      created_at: CREATED,
+      tags,
+      content: typeof body === 'string' ? body : JSON.stringify(body),
+    });
+
+  it('reads a run’s tails: one entry per unfinished job, with what precedes each', () => {
+    const parsed = parseCiLiveLogTail(
+      tailEvent(tailTags(), {
+        jobs: [
+          { job: 'build', tail: 'compiling…', omitted: 132096 },
+          { job: 'test', tail: 'running tests' },
+        ],
+      })
+    );
+    expect(parsed).not.toBeNull();
+    expect(parsed?.runId).toBe(RUN_ID);
+    expect(parsed?.pubkey).toBe(COORD);
+    expect(parsed?.expiresAt).toBe(CREATED + 600);
+    expect(parsed?.trigger.commit).toBe(COMMIT);
+    expect(parsed?.jobs).toEqual([
+      { jobId: 'build', tail: 'compiling…', omittedBytes: 132096 },
+      // `omitted` is optional on the wire and means "nothing precedes it".
+      { jobId: 'test', tail: 'running tests', omittedBytes: 0 },
+    ]);
+    expect(parsed?.runner).toBeUndefined();
+  });
+
+  it('reads the runner channel, which is never one of the jobs', () => {
+    const parsed = parseCiLiveLogTail(
+      tailEvent(tailTags(), {
+        jobs: [],
+        runner: { tail: 'Error response from daemon: pull access denied' },
+      })
+    );
+    expect(parsed?.jobs).toEqual([]);
+    expect(parsed?.runner).toEqual({
+      tail: 'Error response from daemon: pull access denied',
+      omittedBytes: 0,
+    });
+  });
+
+  it('ignores fields it does not know, anywhere in the content', () => {
+    const parsed = parseCiLiveLogTail(
+      tailEvent(tailTags(), {
+        jobs: [{ job: 'build', tail: 'x', omitted: 0, step: 'checkout' }],
+        runner: { tail: 'y', omitted: 0, backend: 'act' },
+        cadenceMs: 10000,
+      })
+    );
+    expect(parsed?.jobs).toEqual([
+      { jobId: 'build', tail: 'x', omittedBytes: 0 },
+    ]);
+    expect(parsed?.runner).toEqual({ tail: 'y', omittedBytes: 0 });
+  });
+
+  it('refuses a half-parsed result rather than rendering one', () => {
+    const cases: Record<string, NostrEvent> = {
+      'wrong kind': { ...tailEvent(), kind: CI_WORKFLOW_PROGRESS_KIND },
+      'no d tag': tailEvent(without(tailTags(), 'd'), { jobs: [] }),
+      'empty d tag': tailEvent([...without(tailTags(), 'd'), ['d', '']], {
+        jobs: [],
+      }),
+      'no trigger context': tailEvent(
+        [
+          ['d', RUN_ID],
+          ['expiration', String(CREATED + 600)],
+        ],
+        { jobs: [] }
+      ),
+      'no expiration': tailEvent(without(tailTags(), 'expiration'), {
+        jobs: [],
+      }),
+      'expiration at created_at': tailEvent(
+        [...without(tailTags(), 'expiration'), ['expiration', String(CREATED)]],
+        { jobs: [] }
+      ),
+      'expiration past the 30-minute bound': tailEvent(
+        [
+          ...without(tailTags(), 'expiration'),
+          ['expiration', String(CREATED + 1801)],
+        ],
+        { jobs: [] }
+      ),
+      'content that is not JSON': tailEvent(tailTags(), 'not json'),
+      'content that is not an object': tailEvent(tailTags(), '[]'),
+      'no jobs array': tailEvent(tailTags(), { runner: { tail: 'x' } }),
+      'a job with no id': tailEvent(tailTags(), { jobs: [{ tail: 'x' }] }),
+      'a job with no tail': tailEvent(tailTags(), { jobs: [{ job: 'build' }] }),
+      'the same job twice': tailEvent(tailTags(), {
+        jobs: [
+          { job: 'build', tail: 'a' },
+          { job: 'build', tail: 'b' },
+        ],
+      }),
+      'the runner channel smuggled in as a job': tailEvent(tailTags(), {
+        jobs: [{ job: CI_RUNNER_CHANNEL_KEY, tail: 'x' }],
+      }),
+      'a negative omitted': tailEvent(tailTags(), {
+        jobs: [{ job: 'build', tail: 'x', omitted: -1 }],
+      }),
+      'a fractional omitted': tailEvent(tailTags(), {
+        jobs: [{ job: 'build', tail: 'x', omitted: 1.5 }],
+      }),
+      'a runner channel with no tail': tailEvent(tailTags(), {
+        jobs: [],
+        runner: { omitted: 0 },
+      }),
+    };
+    for (const [label, ev] of Object.entries(cases)) {
+      expect(parseCiLiveLogTail(ev), label).toBeNull();
     }
   });
 });

@@ -15,7 +15,9 @@
  *   outputs  kind:19843 Advertisement (renewed before it expires), and per
  *            run the NIP-C1 sequence: 39842 `queued` → 39842 `in_progress`
  *            (frozen provenance, job list) → per job a log upload + 9841 +
- *            a renewed 39842 quoting it → 9842 → 39842 `concluded`.
+ *            a renewed 39842 quoting it → 9842 → 39842 `concluded`. While
+ *            the runner runs, a 39841 live log tail (ADR-0002) is replaced
+ *            on a fixed cadence, and once more as the run concludes.
  *
  * Authorization (user story 12): a repo is served only while
  * `selectServiceRequests` finds an accepted, unstopped 9843 from the owner or
@@ -84,23 +86,30 @@ import {
   type MaterializeCommit,
 } from './materialize-commit.js';
 import {
+  CI_LIVE_LOG_TAIL_INTERVAL_MS,
   CI_MANUAL_TRIGGER_KIND,
+  CI_RUNNER_CHANNEL_KEY,
   CI_SECRET_UPDATE_KIND,
   CI_SERVICE_REQUEST_KIND,
   CI_SERVICE_STOP_KIND,
   CI_WORKFLOW_PROGRESS_KIND,
   buildCiAdvertisement,
   buildCiJobResult,
+  buildCiLiveLogTail,
   buildCiWorkflowProgress,
   buildCiWorkflowResult,
+  liveLogTailBudget,
   parseCiManualTrigger,
   parseCiSecretUpdate,
   parseCiServiceControl,
   parseRepoAddress,
   repoAddress,
   selectServiceRequests,
+  sliceLogTail,
   type CiConclusion,
   type CiJobQuote,
+  type CiLiveLogTailChannel,
+  type CiLiveLogTailJob,
   type CiPrContext,
   type CiProvenance,
   type CiTriggerContext,
@@ -303,6 +312,24 @@ export const DEFAULT_ADVERTISEMENT_TTL = 30 * 60;
 const RENEW_FRACTION = 5 / 6;
 /** How much of a job log rides in the 9841 content. */
 export const LOG_TAIL_BYTES = 4096;
+/**
+ * The most the coordinator will ever upload for one job's log (ADR-0003).
+ * `estimateRunCost`'s per-upload envelope is this same constant, so the
+ * affordability estimate is an actual bound rather than a guess.
+ */
+export const LOG_UPLOAD_CAP_BYTES = 1024 * 1024; // 1 MiB
+/** Kept from the start of an over-cap log. */
+const LOG_UPLOAD_HEAD_BYTES = 512 * 1024;
+/**
+ * Reserved out of the nominal 512 KiB tail so the marker naming the omitted
+ * count can never push the total over {@link LOG_UPLOAD_CAP_BYTES} — the
+ * marker text is under 80 bytes even for a log in the gigabytes, so this
+ * budget is never exhausted in practice.
+ */
+const LOG_UPLOAD_MARKER_BUDGET_BYTES = 256;
+/** Kept from the end of an over-cap log. */
+const LOG_UPLOAD_TAIL_BYTES =
+  512 * 1024 - LOG_UPLOAD_MARKER_BUDGET_BYTES;
 /** Rotate the secrets key at least this often (NIP-C1: no later than 86,400 s). */
 const SECRETS_KEY_MAX_AGE = 86_400;
 
@@ -319,6 +346,28 @@ export function logTail(log: string): { tail: string; omitted: number } {
     tail: cut.toString('utf-8'),
     omitted: bytes.byteLength - LOG_TAIL_BYTES,
   };
+}
+
+/**
+ * Bounds a (already-redacted) log to at most {@link LOG_UPLOAD_CAP_BYTES}
+ * (ADR-0003). Under the cap, the log is returned whole and unchanged. Over
+ * the cap, it uploads as its head + a marker naming the omitted byte count
+ * + its tail; the tail yields a few bytes to the marker so the total never
+ * exceeds the cap. Called AFTER redaction, so a secret is absent from the
+ * result whether it fell in the kept head, the kept tail, or the omitted
+ * middle.
+ */
+export function boundLogForUpload(log: string): Buffer {
+  const bytes = Buffer.from(log, 'utf-8');
+  if (bytes.byteLength <= LOG_UPLOAD_CAP_BYTES) return bytes;
+  const head = bytes.subarray(0, LOG_UPLOAD_HEAD_BYTES);
+  const tail = bytes.subarray(bytes.byteLength - LOG_UPLOAD_TAIL_BYTES);
+  const omitted = bytes.byteLength - head.byteLength - tail.byteLength;
+  const marker = Buffer.from(
+    `\n[... ${omitted} bytes omitted (log capped at ${LOG_UPLOAD_CAP_BYTES} bytes) ...]\n`,
+    'utf-8'
+  );
+  return Buffer.concat([head, marker, tail]);
 }
 
 /** `<gateway>/raw/<txId>` — the TOON store's raw-bytes route. */
@@ -707,6 +756,91 @@ export async function startCoordinator(
     };
     scheduleRenew();
 
+    // ── The live log tail (ADR-0002) ─────────────────────────────────────
+    // The run stops being a black box: what the runner prints is accumulated
+    // per job — plus the RUNNER CHANNEL, the distinguished non-job key for
+    // output the runner attributes to no job — and republished on a fixed
+    // cadence as ONE addressable event for the whole run, so a viewer
+    // arriving four minutes into a five-minute job sees the current tail
+    // immediately and the cost is a function of run duration alone.
+    //
+    // It is only ever a VIEW. The record is the job log uploaded below, so a
+    // job drops out of the tail the moment its Job Result names that log:
+    // what the tail carries is exactly the output that has no durable home
+    // yet.
+    //
+    // The cadence runs on the same scheduler seam as every other timer here,
+    // and it stops when the runner returns. Only `runner.run` is bounded by
+    // `timeoutMs`; a cadence that outlived it (the per-job uploads below take
+    // as long as they take) could publish more events than
+    // `liveLogTailEventBudget(timeoutMs)`, which is the worst case the
+    // affordability check paid for BEFORE the run started (#192).
+    const secretValues = Object.values(run.secrets);
+    const streamed = new Map<string, string>();
+    const finishedJobs = new Set<string>();
+    let tailClosed = false;
+    const recordLog = (jobId: string, chunk: string): void => {
+      if (tailClosed || chunk === '') return;
+      streamed.set(jobId, (streamed.get(jobId) ?? '') + chunk);
+    };
+    const publishLiveLogTail = async (): Promise<void> => {
+      // Redaction comes FIRST and slicing second, never the reverse: the
+      // whole accumulated buffer is redacted exactly as the durable path
+      // redacts it, and the tail is cut out of the result. That is what makes
+      // a secret straddling a refresh boundary safe — those bytes were
+      // already replaced before the slice was taken.
+      const live: [string, string][] = [];
+      for (const [key, text] of streamed) {
+        if (key !== CI_RUNNER_CHANNEL_KEY && finishedJobs.has(key)) continue;
+        live.push([key, redactSecretValues(text, secretValues)]);
+      }
+      // Every live entry — the unfinished jobs and the runner channel alike —
+      // occupies bytes in the one event, so they share one budget.
+      const budget = liveLogTailBudget(live.length);
+      const jobs: CiLiveLogTailJob[] = [];
+      let runnerChannel: CiLiveLogTailChannel | undefined;
+      for (const [key, text] of live) {
+        const sliced = sliceLogTail(text, budget);
+        if (key === CI_RUNNER_CHANNEL_KEY) runnerChannel = sliced;
+        else jobs.push({ job: key, ...sliced });
+      }
+      const now = clock();
+      try {
+        await publish(
+          buildCiLiveLogTail(
+            {
+              trigger,
+              runId: run.runId,
+              jobs,
+              ...(runnerChannel ? { runner: runnerChannel } : {}),
+              expiresAt: now + adTtl,
+            },
+            now
+          )
+        );
+      } catch (err) {
+        // The view is best-effort; the record is not. A tail that cannot be
+        // published must never cost the run its job results.
+        log(
+          `[ci] ${label}: live log tail not published: ${redactSecretValues(
+            err instanceof Error ? err.message : String(err),
+            secretValues
+          )}`
+        );
+      }
+    };
+    let tailTimer: unknown = null;
+    let tailPublished = false;
+    const scheduleTail = (): void => {
+      tailTimer = scheduler.setTimeout(() => {
+        if (tailClosed) return;
+        tailPublished = true;
+        void publishLiveLogTail();
+        scheduleTail();
+      }, CI_LIVE_LOG_TAIL_INTERVAL_MS);
+    };
+    scheduleTail();
+
     const abort = new AbortController();
     activeAborts.add(abort);
     run.abort = abort;
@@ -725,6 +859,7 @@ export async function startCoordinator(
           trigger,
           secrets: run.secrets,
           timeoutMs,
+          onLog: recordLog,
           signal: abort.signal,
         }),
         new Promise<RunnerRunResult>((resolve) => {
@@ -761,6 +896,13 @@ export async function startCoordinator(
     } finally {
       scheduler.clearTimeout(timeoutHandle);
       scheduler.clearTimeout(renewTimer);
+      // The cadence is over: from here the run's elapsed time is no longer
+      // bounded by `timeoutMs`, and exactly one more tail — the closing
+      // replacement below — is left in the budget. The SINK stays open: a
+      // runner that outlived its abort is still entitled to say why (act's
+      // container cleanup reaches the runner channel after the coordinator
+      // has given up waiting), and that account belongs in the closing tail.
+      scheduler.clearTimeout(tailTimer);
       activeAborts.delete(abort);
     }
     let conclusion = result.conclusion;
@@ -773,13 +915,12 @@ export async function startCoordinator(
     // uploaded log, not in the 9841 tail, not in an artifact, not in this
     // coordinator's own log (act masks its own output, but no Runner is
     // trusted to).
-    const secretValues = Object.values(run.secrets);
     for (const job of result.jobs) {
       const jobLog = redactSecretValues(job.log, secretValues);
       const { tail, omitted } = logTail(jobLog);
       const logReceipt = await serial.run(() =>
         uploadBlob({
-          body: Buffer.from(jobLog, 'utf-8'),
+          body: boundLogForUpload(jobLog),
           contentType: 'text/plain; charset=utf-8',
           repoId: repo.repoId,
         })
@@ -842,8 +983,27 @@ export async function startCoordinator(
         pubkey: me,
         jobId: job.jobId,
       });
+      // This job's log now has a durable home, named by the Job Result just
+      // published, so the job leaves the live tail (ADR-0002).
+      finishedJobs.add(job.jobId);
       await publish(progress('in_progress'));
     }
+
+    // The closing replacement (ADR-0002), and then nothing: the event is left
+    // to expire under NIP-40, so a concluded run stops paying for refreshes
+    // and a crashed coordinator's tail clears itself. Without this the last
+    // thing a viewer saw live would be whatever the timer happened to catch,
+    // which may be from before the error — a timed-out or crashed run
+    // publishes no Job Result at all, so its jobs never dropped out and this
+    // is where their closing output, and the runner channel's account of what
+    // went wrong, reaches the relay.
+    //
+    // A run that never published a tail — one that concluded inside a single
+    // cadence interval — has nothing on the relay to replace, and an empty
+    // event costs a fee to tell a viewer nothing: the absence of a live tail
+    // is a state every client already renders as a normal run.
+    if (tailPublished) await publishLiveLogTail();
+    tailClosed = true;
 
     const now = clock();
     const resultEventId = await publish(

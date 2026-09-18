@@ -25,15 +25,21 @@ import {
 import {
   CI_ADVERTISEMENT_KIND,
   CI_JOB_RESULT_KIND,
+  CI_LIVE_LOG_TAIL_INTERVAL_MS,
   CI_WORKFLOW_PROGRESS_KIND,
   CI_WORKFLOW_RESULT_KIND,
   buildCiManualTrigger,
   buildCiServiceRequest,
+  liveLogTailEventBudget,
   parseCiJobResult,
   parseCiWorkflowProgress,
   parseCiWorkflowResult,
   repoAddress,
 } from '../ci/nip-c1-events.js';
+import {
+  DEFAULT_RUN_TIMEOUT_MS,
+  LOG_UPLOAD_CAP_BYTES,
+} from '../ci/coordinator.js';
 import { FakeRunner, type RunnerRunResult } from '../ci/runner.js';
 import { sha256Hex } from '../ci/workflows.js';
 import type { NostrEvent } from '../remote-state.js';
@@ -964,14 +970,59 @@ describe('rig ci serve: --requester (story 21)', () => {
 describe('rig ci serve: the wallet check (story 15)', () => {
   const RATES = { uploadFee: 1000n, uploadPerKib: 10n, eventFee: 5n };
 
-  it('estimates a run as events × eventFee + uploads × the metered upload charge', () => {
-    // 4 events × 5 + 1 upload × (1000 + 10 × (⌊sealed(64 KiB)/1024⌋ + 1))
-    expect(estimateRunCost({ events: 4, uploads: 1, rates: RATES })).toBe(
+  // 1 upload × (1000 + 10 × (⌊sealed(cap)/1024⌋ + 1)), reused by every case below.
+  const UPLOAD_CHARGE =
+    1000n +
+    10n *
+      BigInt(
+        Math.floor((Math.ceil(LOG_UPLOAD_CAP_BYTES / 3) * 4 + 704) / 1024) + 1
+      );
+
+  it('estimates a run as events × eventFee + uploads × the metered upload charge, at the actual upload cap (ADR-0003), plus the worst-case live-log-tail budget for the run timeout', () => {
+    // 4 events × 5 + 1 upload charge + liveLogTailEventBudget(timeout) events × 5
+    const timeoutMs = DEFAULT_RUN_TIMEOUT_MS;
+    expect(
+      estimateRunCost({ events: 4, uploads: 1, rates: RATES }, timeoutMs)
+    ).toBe(
       20n +
-        1000n +
-        10n *
-          BigInt(Math.floor((Math.ceil((64 * 1024) / 3) * 4 + 704) / 1024) + 1)
+        UPLOAD_CHARGE +
+        BigInt(liveLogTailEventBudget(timeoutMs)) * RATES.eventFee
     );
+  });
+
+  it('the live-log-tail budget is a function of run duration alone: it does not change with events or uploads (job count)', () => {
+    const timeoutMs = DEFAULT_RUN_TIMEOUT_MS;
+    const oneJob = estimateRunCost({ events: 4, uploads: 1, rates: RATES }, timeoutMs);
+    const fiftyJobs = estimateRunCost(
+      { events: 4 + 2 * 50, uploads: 50, rates: RATES },
+      timeoutMs
+    );
+    const streamingTerm = BigInt(liveLogTailEventBudget(timeoutMs)) * RATES.eventFee;
+    // The streaming addition is identical regardless of how many jobs the
+    // run's own events/uploads reflect — only the base (non-streaming)
+    // portion grows with job count.
+    expect(oneJob - streamingTerm).toBe(
+      BigInt(4) * RATES.eventFee + UPLOAD_CHARGE
+    );
+    expect(fiftyJobs - streamingTerm).toBe(
+      BigInt(4 + 2 * 50) * RATES.eventFee + BigInt(50) * UPLOAD_CHARGE
+    );
+  });
+
+  it('the live-log-tail budget grows only with the run timeout, matching liveLogTailEventBudget exactly', () => {
+    const estimate = { events: 4, uploads: 1, rates: RATES };
+    const short = estimateRunCost(estimate, CI_LIVE_LOG_TAIL_INTERVAL_MS * 3);
+    const long = estimateRunCost(estimate, CI_LIVE_LOG_TAIL_INTERVAL_MS * 30);
+    const base = 20n + UPLOAD_CHARGE;
+    expect(short - base).toBe(
+      BigInt(liveLogTailEventBudget(CI_LIVE_LOG_TAIL_INTERVAL_MS * 3)) *
+        RATES.eventFee
+    );
+    expect(long - base).toBe(
+      BigInt(liveLogTailEventBudget(CI_LIVE_LOG_TAIL_INTERVAL_MS * 30)) *
+        RATES.eventFee
+    );
+    expect(long).toBeGreaterThan(short);
   });
 
   function recordChannel(
@@ -1015,9 +1066,10 @@ describe('rig ci serve: the wallet check (story 15)', () => {
       ctx,
       env: { TOON_CLIENT_HOME: home },
       log: (l) => logs.push(l),
+      runTimeoutMs: DEFAULT_RUN_TIMEOUT_MS,
     });
     const estimate = { events: 4, uploads: 1, rates: RATES };
-    const cost = estimateRunCost(estimate);
+    const cost = estimateRunCost(estimate, DEFAULT_RUN_TIMEOUT_MS);
 
     recordChannel(home, COORD, (cost - 1n).toString(), '0');
     expect(await check(estimate)).toBe(false);
@@ -1031,12 +1083,37 @@ describe('rig ci serve: the wallet check (story 15)', () => {
     expect(await check(estimate)).toBe(false);
   });
 
+  it('declines a run it can afford without streaming but not with the worst-case live-log-tail budget, and says so', async () => {
+    const logs: string[] = [];
+    const ctx = makeServeWorld().context;
+    const home = tempDir('rig-ci-serve-wallet-');
+    const check = makeAffordabilityCheck({
+      ctx,
+      env: { TOON_CLIENT_HOME: home },
+      log: (l) => logs.push(l),
+      runTimeoutMs: DEFAULT_RUN_TIMEOUT_MS,
+    });
+    const estimate = { events: 4, uploads: 1, rates: RATES };
+    const withoutStreaming = 20n + UPLOAD_CHARGE;
+    const withStreaming = estimateRunCost(estimate, DEFAULT_RUN_TIMEOUT_MS);
+    expect(withStreaming).toBeGreaterThan(withoutStreaming);
+
+    // Funded for the base run, but not for the full worst case with streaming.
+    recordChannel(home, COORD, withoutStreaming.toString(), '0');
+    expect(await check(estimate)).toBe(false);
+    expect(logs.at(-1)).toMatch(/wallet check: the best open channel has/);
+
+    // Funded for the full worst case → the same run now starts.
+    recordChannel(home, COORD, withStreaming.toString(), '0');
+    expect(await check(estimate)).toBe(true);
+  });
+
   it('falls back to the wallet before any channel is recorded; unreadable or absent → refuse', async () => {
     const logs: string[] = [];
     const base = makeServeWorld().context;
     const home = tempDir('rig-ci-serve-wallet-');
     const estimate = { events: 4, uploads: 1, rates: RATES };
-    const cost = estimateRunCost(estimate);
+    const cost = estimateRunCost(estimate, DEFAULT_RUN_TIMEOUT_MS);
     const withWallet = (tokens: { symbol?: string; amount: string }[]) =>
       makeAffordabilityCheck({
         ctx: {
@@ -1058,6 +1135,7 @@ describe('rig ci serve: the wallet check (story 15)', () => {
         },
         env: { TOON_CLIENT_HOME: home },
         log: (l) => logs.push(l),
+        runTimeoutMs: DEFAULT_RUN_TIMEOUT_MS,
       });
 
     expect(
@@ -1081,6 +1159,7 @@ describe('rig ci serve: the wallet check (story 15)', () => {
       ctx: base,
       env: { TOON_CLIENT_HOME: home },
       log: (l) => logs.push(l),
+      runTimeoutMs: DEFAULT_RUN_TIMEOUT_MS,
     });
     expect(await noMoney(estimate)).toBe(false);
     expect(logs.at(-1)).toMatch(/no wallet reader/);
@@ -1106,6 +1185,7 @@ describe('rig ci serve: the wallet check (story 15)', () => {
       },
       env: { TOON_CLIENT_HOME: home },
       log: (l) => logs.push(l),
+      runTimeoutMs: DEFAULT_RUN_TIMEOUT_MS,
     });
     expect(await broken(estimate)).toBe(false);
     expect(logs.at(-1)).toMatch(/wallet unreadable \(rpc down\)/);

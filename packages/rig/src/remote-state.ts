@@ -109,8 +109,10 @@ export interface FetchRemoteStateOptions {
   timeoutMs?: number;
   /**
    * Git-SHA → Arweave txId resolver used by {@link RemoteState.resolveMissing}.
-   * Defaults to the shared GraphQL resolver from @toon-protocol/arweave;
-   * injectable for tests.
+   * Defaults to the shared GraphQL resolver from @toon-protocol/arweave,
+   * which asks `arweave.net` — so every command that takes a gateway passes
+   * one bound to it instead (`../git-sha-resolver.ts`, #183). Injectable for
+   * tests.
    */
   resolveSha?: (sha: string, repo: string) => Promise<string | null>;
   /** WebSocket constructor override (defaults to the global WebSocket). */

@@ -31,6 +31,16 @@ export const CI_MANUAL_TRIGGER_KIND = 9840;
 export const CI_JOB_RESULT_KIND = 9841;
 export const CI_WORKFLOW_RESULT_KIND = 9842;
 export const CI_WORKFLOW_PROGRESS_KIND = 39842;
+export const CI_LIVE_LOG_TAIL_KIND = 39841;
+
+/**
+ * The key rig reserves for the runner channel. No workflow job id can equal
+ * it, so an event that names it as a job is malformed rather than ambiguous.
+ */
+export const CI_RUNNER_CHANNEL_KEY = '~runner';
+
+/** NIP-40 bound every addressable NIP-C1 kind shares: 30 minutes. */
+const CI_MAX_LIVE_LOG_TAIL_TTL = 1800;
 
 /** Conclusion values, aligned with the GitHub API `conclusion` field. */
 export type CiConclusion =
@@ -486,6 +496,13 @@ export interface CiArtifact {
   name: string;
 }
 
+/**
+ * A Job Result's content is `[log-tail omitted=<bytes>]\n<tail>` (the NIP's
+ * own shape). The header names how much of the job log precedes the excerpt,
+ * so a viewer is never shown a tail without being told what it is a tail of.
+ */
+const LOG_TAIL_HEADER = /^\[log-tail omitted=(\d+)\]\n?/;
+
 export interface CiJobResult {
   eventId: string;
   pubkey: string;
@@ -499,7 +516,10 @@ export interface CiJobResult {
   name?: string;
   conclusion: CiConclusion;
   logsUrl?: string;
+  /** The `[log-tail omitted=N]` excerpt with its header stripped. */
   logTail: string;
+  /** Bytes of job log that precede {@link logTail}; 0 when the header is absent. */
+  logOmittedBytes: number;
   artifacts: CiArtifact[];
   queuedAt?: number;
   startedAt?: number;
@@ -550,6 +570,11 @@ export function parseCiJobResult(event: NostrEvent): CiJobResult | null {
   const queuedAt = parseTimestamp(event.tags, 'queued_at');
   const startedAt = parseTimestamp(event.tags, 'started_at');
   const exitCode = parseTimestamp(event.tags, 'exit_code');
+  const header = LOG_TAIL_HEADER.exec(event.content);
+  const logOmittedBytes = header ? Number(header[1]) : 0;
+  const logTail = header
+    ? event.content.slice(header[0].length)
+    : event.content;
 
   return {
     eventId: event.id,
@@ -563,7 +588,8 @@ export function parseCiJobResult(event: NostrEvent): CiJobResult | null {
     ...(name !== undefined ? { name } : {}),
     conclusion: conclusion as CiConclusion,
     ...(logsUrl !== undefined ? { logsUrl } : {}),
-    logTail: event.content,
+    logTail,
+    logOmittedBytes,
     artifacts,
     ...(queuedAt !== undefined ? { queuedAt } : {}),
     ...(startedAt !== undefined ? { startedAt } : {}),
@@ -801,6 +827,219 @@ export function aggregateRunStatus(
     return 'failure';
   if (runs.some((r) => r.conclusion === 'success')) return 'success';
   return 'neutral';
+}
+
+// ---------------------------------------------------------------------------
+// The jobs of one run (rig#190)
+// ---------------------------------------------------------------------------
+
+/** Where one job of a run stands, as the relay describes it. */
+export type CiJobState = 'pending' | 'running' | 'concluded';
+
+/** One job of a run: listed from the first progress marker, result or not. */
+export interface CiRunJob {
+  jobId: string;
+  state: CiJobState;
+  /** The job's own name when its Job Result gives one, else its id. */
+  label: string;
+  /** The Job Result, once the client holds the event itself. */
+  result?: CiJobResult;
+}
+
+export interface DeriveRunJobsOptions {
+  /**
+   * Jobs with direct evidence of execution — today only a live log tail
+   * (rig#194) can supply it, since a job that has produced output has
+   * demonstrably started. When supplied, a job it does not name is pending.
+   */
+  startedJobIds?: Iterable<string>;
+}
+
+/**
+ * Every job of one run, concluded first, in the order the run reveals them.
+ *
+ * The job list is the union of the Workflow Progress `in-progress` tag and
+ * the `q` job quotes, so a run lists its jobs from its first in_progress
+ * marker onward — before any Job Result has arrived.
+ *
+ * `in-progress` names every job that has NOT FINISHED, not the jobs
+ * executing right now: rig's own coordinator puts the whole workflow in that
+ * tag when the run starts and removes each job as its result is published.
+ * So membership in it can never say whether a job has begun, and this
+ * derivation does not ask it to. A job is:
+ *
+ *  - `concluded` — its Job Result is on record, as the event itself or as a
+ *    `q` quote on the run (the quote is published with the result).
+ *  - `running` — the RUN is executing and the job has started. Absent a
+ *    per-job signal that is read off the run: a queued run has started
+ *    nothing, and an executing run is executing the jobs it has not yet
+ *    concluded. {@link DeriveRunJobsOptions.startedJobIds} refines it with
+ *    per-job evidence when a caller has any.
+ *  - `pending` — it has not started: the run is still queued, the evidence
+ *    says so, or the run ended without ever reaching this job.
+ */
+export function deriveRunJobs(
+  run: Pick<CiRun, 'status' | 'inProgress' | 'jobs'>,
+  results: readonly CiJobResult[] = [],
+  opts: DeriveRunJobsOptions = {}
+): CiRunJob[] {
+  const byId = new Map<string, CiJobResult>();
+  for (const result of results) {
+    if (!byId.has(result.jobId)) byId.set(result.jobId, result);
+  }
+  const quoted = new Set(run.jobs.map((q) => q.jobId));
+  const started = opts.startedJobIds ? new Set(opts.startedJobIds) : null;
+
+  const order: string[] = [];
+  const seen = new Set<string>();
+  for (const jobId of [...quoted, ...byId.keys(), ...run.inProgress]) {
+    if (jobId === '' || seen.has(jobId)) continue;
+    seen.add(jobId);
+    order.push(jobId);
+  }
+
+  return order.map((jobId) => {
+    const result = byId.get(jobId);
+    const concluded = result !== undefined || quoted.has(jobId);
+    const running =
+      run.status === 'in_progress' && (started === null || started.has(jobId));
+    const state: CiJobState = concluded
+      ? 'concluded'
+      : running
+        ? 'running'
+        : 'pending';
+    return {
+      jobId,
+      state,
+      label: result?.name ?? jobId,
+      ...(result ? { result } : {}),
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Live Log Tail (39841) — rig's NIP-C1 extension (rig#194)
+// ---------------------------------------------------------------------------
+//
+// One addressable event per RUN, replaced on the coordinator's cadence while
+// the run is in flight. It is a VIEW and never the record: the record is the
+// job log named by the `logs` tag of a Job Result. Output that scrolls past
+// between two publications is not recoverable from this event, and a client
+// MUST NOT treat the absence of one as an error.
+//
+// Wire shape: docs/specs/nip-c1-live-log-tail.md; rationale: ADR-0002.
+
+/** Recent output of one channel, and how much of it precedes the tail. */
+export interface CiLogTail {
+  tail: string;
+  /** Bytes of that channel's output before `tail` (0 when nothing does). */
+  omittedBytes: number;
+}
+
+/** One unfinished job's recent output. */
+export interface CiLiveLogTailJob extends CiLogTail {
+  jobId: string;
+}
+
+export interface CiLiveLogTail {
+  eventId: string;
+  pubkey: string;
+  createdAt: number;
+  trigger: CiTriggerContext;
+  runId: string;
+  /** Every unfinished job; a job drops out once its Job Result is published. */
+  jobs: CiLiveLogTailJob[];
+  /** The runner's own account of the run. Never a job, never concludes. */
+  runner?: CiLogTail;
+  /** NIP-40 expiration; the tail is gone from the relay past it. */
+  expiresAt: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** `omitted` is optional on the wire and defaults to 0; a bad one is fatal. */
+function parseOmitted(value: unknown): number | null {
+  if (value === undefined) return 0;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    return null;
+  }
+  return value;
+}
+
+function parseLogTail(value: unknown): CiLogTail | null {
+  if (!isRecord(value)) return null;
+  const omittedBytes = parseOmitted(value['omitted']);
+  const tail = value['tail'];
+  if (typeof tail !== 'string' || omittedBytes === null) return null;
+  return { tail, omittedBytes };
+}
+
+/**
+ * Parse a Live Log Tail (39841). Unknown fields anywhere in the content are
+ * ignored, so a later coordinator may add to the shape; anything the shape
+ * does NOT allow — bad JSON, a jobs entry without an id or a tail, a job
+ * named twice, the runner channel smuggled in as a job, an expiration outside
+ * the 30-minute bound — is `null` rather than a half-parsed render. The bound
+ * is measured against the event's own `created_at`, so no clock agreement
+ * between coordinator and viewer is needed.
+ */
+export function parseCiLiveLogTail(event: NostrEvent): CiLiveLogTail | null {
+  if (event.kind !== CI_LIVE_LOG_TAIL_KIND) return null;
+  const { tags } = event;
+  const trigger = parseCiTriggerContext(tags);
+  if (!trigger) return null;
+  const runId = getTagValue(tags, 'd');
+  const expiration = singleTag(tags, 'expiration');
+  if (!runId || !expiration) return null;
+  const expiresAt = Number(expiration[1]);
+  if (
+    !Number.isInteger(expiresAt) ||
+    expiresAt <= event.created_at ||
+    expiresAt - event.created_at > CI_MAX_LIVE_LOG_TAIL_TTL
+  ) {
+    return null;
+  }
+
+  let content: unknown;
+  try {
+    content = JSON.parse(event.content);
+  } catch {
+    return null;
+  }
+  if (!isRecord(content) || !Array.isArray(content['jobs'])) return null;
+
+  const jobs: CiLiveLogTailJob[] = [];
+  const seen = new Set<string>();
+  for (const entry of content['jobs']) {
+    if (!isRecord(entry)) return null;
+    const jobId = entry['job'];
+    if (typeof jobId !== 'string' || jobId === '') return null;
+    if (jobId === CI_RUNNER_CHANNEL_KEY || seen.has(jobId)) return null;
+    const parsed = parseLogTail(entry);
+    if (!parsed) return null;
+    seen.add(jobId);
+    jobs.push({ jobId, tail: parsed.tail, omittedBytes: parsed.omittedBytes });
+  }
+
+  let runner: CiLogTail | undefined;
+  if (content['runner'] !== undefined) {
+    const parsed = parseLogTail(content['runner']);
+    if (!parsed) return null;
+    runner = parsed;
+  }
+
+  return {
+    eventId: event.id,
+    pubkey: event.pubkey.toLowerCase(),
+    createdAt: event.created_at,
+    trigger,
+    runId,
+    jobs,
+    ...(runner ? { runner } : {}),
+    expiresAt,
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -38,6 +38,13 @@ export const CI_MANUAL_TRIGGER_KIND = 9840;
 export const CI_JOB_RESULT_KIND = 9841;
 export const CI_WORKFLOW_RESULT_KIND = 9842;
 export const CI_WORKFLOW_PROGRESS_KIND = 39842;
+/**
+ * rig's NIP-C1 EXTENSION kind (ADR-0002, docs/specs/nip-c1-live-log-tail.md):
+ * the live log tail of a run in flight. Not in the vendored spec — the number
+ * is rig's choice, offered upstream to ngit-ci, and renumbering it is a deploy
+ * rather than a migration because the event holds no durable data.
+ */
+export const CI_LIVE_LOG_TAIL_KIND = 39841;
 
 /** The one runner family rig supports (`W` tag / `R` prefix). */
 export const CI_RUNNER_FAMILY = 'act';
@@ -47,6 +54,44 @@ export const CI_SOFTWARE = 'rig';
 /** NIP-40 bound on Advertisement + Progress lifetime (seconds). */
 export const CI_MAX_ADVERTISEMENT_TTL = 30 * 60;
 export const CI_MAX_PROGRESS_TTL = 30 * 60;
+/** The same NIP-40 bound on a Live Log Tail (seconds). */
+export const CI_MAX_LIVE_LOG_TAIL_TTL = 30 * 60;
+
+// --- Live Log Tail decisions (ADR-0002) ------------------------------------
+// These four numbers are decisions, not tuning knobs, and they are declared
+// HERE so the coordinator that publishes the stream and the cost estimate that
+// prices it cannot disagree about one.
+
+/**
+ * How often a run in flight republishes its tail. Fixed — a fixed interval is
+ * what makes the worst case budgetable — and expressed in milliseconds because
+ * both consumers (the coordinator's scheduler seam and `estimateRunCost`'s run
+ * timeout) work in milliseconds.
+ */
+export const CI_LIVE_LOG_TAIL_INTERVAL_MS = 10_000;
+
+/**
+ * Bytes of tail one live job gets by default: deliberately far more than the
+ * 4 KiB that rides in a Job Result, because the relay fee ignores event size
+ * and the difference between one screen and several is the difference between
+ * "is it alive" and "what is it doing".
+ */
+export const CI_LIVE_LOG_TAIL_JOB_BYTES = 16 * 1024;
+
+/**
+ * Ceiling on the tail bytes ONE event may carry, so a run with many live jobs
+ * stays relay-safe. Beyond it the budget is divided evenly — see
+ * {@link liveLogTailBudget}.
+ */
+export const CI_LIVE_LOG_TAIL_MAX_BYTES = 64 * 1024;
+
+/**
+ * The distinguished key naming the runner channel in a coordinator's per-job
+ * buffers. It is not a job id and can never collide with one (a workflow job id
+ * matches `[A-Za-z_][A-Za-z0-9_-]*`), and it never appears in the wire event's
+ * `jobs` array — the runner channel has its own `runner` slot.
+ */
+export const CI_RUNNER_CHANNEL_KEY = '~runner';
 
 /** Kind of the NIP-34 repository announcement the `a` coordinates point at. */
 const REPO_ANNOUNCEMENT_KIND = 30617;
@@ -1307,5 +1352,247 @@ export function parseCiWorkflowProgress(
   if (queuedAt !== undefined) result.queuedAt = queuedAt;
   if (startedAt !== undefined) result.startedAt = startedAt;
   if (provenance) result.provenance = provenance;
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// kind:39841 — Live Log Tail (rig's NIP-C1 EXTENSION — ADR-0002)
+//
+// One addressable event per RUN, replaced on a fixed cadence while the run is
+// in flight, carrying the recent output of every unfinished job plus the
+// runner channel. Its `d` is the run id — the same value as the run's Workflow
+// Progress `d` — so a client holding a run addresses its tail without a second
+// lookup. It is only ever a VIEW: the job log named by the Job Result is the
+// record, and this event expires under NIP-40 shortly after the run concludes.
+//
+// Wire shape and rationale: docs/specs/nip-c1-live-log-tail.md, ADR-0002.
+// ---------------------------------------------------------------------------
+
+/** One unfinished job's recent output. */
+export interface CiLiveLogTailJob {
+  /** Job id as declared in the workflow file. */
+  job: string;
+  /** The most recent output, sliced from the END of the redacted log. */
+  tail: string;
+  /** Bytes of that job's output preceding `tail`. */
+  omitted: number;
+}
+
+/** The runner channel: the runner's own account of the run, never a job. */
+export interface CiLiveLogTailChannel {
+  tail: string;
+  omitted: number;
+}
+
+export interface CiLiveLogTailInput {
+  trigger: CiTriggerContext;
+  /** The run's Workflow Progress `d`. */
+  runId: string;
+  /** Every unfinished job; a job drops out once its Job Result is published. */
+  jobs: CiLiveLogTailJob[];
+  runner?: CiLiveLogTailChannel;
+  /** NIP-40 expiration: > created_at, ≤ created_at + 30 min. */
+  expiresAt: number;
+}
+
+export interface CiLiveLogTail {
+  eventId: string;
+  pubkey: string;
+  createdAt: number;
+  trigger: CiTriggerContext;
+  runId: string;
+  jobs: CiLiveLogTailJob[];
+  runner?: CiLiveLogTailChannel;
+  expiresAt: number;
+}
+
+/**
+ * Bytes of tail each live entry gets when `entries` of them share one event:
+ * the per-job default until that many entries would breach the per-event
+ * ceiling, then the ceiling divided evenly. Entries are unfinished jobs PLUS
+ * the runner channel when it has output — everything that occupies bytes in
+ * the event.
+ */
+export function liveLogTailBudget(entries: number): number {
+  if (!Number.isFinite(entries) || entries <= 1) {
+    return CI_LIVE_LOG_TAIL_JOB_BYTES;
+  }
+  const share = Math.floor(CI_LIVE_LOG_TAIL_MAX_BYTES / entries);
+  return Math.max(1, Math.min(CI_LIVE_LOG_TAIL_JOB_BYTES, share));
+}
+
+/**
+ * Worst-case number of Live Log Tail events a run of at most `runTimeoutMs`
+ * can publish: one per cadence tick plus the closing replacement. This is what
+ * the coordinator must be able to afford BEFORE it starts the run — there is
+ * no best-effort mode, because a stream that silently stops is
+ * indistinguishable to a viewer from a stalled job.
+ */
+export function liveLogTailEventBudget(runTimeoutMs: number): number {
+  if (!Number.isFinite(runTimeoutMs) || runTimeoutMs <= 0) return 1;
+  return Math.ceil(runTimeoutMs / CI_LIVE_LOG_TAIL_INTERVAL_MS) + 1;
+}
+
+/**
+ * Take the last `maxBytes` UTF-8 bytes of `text`, reporting how many bytes
+ * precede them. The slice never splits a multi-byte character, and `omitted`
+ * counts BYTES (what a reader comparing against the job log's size needs), not
+ * characters. Callers slice REDACTED output — never the reverse (ADR-0002).
+ */
+export function sliceLogTail(
+  text: string,
+  maxBytes: number
+): { tail: string; omitted: number } {
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.length <= maxBytes) return { tail: text, omitted: 0 };
+  if (maxBytes <= 0) return { tail: '', omitted: bytes.length };
+  let start = bytes.length - maxBytes;
+  // Never begin inside a multi-byte sequence: continuation bytes are 10xxxxxx.
+  while (start < bytes.length && ((bytes[start] as number) & 0xc0) === 0x80) {
+    start += 1;
+  }
+  return { tail: bytes.subarray(start).toString('utf8'), omitted: start };
+}
+
+function assertOmitted(omitted: number, what: string): void {
+  if (!Number.isSafeInteger(omitted) || omitted < 0) {
+    throw new Error(`${what}: omitted must be a non-negative byte count`);
+  }
+}
+
+export function buildCiLiveLogTail(
+  input: CiLiveLogTailInput,
+  createdAt: number = now()
+): UnsignedEvent {
+  if (input.runId === '') throw new Error('a live log tail needs a run id');
+  assertExpiration(createdAt, input.expiresAt, CI_MAX_LIVE_LOG_TAIL_TTL);
+  const seen = new Set<string>();
+  for (const job of input.jobs) {
+    if (job.job === '') throw new Error('a live log tail job needs a job id');
+    if (job.job === CI_RUNNER_CHANNEL_KEY) {
+      throw new Error(
+        `the runner channel is not a job: ${CI_RUNNER_CHANNEL_KEY} may not appear in jobs`
+      );
+    }
+    if (seen.has(job.job)) {
+      throw new Error(`job ${job.job} appears twice in one live log tail`);
+    }
+    seen.add(job.job);
+    assertOmitted(job.omitted, `job ${job.job}`);
+  }
+  if (input.runner) assertOmitted(input.runner.omitted, 'runner channel');
+
+  const content: {
+    jobs: CiLiveLogTailJob[];
+    runner?: CiLiveLogTailChannel;
+  } = {
+    jobs: input.jobs.map((j) => ({
+      job: j.job,
+      tail: j.tail,
+      omitted: j.omitted,
+    })),
+  };
+  if (input.runner) {
+    content.runner = {
+      tail: input.runner.tail,
+      omitted: input.runner.omitted,
+    };
+  }
+  return {
+    kind: CI_LIVE_LOG_TAIL_KIND,
+    content: JSON.stringify(content),
+    tags: [
+      ...commonTriggerTags(input.trigger),
+      ['d', input.runId],
+      ['expiration', String(input.expiresAt)],
+    ],
+    created_at: createdAt,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** `omitted` is optional on the wire and defaults to 0; a bad one is fatal. */
+function parseOmitted(value: unknown): number | null {
+  if (value === undefined) return 0;
+  if (!Number.isSafeInteger(value) || (value as number) < 0) return null;
+  return value as number;
+}
+
+function parseTailChannel(value: unknown): CiLiveLogTailChannel | null {
+  if (!isRecord(value)) return null;
+  const omitted = parseOmitted(value['omitted']);
+  const tail = value['tail'];
+  if (typeof tail !== 'string' || omitted === null) return null;
+  return { tail, omitted };
+}
+
+/**
+ * Parse a Live Log Tail. Unknown fields — anywhere in the content, and unknown
+ * tags — are ignored, so a later rig may add to the shape without breaking a
+ * client; anything the shape does NOT allow (bad JSON, a jobs entry without a
+ * job id, a duplicated job, a runner channel smuggled in as a job, an
+ * expiration beyond the 30-minute bound) is `null` rather than a throw or a
+ * half-populated result.
+ */
+export function parseCiLiveLogTail(ev: NostrEvent): CiLiveLogTail | null {
+  if (ev.kind !== CI_LIVE_LOG_TAIL_KIND) return null;
+  const { tags } = ev;
+  const trigger = parseCiTriggerContext(tags);
+  if (!trigger) return null;
+  const d = single(tags, 'd');
+  const exp = single(tags, 'expiration');
+  if (!d || !d[1] || !exp) return null;
+  const expiresAt = Number(exp[1]);
+  if (
+    !Number.isInteger(expiresAt) ||
+    expiresAt <= ev.created_at ||
+    expiresAt - ev.created_at > CI_MAX_LIVE_LOG_TAIL_TTL
+  ) {
+    return null;
+  }
+
+  let content: unknown;
+  try {
+    content = JSON.parse(ev.content);
+  } catch {
+    return null;
+  }
+  if (!isRecord(content) || !Array.isArray(content['jobs'])) return null;
+
+  const jobs: CiLiveLogTailJob[] = [];
+  const seen = new Set<string>();
+  for (const entry of content['jobs']) {
+    if (!isRecord(entry)) return null;
+    const job = entry['job'];
+    if (typeof job !== 'string' || job === '') return null;
+    // The runner channel is never a job — two representations of one thing
+    // would be ambiguous, so an event claiming both is malformed.
+    if (job === CI_RUNNER_CHANNEL_KEY || seen.has(job)) return null;
+    const channel = parseTailChannel(entry);
+    if (!channel) return null;
+    seen.add(job);
+    jobs.push({ job, tail: channel.tail, omitted: channel.omitted });
+  }
+
+  let runner: CiLiveLogTailChannel | undefined;
+  if (content['runner'] !== undefined) {
+    const parsed = parseTailChannel(content['runner']);
+    if (!parsed) return null;
+    runner = parsed;
+  }
+
+  const result: CiLiveLogTail = {
+    eventId: ev.id,
+    pubkey: ev.pubkey.toLowerCase(),
+    createdAt: ev.created_at,
+    trigger,
+    runId: d[1],
+    jobs,
+    expiresAt,
+  };
+  if (runner) result.runner = runner;
   return result;
 }

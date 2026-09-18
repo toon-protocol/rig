@@ -35,6 +35,7 @@ import {
 import {
   DEFAULT_CONCURRENCY,
   DEFAULT_RUN_TIMEOUT_MS,
+  LOG_UPLOAD_CAP_BYTES,
   startCoordinator,
   type CanAfford,
   type ConcludedRun,
@@ -42,6 +43,7 @@ import {
   type CoordinatorRepo,
   type RunCostEstimate,
 } from '../ci/coordinator.js';
+import { liveLogTailEventBudget } from '../ci/nip-c1-events.js';
 import { uploadChargeFor } from '../publisher.js';
 import {
   ChannelMapStore,
@@ -55,6 +57,7 @@ import {
   configuredGateway,
   readGatewaysFor,
 } from '../gateway-preference.js';
+import { shaResolverFor } from '../git-sha-resolver.js';
 import { hexToNpub, ownerToHex } from '../npub.js';
 import type { CiDeps } from './ci.js';
 import { rigVersion } from './dispatch.js';
@@ -315,13 +318,35 @@ export function actRunnerOptions(
 // Affordability (story 15)
 // ---------------------------------------------------------------------------
 
-/** What one run is estimated to cost, in the smallest asset unit. */
-export function estimateRunCost(estimate: RunCostEstimate): bigint {
-  // Logs and artifacts are metered per KiB on the store route; 64 KiB is a
-  // generous per-upload envelope for a log tail's full file.
+/**
+ * What one run is estimated to cost, in the smallest asset unit — including
+ * the worst-case cost of streaming its live log tail for the whole of
+ * `runTimeoutMs` (#192).
+ *
+ * Per ADR-0002 the tail is ONE addressable event per run, republished on a
+ * fixed cadence regardless of job count, plus one final replacement when the
+ * run concludes. `liveLogTailEventBudget` is that worst-case event count —
+ * shared with the coordinator's own scheduler seam so the two can never
+ * disagree on the number. Folding it in here, rather than at the call site,
+ * means the estimate is a function of run duration alone: neither a
+ * chatty build nor a many-job workflow can move it, because the streamed
+ * bytes and the job count play no part in the arithmetic. There is no
+ * best-effort mode — a coordinator that cannot afford the full worst case
+ * must not start the run at all (see {@link makeAffordabilityCheck}).
+ */
+export function estimateRunCost(
+  estimate: RunCostEstimate,
+  runTimeoutMs: number
+): bigint {
+  // Logs and artifacts are metered per KiB on the store route. The
+  // per-upload envelope is LOG_UPLOAD_CAP_BYTES — the coordinator never
+  // uploads a job log larger than that (ADR-0003) — so this is an actual
+  // bound, not a guess.
   return (
     BigInt(estimate.events) * estimate.rates.eventFee +
-    BigInt(estimate.uploads) * uploadChargeFor(estimate.rates, 64 * 1024)
+    BigInt(estimate.uploads) *
+      uploadChargeFor(estimate.rates, LOG_UPLOAD_CAP_BYTES) +
+    BigInt(liveLogTailEventBudget(runTimeoutMs)) * estimate.rates.eventFee
   );
 }
 
@@ -332,15 +357,22 @@ export function estimateRunCost(estimate: RunCostEstimate): bigint {
  * from the wallet) — when the wallet holds that much USDC on some chain. An
  * unreadable wallet is NOT affordable: the coordinator must never start a
  * run it may not be able to finish publishing.
+ *
+ * `runTimeoutMs` is the run timeout this coordinator was started with (the
+ * same value passed to `startCoordinator`) — every estimate this check
+ * prices includes the worst-case live-log-tail budget for that duration
+ * (#192), so a coordinator declines a run it cannot afford to stream for its
+ * full timeout, not merely one it cannot afford to run.
  */
 export function makeAffordabilityCheck(args: {
   ctx: StandaloneContext;
   env: NodeJS.ProcessEnv;
   log: (line: string) => void;
+  runTimeoutMs: number;
 }): CanAfford {
-  const { ctx, env, log } = args;
+  const { ctx, env, log, runTimeoutMs } = args;
   return async (estimate) => {
-    const cost = estimateRunCost(estimate);
+    const cost = estimateRunCost(estimate, runTimeoutMs);
     const store = new ChannelMapStore(resolveChannelPaths(env));
     const mine = store
       .list()
@@ -522,12 +554,16 @@ export async function runCiServe(
           ctx,
           env: forced.env,
           log: (line) => io.err(line),
+          runTimeoutMs: flags.timeoutMs,
         }),
       ...(forced.webSocketFactory
         ? { webSocketFactory: forced.webSocketFactory }
         : {}),
       ...(forced.fetchFn ? { fetchFn: forced.fetchFn } : {}),
-      ...(forced.resolveSha ? { resolveSha: forced.resolveSha } : {}),
+      // SHAs the object map does not cover are resolved against the SAME
+      // permaweb the objects are read from, not arweave.net (#183).
+      resolveSha:
+        forced.resolveSha ?? shaResolverFor(flags.gateway, forced.env),
       ...(forced.clock ? { clock: forced.clock } : {}),
       ...(firstRun
         ? { onRunConcluded: (run: ConcludedRun) => concludeFirstRun(run) }

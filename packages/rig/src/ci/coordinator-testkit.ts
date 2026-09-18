@@ -36,15 +36,19 @@ import {
 import {
   CI_ADVERTISEMENT_KIND,
   CI_JOB_RESULT_KIND,
+  CI_LIVE_LOG_TAIL_KIND,
   CI_WORKFLOW_PROGRESS_KIND,
   CI_WORKFLOW_RESULT_KIND,
+  buildCiSecretUpdate,
   buildCiServiceRequest,
   buildCiServiceStop,
   parseCiJobResult,
+  parseCiLiveLogTail,
   parseCiWorkflowProgress,
   parseCiWorkflowResult,
   repoAddress,
 } from './nip-c1-events.js';
+import { encryptSecretUpdate, generateSecretsKey } from './secrets.js';
 import {
   FakeRunner,
   type RunnerRequest,
@@ -283,6 +287,50 @@ export function jobEvents(publisher: FakePublisher, pubkey = COORD) {
         'a parseable 9841'
       )
     );
+}
+
+/**
+ * Every Live Log Tail (39841) published, in order — what a client watching
+ * the run on the relay would see, parsed through the shipped parser so a
+ * malformed event fails the test rather than being read leniently.
+ */
+export function liveLogTailEvents(publisher: FakePublisher, pubkey = COORD) {
+  return publisher
+    .ofKind(CI_LIVE_LOG_TAIL_KIND)
+    .map((p) =>
+      must(
+        parseCiLiveLogTail(publisher.asRelayEvent(p, pubkey)),
+        'a parseable 39841'
+      )
+    );
+}
+
+/** A kind:29846 from `author`, NIP-44 encrypted to the coordinator's CURRENT secrets-key. */
+export function secretUpdate(
+  world: World,
+  handle: CoordinatorHandle,
+  author: string,
+  set: Record<string, string>
+): NostrEvent {
+  const sender = generateSecretsKey();
+  const created_at = world.clock.now();
+  return signed(
+    buildCiSecretUpdate({
+      repoAddr: repoAddress(author, REPO),
+      coordinatorPubkey: COORD,
+      advertisementId: handle.advertisementId as string,
+      advertisementRelayHint: RELAY,
+      senderPubkey: sender.pubkey,
+      recipientPubkey: handle.secretsKeyPubkey,
+      ciphertext: encryptSecretUpdate(
+        { author, created_at, set, remove: [] },
+        sender.secretKey,
+        handle.secretsKeyPubkey
+      ),
+      createdAt: created_at,
+    }),
+    author
+  );
 }
 
 /** A push: commit on the source repo, publish the new 30618 live. */

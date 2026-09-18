@@ -8,6 +8,44 @@ this heading are recorded by hand; a changeset file is NOT the way to note a
 rig-web change, because an `ignore`d-only changeset is inert and blocks releases
 of `@toon-protocol/rig` (see the changeset gate in `.github/workflows/ci.yml`).
 
+- A job page renders the run's live log tail and converges on the record
+  (rig#194). While the run is unfinished the page subscribes to the Live Log
+  Tail (kind 39841, `docs/specs/nip-c1-live-log-tail.md`) of THAT run — one
+  addressable event, addressed by `(39841, coordinator, run-id)` — and renders
+  its own job's tail, updating as each replacement arrives with no reload.
+  Because the kind is addressable the relay hands back the latest version, so
+  a viewer arriving four minutes into a five-minute job sees the current output
+  at once. The subscription is scoped to the run being viewed and opened only
+  while it is unfinished: browsing the actions list opens none (a test asserts
+  no filter the list sends names 39841), and a concluded run asks for nothing —
+  it shows the durable job log, so the live view and the record can never
+  disagree. The tail is also per-job evidence of execution, so a job of a
+  running run that has printed nothing renders as `not started` rather than as
+  an empty pane. The runner channel rides in the same event and is shown as the
+  runner talking — on the run page and under the job — never as a job, since a
+  channel that never concludes would otherwise look like a job that never
+  finishes. A run with no live tail at all (an old coordinator, an expired
+  event, a run that concluded long ago) renders exactly as it did before:
+  absence is never an error. Every live pane says what it is — a rolling view,
+  not the record; output that scrolled past between refreshes is in the job log
+  a minute later.
+
+- A job of a run has its own page, with its durable job log (rig#190). The run
+  page lists every job from the run's first Workflow Progress event — before any
+  Job Result exists — and links each to
+  `#/<owner>/<repo>/actions/<run-id>/jobs/<job-id>`, so a maintainer can send a
+  colleague the job that broke rather than the run and an instruction to scroll.
+  A job that has not started, one that is running and one that has concluded are
+  three different badges on both pages: the `in-progress` tag names every job
+  that has not FINISHED, so `deriveRunJobs` reads a job's state off the run and
+  off per-job evidence, never off membership in that tag. The job page reads the
+  durable log back from the `logs` URL — the first read of a job log anywhere in
+  the repo — through a streaming reader that stops at a 2 MiB client-side
+  ceiling (`job-log.ts`), cancels the body there, and says what it did not show
+  and by how much, because the coordinator that wrote the blob may not be one
+  that bounds its uploads. A job with no `logs` URL renders as a job without a
+  log, not as an error.
+
 - The clone box's command names the configured store gateway (rig#185). When
   `VITE_ARWEAVE_GATEWAY` is set, the copied (and displayed) command gains
   `--gateway <url>`, so the paste reads objects from the same gateway the page

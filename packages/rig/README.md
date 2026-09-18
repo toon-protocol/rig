@@ -848,6 +848,17 @@ or not it does sandboxed-subdomain redirects, and the TOON store's own gateway
 answers on that route alone. Public gateways serve the same bytes on both, so with
 nothing configured the list is exactly as it always was.
 
+The **`Git-SHA` lookup follows the gateway too**. A kind:30618 object map is capped,
+so a SHA it does not carry is resolved by asking a gateway's GraphQL endpoint which
+transaction carries that object — and a configured gateway is asked at
+`<url>/graphql`, never `arweave.net` (which would answer about a *different*
+network, or leak the query off an air-gapped stack). Object bytes are
+content-addressed and SHA-verified, so any mirror may serve them; a tag query is a
+statement about one network, so it goes only to the network you named. Configure
+nothing and it is the shared `arweave.net` resolver, unchanged. A gateway that does
+not serve GraphQL therefore resolves nothing — name one that does (every ar.io node
+does), or leave the variable unset.
+
 `rig issue list|show` and `rig pr list|show` are pure relay reads (kind:1621/1617 by
 the repo `#a` tag; state from kind:1630-1633, latest wins; comments under `show` —
 NIP-22 kind:1111 matched on the uppercase `E` root tag, merged with legacy kind:1622
