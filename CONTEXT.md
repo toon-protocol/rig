@@ -10,6 +10,10 @@ Terms for leases, workloads, providers, listings, and the Provider Directory are
 
 _Avoid_: deploy (as a synonym for Spawn), pod, node, marketplace (for the Provider Directory)
 
+**Deployment**:
+TOON Network's kind 30437 — a Tenant-signed event pairing an environment with the Lease, Provider, workload and image serving it. rig never publishes one; which Lease serves which environment is local client state. See ADR-0004.
+_Avoid_: deployment (as loose English for a Site — see _Avoid_ under Site)
+
 ### Continuous integration
 
 **Coordinator**:
