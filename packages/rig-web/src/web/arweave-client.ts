@@ -38,8 +38,13 @@ import {
  * with a literal at build time either way, and a function keeps the value
  * stubbable (`vi.stubEnv`) in tests. See `arweave-gateway.ts` for why an
  * override exists at all.
+ *
+ * Exported because the clone box has to name the SAME gateway in the command
+ * it hands the reader (rig#185) — a page that renders from a self-hosted
+ * store and hands out a public-gateway clone command cannot clone itself.
+ * This stays the single read of `import.meta.env.VITE_ARWEAVE_GATEWAY`.
  */
-function configuredGateway(): string | null {
+export function configuredGateway(): string | null {
   return normalizeGateway(import.meta.env.VITE_ARWEAVE_GATEWAY);
 }
 

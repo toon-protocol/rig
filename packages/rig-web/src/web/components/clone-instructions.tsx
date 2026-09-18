@@ -3,6 +3,8 @@ import { Check, ChevronDown, Code2, Copy } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Button } from '@/components/ui/button';
 import { useRigConfig } from '@/hooks/use-rig-config';
+import { configuredGateway } from '../arweave-client.js';
+import { normalizeGateway } from '../arweave-gateway.js';
 import type { RepoMetadata } from '../nip34-parsers.js';
 
 /**
@@ -62,6 +64,31 @@ function shellQuote(value: string): string {
 }
 
 /**
+ * The ` --gateway <url>` suffix for a clone command, or `''` when this build
+ * reads from the public gateway list.
+ *
+ * The page and the command it hands out have to agree about where objects
+ * live (rig#185): when `VITE_ARWEAVE_GATEWAY` names a self-hosted store, the
+ * tree the reader is looking at was fetched from THAT gateway, and a clone
+ * aimed at `ar-io.dev` / `arweave.net` / `permagate.io` finds nothing there.
+ * `rig clone` and `rig fetch` both take `--gateway` (rig#176), which tries the
+ * named gateway first and keeps the public list behind it.
+ *
+ * The value goes through {@link normalizeGateway} — the same reduction the
+ * fetch path applies — so the command names exactly the base URL the page
+ * read from, and an unusable value (a typo, a non-http scheme) appends no
+ * flag at all: the reader gets today's public-gateway command rather than one
+ * that fails to parse.
+ */
+function gatewayFlag(
+  gateway: string | undefined | null,
+  quote: (value: string) => string,
+): string {
+  const configured = normalizeGateway(gateway);
+  return configured ? ` --gateway ${quote(configured)}` : '';
+}
+
+/**
  * The paste-and-run command to clone a specific repo with the `rig` CLI:
  * `rig clone <relay-url> <owner>/<repo-id>`. Mirrors GitHub's clone box — just
  * the clone command, one copyable line (the `rig` install is covered by the
@@ -78,13 +105,21 @@ function shellQuote(value: string): string {
  * argument is `shellQuote`d as one token to keep a hostile `d` tag from
  * smuggling extra shell words onto the paste (a stripped newline can never
  * become a second executable line).
+ *
+ * `gateway` is the store gateway this build reads objects through, when one is
+ * configured; it is appended as `--gateway <url>` (see {@link gatewayFlag}) and
+ * `shellQuote`d like the other arguments — it is build config rather than
+ * attacker-publishable, but it takes the same treatment for the same reason.
+ * Without one the command is byte-for-byte what it has always been.
  */
 export function buildCloneCommand(
   repoId: string,
   ownerPubkey: string,
   relayUrl: string,
+  gateway?: string | null,
 ): string {
-  return `rig clone ${shellQuote(relayUrl)} ${shellQuote(`${ownerPubkey}/${repoId}`)}`;
+  const base = `rig clone ${shellQuote(relayUrl)} ${shellQuote(`${ownerPubkey}/${repoId}`)}`;
+  return `${base}${gatewayFlag(gateway, shellQuote)}`;
 }
 
 /**
@@ -94,11 +129,15 @@ export function buildCloneCommand(
  * the box's `title` carries it for hover/selection). Control characters are
  * stripped for the same reason as {@link shellQuote}, but no quoting is
  * applied: this string is only ever rendered as text, never pasted.
+ *
+ * Carries the same `--gateway` suffix as {@link buildCloneCommand}, unquoted —
+ * the box must show the command the copy button puts on the clipboard.
  */
 export function buildDisplayCommand(
   repoId: string,
   ownerPubkey: string,
   relayUrl: string,
+  gateway?: string | null,
 ): string {
   // eslint-disable-next-line no-control-regex -- stripping control chars is the point
   const strip = (v: string) => v.replace(/[\u0000-\u001f\u007f]/g, '');
@@ -106,7 +145,8 @@ export function buildDisplayCommand(
     ownerPubkey.length > 16
       ? `${ownerPubkey.slice(0, 8)}…${ownerPubkey.slice(-4)}`
       : ownerPubkey;
-  return `rig clone ${strip(relayUrl)} ${strip(`${owner}/${repoId}`)}`;
+  const base = `rig clone ${strip(relayUrl)} ${strip(`${owner}/${repoId}`)}`;
+  return `${base}${gatewayFlag(gateway, strip)}`;
 }
 
 /**
@@ -122,11 +162,20 @@ export function buildDisplayCommand(
  */
 export function CloneInstructions({ metadata }: { metadata: RepoMetadata }) {
   const { relayUrl } = useRigConfig();
-  const command = buildCloneCommand(metadata.repoId, metadata.ownerPubkey, relayUrl);
+  // The gateway the app itself reads objects through — so the command the
+  // reader pastes clones from the same store the page rendered from (rig#185).
+  const gateway = configuredGateway();
+  const command = buildCloneCommand(
+    metadata.repoId,
+    metadata.ownerPubkey,
+    relayUrl,
+    gateway,
+  );
   const displayCommand = buildDisplayCommand(
     metadata.repoId,
     metadata.ownerPubkey,
     relayUrl,
+    gateway,
   );
 
   const [copied, setCopied] = useState(false);

@@ -56,6 +56,7 @@ describe('[P1] CloneInstructions', () => {
     // cleanup never registers — unmount explicitly or portaled popover
     // content leaks across tests.
     cleanup();
+    vi.unstubAllEnvs();
     // @ts-expect-error test-only cleanup of the clipboard stub
     delete navigator.clipboard;
   });
@@ -121,6 +122,98 @@ describe('[P1] CloneInstructions', () => {
     expect(buildDisplayCommand('r', 'shortname', 'ws://localhost:7100')).toBe(
       'rig clone ws://localhost:7100 shortname/r',
     );
+  });
+
+  // rig#185: the page reads objects through VITE_ARWEAVE_GATEWAY, so the
+  // command it hands the reader has to point `rig clone` at the same gateway —
+  // otherwise the repo renders and the pasted clone 404s against the public list.
+  describe('with a store gateway configured', () => {
+    it('buildCloneCommand appends --gateway so the clone reads what the page reads', () => {
+      expect(
+        buildCloneCommand('my-repo', OWNER, 'ws://localhost:7100', 'http://localhost:3000'),
+      ).toBe(
+        `rig clone ws://localhost:7100 ${OWNER}/my-repo --gateway http://localhost:3000`,
+      );
+    });
+
+    it('buildCloneCommand leaves the command byte-for-byte unchanged without one', () => {
+      const bare = `rig clone ws://localhost:7100 ${OWNER}/my-repo`;
+      expect(buildCloneCommand('my-repo', OWNER, 'ws://localhost:7100')).toBe(bare);
+      expect(buildCloneCommand('my-repo', OWNER, 'ws://localhost:7100', null)).toBe(bare);
+      expect(buildCloneCommand('my-repo', OWNER, 'ws://localhost:7100', '  ')).toBe(bare);
+      // Unusable values degrade to the public gateways rather than pasting junk.
+      expect(
+        buildCloneCommand('my-repo', OWNER, 'ws://localhost:7100', 'not a url'),
+      ).toBe(bare);
+      expect(
+        buildCloneCommand('my-repo', OWNER, 'ws://localhost:7100', 'ftp://gw.example'),
+      ).toBe(bare);
+    });
+
+    it('normalizes and shell-quotes the gateway the way the other arguments are quoted', () => {
+      // Trailing slash, query and fragment are dropped by normalizeGateway.
+      expect(
+        buildCloneCommand('my-repo', OWNER, 'ws://localhost:7100', 'http://gw.example/base/?x=1#f'),
+      ).toBe(`rig clone ws://localhost:7100 ${OWNER}/my-repo --gateway http://gw.example/base`);
+      // A value outside the safe charset becomes one literal shell word.
+      const quoted = buildCloneCommand(
+        'my-repo',
+        OWNER,
+        'ws://localhost:7100',
+        "http://gw.example/it's",
+      );
+      expect(quoted.split('\n')).toHaveLength(1);
+      expect(quoted).toBe(
+        `rig clone ws://localhost:7100 ${OWNER}/my-repo --gateway 'http://gw.example/it'\\''s'`,
+      );
+    });
+
+    it('buildDisplayCommand shows the same flag so the box matches the clipboard', () => {
+      expect(
+        buildDisplayCommand('my-repo', OWNER, 'ws://localhost:7100', 'http://localhost:3000'),
+      ).toBe(
+        `rig clone ws://localhost:7100 ${OWNER.slice(0, 8)}…${OWNER.slice(-4)}/my-repo --gateway http://localhost:3000`,
+      );
+      expect(buildDisplayCommand('my-repo', OWNER, 'ws://localhost:7100')).toBe(
+        `rig clone ws://localhost:7100 ${OWNER.slice(0, 8)}…${OWNER.slice(-4)}/my-repo`,
+      );
+    });
+
+    it('the popover renders and copies the gateway-pinned command', async () => {
+      vi.stubEnv('VITE_ARWEAVE_GATEWAY', 'http://localhost:3000');
+      render(<CloneInstructions metadata={createRepoMetadata({ repoId: 'rig-demo' })} />);
+      openPopover();
+
+      const box = document.querySelector('pre');
+      expect(box?.textContent).toBe(
+        `rig clone wss://relay.devnet.toonprotocol.dev ${OWNER.slice(0, 8)}…${OWNER.slice(-4)}/rig-demo --gateway http://localhost:3000`,
+      );
+      expect(box?.getAttribute('title')).toBe(
+        `rig clone wss://relay.devnet.toonprotocol.dev ${OWNER}/rig-demo --gateway http://localhost:3000`,
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: 'Copy clone command' }));
+      expect(writeText).toHaveBeenCalledWith(
+        `rig clone wss://relay.devnet.toonprotocol.dev ${OWNER}/rig-demo --gateway http://localhost:3000`,
+      );
+      await waitFor(() => {
+        expect(
+          screen.getByRole('button', { name: /copy clone command — copied/i }),
+        ).toBeInTheDocument();
+      });
+    });
+
+    it('the popover keeps the public-gateway command when nothing is configured', () => {
+      vi.stubEnv('VITE_ARWEAVE_GATEWAY', '');
+      render(<CloneInstructions metadata={createRepoMetadata({ repoId: 'rig-demo' })} />);
+      openPopover();
+
+      const box = document.querySelector('pre');
+      expect(box?.textContent).not.toContain('--gateway');
+      expect(box?.getAttribute('title')).toBe(
+        `rig clone wss://relay.devnet.toonprotocol.dev ${OWNER}/rig-demo`,
+      );
+    });
   });
 
   it('notes that reads are free and links the rig CLI docs', () => {
