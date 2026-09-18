@@ -129,6 +129,18 @@ export function buildCiJobResultsFilter(ownerPubkey: string, repoId: string): No
 }
 
 /**
+ * The Live Log Tail (39841) of ONE run (rig#194).
+ *
+ * Scoped to the run being viewed, never opened alongside the repo-wide run
+ * list: a list has no use for log bytes and would pay to receive them. The
+ * event is addressable, so the relay hands back the latest version — a viewer
+ * arriving four minutes into a five-minute job sees the current tail at once.
+ */
+export function buildCiLiveLogTailFilter(coordinatorPubkey: string, runId: string): NostrFilter {
+  return { kinds: [39841], authors: [coordinatorPubkey], '#d': [runId], limit: 1 };
+}
+
+/**
  * Coordinator Advertisements (19843): every coordinator's standing offer, or
  * only the given coordinators' (e.g. the one that published a run).
  */

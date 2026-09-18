@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { Link, useOutletContext, useParams } from 'react-router';
 import type { RepoContext } from '@/app/repo-layout';
 import { useCiRun } from '@/hooks/use-ci-runs';
+import { useLiveLogTail } from '@/hooks/use-live-log-tail';
 import { useProfileCache } from '@/hooks/use-profile-cache';
 import {
   RunStateBadge,
@@ -11,6 +12,7 @@ import {
 import { describeRunState } from '@/components/ci-status-dot';
 import { JobStateBadge } from '@/components/job-state-badge';
 import { jobPageHref } from '@/app/pages/job-detail-page';
+import { RunnerChannelPane } from '@/components/live-tail-pane';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   formatClock,
@@ -244,6 +246,10 @@ export function RunDetailPage() {
     metadata.maintainers
   );
   const { requestProfiles } = useProfileCache();
+  // The run being viewed, and only while it is unfinished (rig#194) — the
+  // run list opens nothing of the sort. The page reads two things off it:
+  // which jobs have demonstrably started, and the runner channel.
+  const liveTail = useLiveLogTail(run);
 
   useEffect(() => {
     if (run) requestProfiles([run.coordinator]);
@@ -273,7 +279,11 @@ export function RunDetailPage() {
   // Every job of the run, from its first in_progress marker onward — the
   // `in-progress` tag lists a job that has not started as readily as one that
   // is executing, so the state comes from deriveRunJobs, not from the tag.
-  const runJobs = deriveRunJobs(run, jobs);
+  const runJobs = deriveRunJobs(
+    run,
+    jobs,
+    liveTail ? { startedJobIds: liveTail.jobs.map((j) => j.jobId) } : {}
+  );
 
   return (
     <div className="space-y-4">
@@ -301,6 +311,7 @@ export function RunDetailPage() {
               : 'Waiting for the coordinator to start jobs…'}
           </div>
         )}
+        {liveTail?.runner && <RunnerChannelPane channel={liveTail.runner} />}
       </div>
     </div>
   );
