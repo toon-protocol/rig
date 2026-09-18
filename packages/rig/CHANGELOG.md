@@ -1,5 +1,220 @@
 # @toon-protocol/rig
 
+## 4.7.0
+
+### Minor Changes
+
+- 5ef8a23: Live Log Tail kind 39841: the wire shape and the numbers it rests on (#188).
+
+  A run is a black box while it happens — nothing about a job reaches a viewer
+  until the Job Result lands. The first piece of fixing that is one agreed event:
+  `kind:39841`, rig's addressable NIP-C1 extension carrying the recent output of
+  a run's unfinished jobs plus the runner channel. Its `d` is the run's Workflow
+  Progress `d`, so a client holding a run addresses its tail without a second
+  lookup; its tags are the run's own common and trigger-context tags plus a
+  NIP-40 `expiration` no more than 30 minutes out. `content` is JSON — `jobs` of
+  `{ job, tail, omitted }` and an optional `runner` — because several tails need
+  structure. `parseCiLiveLogTail` ignores fields it does not know so a later rig
+  can add to the shape, and returns `null` rather than throwing or half-parsing
+  on anything the shape does not allow.
+
+  The kind is documented for client authors at
+  `docs/specs/nip-c1-live-log-tail.md` as rig's extension, offered upstream to
+  ngit-ci, and the decisions behind it land as ADR-0002 (the live log tail as an
+  extension kind) and ADR-0003 (bounded job log uploads).
+
+  Four constants that later slices must agree on are exported from the one place
+  the wire shape lives: `CI_LIVE_LOG_TAIL_INTERVAL_MS` (the 10-second cadence),
+  `CI_LIVE_LOG_TAIL_JOB_BYTES` (16 KiB per live job),
+  `CI_LIVE_LOG_TAIL_MAX_BYTES` (the per-event ceiling) and
+  `CI_RUNNER_CHANNEL_KEY` (the reserved non-job key). `liveLogTailBudget`,
+  `liveLogTailEventBudget` and `sliceLogTail` do the arithmetic that goes with
+  them, so the coordinator that publishes the stream and the estimate that prices
+  it cannot disagree about a number.
+
+  Wire shape only: nothing publishes or consumes the kind yet.
+
+### Patch Changes
+
+- e83c878: Bound what the coordinator uploads as a job log (#189).
+
+  The coordinator uploaded each job's complete log to the store and put the
+  resulting gateway URL in the Job Result's `logs` tag, with nothing capping
+  it: a job that left `set -x` on inside a loop wrote an unbounded blob to
+  permanent, paid storage. Per ADR-0003, the coordinator now caps what it
+  uploads at 1 MiB — a log under the cap goes up whole, exactly as before; a
+  log over the cap goes up as its head, an explicit marker naming the number
+  of omitted bytes, and its tail. It never uploads more than the cap.
+  Redaction is unchanged and still runs on the whole log before the cap is
+  applied, so an injected secret is absent whether it falls in the kept head,
+  the kept tail, or the omitted middle.
+
+  The `logs` tag's meaning narrows from "the complete log" to "the job log,
+  bounded" — done now, before a population of URLs promising the whole log
+  exists.
+
+  `estimateRunCost`'s per-upload envelope is now this same cap
+  (`LOG_UPLOAD_CAP_BYTES`) instead of a 64 KiB guess the actual upload could
+  exceed by orders of magnitude, so the affordability estimate is an actual
+  bound.
+
+  The Job Result's own 4 KiB log tail and its `logs` URL are unchanged.
+
+- ed00b73: Budget the live log stream before the run starts (#192).
+
+  The coordinator's affordability check must never let a run begin that it
+  cannot afford to finish publishing, and streaming a live log tail adds to
+  that obligation. `estimateRunCost` now folds in the worst case from
+  ADR-0002: a tail republication on every 10-second cadence tick for the
+  whole run timeout, plus the one final replacement —
+  `liveLogTailEventBudget(runTimeoutMs)` from #188, so the two tickets can
+  never disagree on the number. `makeAffordabilityCheck` takes the
+  coordinator's own run timeout and prices every estimate against it.
+
+  The addition is deliberately a function of run duration alone: a repo's
+  own build output cannot move it, and a workflow with many jobs costs no
+  more to stream than one with a single job, because the tail is one
+  addressable event per run rather than one per job. There is no
+  best-effort mode — a coordinator that cannot afford the full worst case
+  declines to start the run and says so, exactly as it already does for a
+  run it cannot afford outright.
+
+  This lands before the coordinator publishes any live log tail (#193), so
+  there is never a commit where it publishes events it did not already
+  price.
+
+- 86c66bd: README: the two act behaviours a real CI workflow hits (#178).
+
+  The `rig ci` section explained the control plane but not the job container, so
+  the first workflow that did actual work went red twice. It now says, next to
+  the `ci serve` flag table: write `actions/checkout@v4` exactly as you would on
+  GitHub — act copies the materialized tree in _at that step_ and short-circuits
+  it to a local copy, so it needs no network and no node in the image, and a
+  workflow without the step runs its tools against an empty container (`could
+not find Cargo.toml in /…/work/<repo>-<sha>-1`); and `ubuntu-latest` maps to
+  `catthehacker/ubuntu:act-latest`, which is not GitHub's hosted runner and
+  carries no language toolchain, so a workflow expecting a preinstalled `cargo`,
+  `go` or JDK fails at its first step unless `--platform` names an image that has
+  one (the official `rust` images ship neither rustfmt nor clippy, and a locally
+  built image is not usable until #175 lands). A worked Rust workflow carries
+  both. Docs only, no behaviour change.
+
+- 528388b: `rig ci serve` takes `--pull` / `--no-pull` (#175).
+
+  `ActRunnerOptions.pull` already appended `--pull=false` to act's argv, but
+  nothing on the `rig ci serve` command line could set it, so every run
+  force-pulled the image named by `--platform`. A runner image built or loaded on
+  the coordinator host — the normal way to give jobs a toolchain without paying
+  for a download on every run — was therefore unusable: each job failed in _Set up
+  job_ with `pull access denied`, and that failure is what got published to the
+  relay as the Job Result. act's own `.actrc` was no escape hatch either, since
+  act runs with the freshly materialized checkout as its working directory.
+
+  `--no-pull` now runs the image already on the host; `--pull` states act's
+  default explicitly, and act's own spelling of the same thing (`--pull=false` /
+  `--pull=true`) is accepted. Giving both flags is a usage error, and giving
+  neither leaves act's default untouched.
+
+- f0afbfd: The coordinator publishes the live log tail while a run is in flight (#193).
+
+  A run stops being a black box on the relay. The coordinator now passes a
+  streaming log sink into the runner — the `Runner.onLog` seam `ActRunner` has
+  always called and no coordinator ever supplied — accumulates what it prints
+  per job, with the runner channel (`~runner`) as a distinguished non-job key
+  for output the runner attributes to no job, and republishes one addressable
+  Live Log Tail (kind 39841, `d` = the run id) for the whole run on the fixed
+  cadence of ADR-0002. A viewer arriving four minutes into a five-minute job
+  sees the current tail immediately, because the relay serves an addressable
+  event's latest version.
+
+  A job appears while it is unfinished and drops out once its Job Result names
+  its durable job log. Each live entry's tail is sliced from the END of its
+  output with `omitted` counting everything before it, and when enough entries
+  are live to threaten the per-event ceiling they share the budget evenly
+  rather than exceeding it.
+
+  Redaction comes first and slicing second: the whole accumulated buffer is
+  redacted exactly as the durable path redacts a job log, and the tail is cut
+  out of the result. A secret written across a refresh boundary — or across a
+  slice boundary — was therefore already replaced before the slice was taken.
+
+  The cadence runs on the coordinator's existing scheduler seam and stops when
+  the runner returns, since only `runner.run` is bounded by the run timeout; at
+  the run's conclusion the event is replaced once more with the closing output
+  that never got a Job Result (a timed-out run's jobs, and the runner channel's
+  account of why), and then left to expire under NIP-40. A run never publishes
+  more of these events than `liveLogTailEventBudget(timeoutMs)` — the worst
+  case `estimateRunCost` priced before the run started (#192) — and a
+  coordinator that cannot afford a run publishes no tail at all, because it
+  never starts it. A run that concludes inside a single cadence interval has
+  nothing on the relay to replace and publishes none.
+
+  The durable path is untouched: the same job results, job logs, progress
+  markers and workflow result as before.
+
+  `FakeRunner` no longer replays a job's log through `onLog` when the script
+  already streamed that job, which would have double-emitted every byte.
+
+- c0156eb: Point the Git-SHA GraphQL fallback at the configured gateway (#183).
+
+  A kind:30618 object map is capped (#162), so a SHA it does not carry is
+  resolved by asking a gateway's GraphQL endpoint which transaction carries
+  that object. That lookup went through `@toon-protocol/arweave`'s shared
+  `resolveGitSha`, whose only endpoint is `https://arweave.net/graphql` — so
+  after #176 gave the read path a gateway override, this one read still left
+  the configured permaweb: on a self-hosted, local or air-gapped stack it
+  either failed or, worse, answered about a _different_ network.
+
+  `rig clone`, `rig fetch` and `rig ci serve` now hand `fetchRemoteState` a
+  resolver bound to the gateway they were given (`--gateway`, else
+  `RIG_ARWEAVE_GATEWAY`), which asks `<gateway>/graphql` and nothing else; the
+  same applies to the state reads behind the standalone commands. Configure
+  nothing and it is the shared `arweave.net` resolver itself, unchanged.
+
+  Object bytes keep the public gateway list behind the configured one — they
+  are content-addressed and SHA-verified, so any mirror may serve them. A tag
+  query is an unverifiable statement about one network, so it goes only to the
+  network you named: a gateway that serves no GraphQL resolves nothing, which
+  surfaces as the read pipeline's honest "missing objects" report rather than a
+  silent cross-network read. rig's resolver cache is keyed by endpoint as well
+  as by sha and repo, so a sandbox answer can never be served to a mainnet
+  query in the same process.
+
+- 8ce0d22: Give the read path the gateway override the write path already had (#176).
+
+  `RIG_ARWEAVE_GATEWAY` / `--gateway` steered `rig push`, `rig site` and
+  `rig ci serve`, but `rig clone` and `rig fetch` resolved object bytes through
+  the gateway list baked into `@toon-protocol/arweave` with no override — so a
+  repository whose objects live only on a self-hosted, local or air-gapped
+  gateway could be pushed but never cloned back (reading your own repo on the
+  dev sandbox took a `globalThis.fetch` monkey-patch).
+
+  `rig clone` and `rig fetch` now accept `--gateway <url>`, defaulting to
+  `RIG_ARWEAVE_GATEWAY`. The configured gateway is tried FIRST, on the store's
+  raw-bytes route `<gateway>/raw/<txId>` — the same route and ordering
+  `rig ci serve --gateway` uses to materialize a commit — with the public
+  gateway list kept behind it as the fallback. With nothing configured the read
+  path is byte-for-byte what it was: the shared public list, untouched.
+
+  The selection now lives in one place (`gateway-preference.ts`:
+  `configuredGateway` / `readGateways` / `readGatewaysFor`), which `rig ci serve`
+  also uses, so the three commands cannot drift apart.
+
+- ec7d9f7: ActRunner routes backend output to the runner channel instead of dropping it (#191).
+
+  `ActRunner` dropped any line from `act` that did not parse as act JSON before
+  the streaming log sink (`onLog`) ever saw it — exactly the output an image
+  pull failure, a Docker daemon refusing to start, or act itself crashing
+  produces. Per ADR-0002, that output is now routed to `onLog` under the
+  runner channel (`CI_RUNNER_CHANNEL_KEY`) instead of being dropped, alongside
+  the container cleanup notes the runner channel already carried after a
+  timeout or cancellation.
+
+  The runner channel is not a job: it carries no result, never concludes, and
+  never appears in the runner's returned `jobs`. Output that parses as act
+  JSON is unaffected, and the durable path — `summarizeActRun`, the job logs
+  and conclusions the runner returns — is unchanged.
+
 ## 4.6.0
 
 ### Minor Changes
