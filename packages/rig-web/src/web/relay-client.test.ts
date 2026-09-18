@@ -397,6 +397,28 @@ describe('subscribeRelay - keeps the REQ open after EOSE', () => {
     }
   });
 
+  it('[P0] ignores the error a closed-while-connecting socket fires (StrictMode remount)', async () => {
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    MockWebSocket.instances = [];
+    try {
+      const errors: string[] = [];
+      const sub = subscribeRelay('wss://mock.example', { kinds: [39842] }, () => {}, undefined, {
+        onError: (err) => errors.push(err.message),
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      const ws = MockWebSocket.instances[0];
+      if (!ws) throw new Error('no socket opened');
+
+      sub.close();
+      // The browser tears the socket down and fires `error` on the way out.
+      ws.onerror?.(new Event('error'));
+
+      expect(errors).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('[P2] reconnects once with a fresh REQ when the relay drops the socket', async () => {
     vi.stubGlobal('WebSocket', MockWebSocket);
     MockWebSocket.instances = [];

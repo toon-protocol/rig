@@ -590,6 +590,15 @@ export function subscribeRelay(
     };
 
     socket.onerror = (event: Event) => {
+      // A socket the caller already closed — or one this subscription has
+      // replaced by reconnecting — still fires `error` when the browser tears
+      // down a CONNECTING socket ("closed before the connection is
+      // established"). Reporting that would poison the LIVE subscription's
+      // state: under React StrictMode the mount/cleanup/mount cycle closes the
+      // first socket while it connects, and the error arrived after the second
+      // one had already loaded its events, so the Actions view rendered
+      // "Failed to load workflow runs" over data it in fact had.
+      if (closed || ws !== socket) return;
       const detail = 'message' in event ? String((event as ErrorEvent).message) : 'unknown';
       options.onError?.(new Error(`WebSocket error on ${relayUrl}: ${detail}`));
     };
