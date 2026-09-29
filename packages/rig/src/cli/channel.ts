@@ -2,36 +2,42 @@
  * `rig channel` — the payment channels paid rig commands hold (#262), plus
  * the explicit money lifecycle (#263): open / close / settle.
  *
- * Paid commands open a channel lazily on first use and RECORD it in the
- * peer→channel map under `TOON_CLIENT_HOME` (default `~/.toon-client`,
- * `rig-channels.json`), so later invocations resume the same channel instead
- * of opening (and funding) a new one per run. `rig channel list` reads that
- * map plus the client's nonce-watermark store (`channels.json`) and shows
- * current holdings — a FREE command: local files only, no client start, no
- * network, no payment (and therefore no `@toon-protocol/client` import).
+ * Paid commands pay from an x402 `batch-settlement` channel (client 4.x,
+ * connector ADR 0075) that the client opens on first use and resumes from its
+ * own store; `rig channel open` RECORDS it in the peer→channel map under
+ * `TOON_CLIENT_HOME` (default `~/.toon-client`, `rig-channels-x402.json`).
+ * `rig channel list` reads that map plus the client's voucher watermark store
+ * (`channels-x402.json`) and shows current holdings: a FREE command: local
+ * files only, no client start, no network, no payment (and therefore no
+ * `@toon-protocol/client` import). A client 3.x rig's `rig-channels.json` and
+ * `channels.json` are never read; `list` names them when present.
  *
  * The lifecycle subcommands are ON-CHAIN wallet operations (gas + collateral
  * movement, not relay claims), so they follow the push confirm idiom: print
  * what will happen, then require `--yes` (mandatory in a non-TTY session) or
  * an interactive y/N confirm; `--json` without `--yes` is a pure plan.
  *
- *   open    the SAME resume-or-open path lazy paid writes use (factored, not
- *           forked): resumes the recorded channel when one is live, else
- *           opens + records a fresh one; `--deposit` adds collateral on top.
- *   close   starts the settlement challenge window for a recorded channel —
- *           the channel stops paying immediately; collateral is released by
- *           `settle` once the window elapses.
- *   settle  releases the remaining collateral after the challenge window
- *           (the client refuses a too-early settle BEFORE spending gas).
+ *   open    the channel lazy paid writes draw on: resumes the client's open
+ *           channel when there is one, else opens + records a fresh one;
+ *           `--deposit` adds collateral on top (Base only: a Solana channel
+ *           is replaced, never topped up).
+ *   close   starts the exit window of a recorded channel (and of every other
+ *           channel still open with the node): the channel stops paying
+ *           immediately; collateral is released by `settle` once the window
+ *           elapses.
+ *   settle  releases the remaining collateral after the exit window (a
+ *           too-early settle sends nothing).
  *
  * close/settle recover deposits stranded by pre-#262 one-channel-per-run
  * behaviour: any channel present in the map can be driven to settled.
  */
 
 import { parseArgs } from 'node:util';
+import { dirname } from 'node:path';
 import {
   channelStatus,
   ChannelMapStore,
+  legacyChannelFiles,
   resolveChannelPaths,
   type ChannelMapRecord,
   type WatermarkEntry,
@@ -50,37 +56,41 @@ import type { StandaloneMoneyOps } from '../standalone/money.js';
 
 export const CHANNEL_USAGE = `Usage: rig channel <subcommand>
 
-Manage the payment channels paid rig commands hold with relay/store peers.
-Paid commands open a channel lazily on first use and record it under
-TOON_CLIENT_HOME (default ~/.toon-client, rig-channels.json), so later
-invocations resume the same channel instead of opening a new one per run.
+Manage the x402 payment channels paid rig commands pay a node from. Every
+paid packet carries a voucher naming the channel's running total (client 4.x).
+Paid commands open a channel on first use and resume it from the client's
+store (TOON_CLIENT_HOME, default ~/.toon-client, channels-x402.json);
+\`rig channel open\` also records it in rig-channels-x402.json there.
 
 Subcommands:
   list [--json]    show recorded channels — peer, chain, channel id, deposit,
-                   cumulative claimed, status. Free: reads local state only.
+                   cumulative signed, status. Free: reads local state only.
 
   open [--peer <ilp-destination>] [--deposit <base-units>]
-                   explicitly open the payment channel for a peer — the SAME
-                   path paid commands use lazily: resumes the recorded live
-                   channel if one exists (no on-chain spend), else opens and
-                   records a fresh one (locks the peer-negotiated initial
-                   deposit on-chain). --peer is the ILP destination to anchor
-                   to (default: the configured destination, e.g. the devnet
-                   apex); --deposit adds that much extra collateral after the
-                   open/resume. On-chain: asks for confirmation (--yes skips).
+                   explicitly open the channel paid commands draw on: resumes
+                   the client's open channel if there is one (no on-chain
+                   spend), else opens and records a fresh one, locking the
+                   configured deposit (TOON_CLIENT_DEPOSIT) from your wallet.
+                   On Solana the node sponsors the open (USDC, no SOL).
+                   --peer is the ILP destination to record it under (default:
+                   the configured publish destination); --deposit adds that
+                   much extra collateral after the open/resume (Base only: a
+                   Solana channel is replaced when it runs out, never topped
+                   up). Asks for confirmation (--yes skips).
 
   close <channelId>
-                   close a recorded channel — an on-chain tx that starts the
-                   settlement challenge window (the peer's settlementTimeout).
-                   The channel stops paying immediately; the remaining
+                   close a recorded channel: an on-chain tx (Solana
+                   request_close, Base timed withdrawal) that starts its exit
+                   window, and that of every other channel still open with the
+                   node. The channel stops paying immediately; the remaining
                    collateral stays locked until \`rig channel settle\` after
                    the window elapses. Asks for confirmation (--yes skips).
 
   settle <channelId>
-                   settle a closed channel once its challenge window elapsed —
-                   an on-chain tx that releases the remaining collateral back
-                   to your wallet. Refused (without spending gas) while the
-                   window is still open. Asks for confirmation (--yes skips).
+                   settle a closed channel once its exit window elapsed: an
+                   on-chain tx that releases the remaining collateral back to
+                   your wallet. Nothing is sent while the window is still
+                   open. Asks for confirmation (--yes skips).
 
 Common options: --json (machine-readable envelopes; without --yes lifecycle
 commands emit a pure plan and execute nothing), --yes, -h/--help.`;
@@ -102,7 +112,6 @@ interface ChannelJson {
   tokenNetwork: string;
   depositTotal: string | null;
   cumulativeClaimed: string | null;
-  nonce: number | null;
   status: 'open' | 'closing' | 'settleable' | 'settled';
   openedAt: string;
   lastUsedAt: string;
@@ -170,11 +179,23 @@ function runChannelList(args: string[], deps: ChannelDeps): number {
     const store = new ChannelMapStore(paths);
     const records = store.list();
     const rows = records.map((record) => describeChannel(record, store));
+    // A client 3.x rig's toon-channel files: never read, only named, so a
+    // deposit they record is not mistaken for gone.
+    const legacy = legacyChannelFiles(dirname(paths.mapPath));
+    const legacyNote =
+      `client 3.x toon-channel state not shown: ${legacy.join(', ')} ` +
+      '(its deposits are left to the rig that opened them: ' +
+      '`npm i -g @toon-protocol/rig@4.7.0`, then `rig channel close`)';
 
     if (json) {
-      io.emitJson({ command: 'channel list', channels: rows });
+      io.emitJson({
+        command: 'channel list',
+        channels: rows,
+        ...(legacy.length > 0 ? { legacyStateFiles: legacy } : {}),
+      });
       return 0;
     }
+    if (legacy.length > 0) io.err(`rig: ${legacyNote}`);
     if (rows.length === 0) {
       io.out(
         'No payment channels recorded — paid rig commands (push, issue, ' +
@@ -214,7 +235,6 @@ function describeChannel(
     tokenNetwork: record.tokenNetwork,
     depositTotal: record.depositTotal ?? null,
     cumulativeClaimed: watermark?.cumulativeAmount ?? null,
-    nonce: watermark?.nonce ?? null,
     status: channelStatus(watermark),
     openedAt: record.openedAt,
     lastUsedAt: record.lastUsedAt,
@@ -224,8 +244,8 @@ function describeChannel(
 function renderChannel(row: ChannelJson): string[] {
   const claimed =
     row.cumulativeClaimed === null
-      ? 'unknown (no local claim state)'
-      : `${row.cumulativeClaimed} base units (nonce ${row.nonce})`;
+      ? 'unknown (no local voucher state)'
+      : `${row.cumulativeClaimed} base units signed`;
   return [
     `channel ${row.channelId} [${row.status}]`,
     `  peer        ${row.destination} (${row.peerId})`,
@@ -438,7 +458,9 @@ async function runChannelOpen(
         ? `Resumed recorded channel ${outcome.channelId} — no on-chain open was needed.`
         : `Opened channel ${outcome.channelId}${outcome.chain ? ` on ${outcome.chain}` : ''} and recorded it for reuse.`
     );
-    io.out(`  peer        ${outcome.destination}${outcome.peerId ? ` (${outcome.peerId})` : ''}`);
+    io.out(
+      `  peer        ${outcome.destination}${outcome.peerId ? ` (${outcome.peerId})` : ''}`
+    );
     if (outcome.depositAdded) {
       io.out(
         `  deposited   +${outcome.depositAdded} base units` +
@@ -588,7 +610,9 @@ async function runChannelWithdrawStep(
     if (!json) {
       const claimed = watermark?.cumulativeAmount;
       io.out(`Channel ${step} plan:`);
-      io.out(`  channel     ${channelId} [${channelStatus(watermark, nowSec)}]`);
+      io.out(
+        `  channel     ${channelId} [${channelStatus(watermark, nowSec)}]`
+      );
       io.out(`  peer        ${record.destination} (${record.peerId})`);
       io.out(`  chain       ${record.chain}`);
       io.out(

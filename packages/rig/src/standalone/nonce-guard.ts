@@ -1,14 +1,15 @@
 /**
  * Nonce-ownership guard for the STANDALONE embedded Publisher (#228).
  *
- * Why this exists: a payment channel's balance proof is a CUMULATIVE
- * watermark — the ChannelManager auto-increments the nonce and cumulative
- * amount on every `signBalanceProof`. Two writers signing claims on the same
- * channel from separate processes (a running `toon-clientd` daemon plus a
- * standalone embedded client, or two standalone processes) each keep their
- * own cumulative counter, so their claims race: the connector sees
- * non-monotonic watermarks and a re-signed claim can double-charge (the
- * hazard documented in packages/rig-web/tests/e2e/seed/lib/publish.ts).
+ * Why this exists: every x402 voucher names the channel's CUMULATIVE total
+ * (client 4.x, connector ADR 0075; the nonce of the 3.x toon-channel claims
+ * is gone), and the connector accepts one only if it exceeds the last by at
+ * least the charge. Two writers signing vouchers on the same channel from
+ * separate processes (a running `toon-clientd` daemon plus a standalone
+ * embedded client, or two standalone processes) each keep their own running
+ * total, so their vouchers race: the connector refuses the one that does not
+ * advance, and a re-signed total can double-charge (the hazard documented in
+ * packages/rig-web/tests/e2e/seed/lib/publish.ts).
  *
  * Two independent defenses, both keyed by the Nostr pubkey (one identity =
  * one channel set):

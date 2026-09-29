@@ -1,11 +1,12 @@
 /**
- * The paid write path on `@toon-protocol/client` 2.x — a {@link Publisher}
+ * The paid write path on `@toon-protocol/client` 4.x: a {@link Publisher}
  * that pays a TOON connector per request.
  *
  * Everything a paid command needs comes from one connector URL: the client
- * reads the node's own `GET /ilp` (addresses, prices, settlement chains,
- * sealing key — connector ADR 0050), opens or adopts a payment channel, and
- * pays each request with a signed claim. There is no relay to discover peers
+ * reads the node's own `GET /ilp` (addresses, prices, x402 batch-settlement
+ * terms, sealing key: connector ADR 0050), opens or resumes an x402 channel,
+ * and pays each request with a signed voucher for the running total
+ * (connector ADR 0075). There is no relay to discover peers
  * on (kind:10032 was removed by ADR 0046) and no topology to negotiate: a
  * destination is a route the node prices, and `send()` pays what the route
  * costs — including the per-kibibyte part of an ADR 0065 schedule, which the
@@ -85,7 +86,7 @@ export interface RouteTerms {
   pricePerKib?: bigint;
 }
 
-/** The slice of `ToonClient` (2.x) this publisher needs. */
+/** The slice of `ToonClient` (4.x) this publisher needs. */
 export interface PaidClientLike {
   send(
     destination: string,
@@ -290,7 +291,7 @@ export class ConnectorPublisher implements Publisher {
     );
   }
 
-  /** One paid kind:5094 write; returns the tx id and what the claim spent. */
+  /** One paid kind:5094 write; returns the tx id and what the voucher spent. */
   private async storeWrite(
     tags: string[][],
     bodyBytes: number,

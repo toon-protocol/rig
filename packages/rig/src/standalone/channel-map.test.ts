@@ -21,6 +21,8 @@ import {
   channelStatus,
   counterpartyMatch,
   recordKey,
+  isToonChannelStore,
+  legacyChannelFiles,
   resolveChannelPaths,
   sameSettlementAddress,
   type ChannelMapRecord,
@@ -297,13 +299,23 @@ describe('channelStatus', () => {
     expect(channelStatus({ nonce: 1, cumulativeAmount: '5' })).toBe('open');
     expect(
       channelStatus(
-        { nonce: 1, cumulativeAmount: '5', closedAt: '100', settleableAt: '200' },
+        {
+          nonce: 1,
+          cumulativeAmount: '5',
+          closedAt: '100',
+          settleableAt: '200',
+        },
         150
       )
     ).toBe('closing');
     expect(
       channelStatus(
-        { nonce: 1, cumulativeAmount: '5', closedAt: '100', settleableAt: '200' },
+        {
+          nonce: 1,
+          cumulativeAmount: '5',
+          closedAt: '100',
+          settleableAt: '200',
+        },
         200
       )
     ).toBe('settleable');
@@ -335,8 +347,8 @@ describe('resolveChannelPaths', () => {
 
   it('defaults both files under TOON_CLIENT_HOME', () => {
     expect(resolveChannelPaths({ TOON_CLIENT_HOME: dir })).toEqual({
-      mapPath: join(dir, 'rig-channels.json'),
-      watermarkPath: join(dir, 'channels.json'),
+      mapPath: join(dir, 'rig-channels-x402.json'),
+      watermarkPath: join(dir, 'channels-x402.json'),
     });
   });
 
@@ -355,5 +367,60 @@ describe('resolveChannelPaths', () => {
     expect(() => resolveChannelPaths({ TOON_CLIENT_HOME: dir })).toThrow(
       /failed to read client config/
     );
+  });
+});
+
+describe('client 3.x channel files', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'rig-legacy-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('legacyChannelFiles names only the 3.x files that exist', () => {
+    expect(legacyChannelFiles(dir)).toEqual([]);
+    writeFileSync(join(dir, 'channels.json'), '{}');
+    writeFileSync(join(dir, 'channels-x402.json'), '{}');
+    expect(legacyChannelFiles(dir)).toEqual([join(dir, 'channels.json')]);
+    writeFileSync(join(dir, 'rig-channels.json'), '{}');
+    expect(legacyChannelFiles(dir)).toEqual([
+      join(dir, 'rig-channels.json'),
+      join(dir, 'channels.json'),
+    ]);
+  });
+
+  it('isToonChannelStore: a moved nonce or a binding without x402 config', () => {
+    const store = join(dir, 'store.json');
+    expect(isToonChannelStore(store)).toBe(false);
+    // What client 4.x writes: nonce 0, bindings carrying batchSettlement.
+    writeFileSync(
+      store,
+      JSON.stringify({ ch: { nonce: 0, cumulativeAmount: '3000' } })
+    );
+    writeFileSync(
+      join(dir, 'store.peers.json'),
+      JSON.stringify({
+        'batch|u|n|a': { channelId: 'ch', batchSettlement: {} },
+      })
+    );
+    expect(isToonChannelStore(store)).toBe(false);
+    // A 3.x watermark: the nonce moved.
+    writeFileSync(
+      store,
+      JSON.stringify({ old: { nonce: 58, cumulativeAmount: '5825460' } })
+    );
+    expect(isToonChannelStore(store)).toBe(true);
+    // A 3.x binding on a never-used channel: no x402 config.
+    writeFileSync(
+      store,
+      JSON.stringify({ old: { nonce: 0, cumulativeAmount: '0' } })
+    );
+    writeFileSync(
+      join(dir, 'store.peers.json'),
+      JSON.stringify({ 'g.drew|solana': { channelId: 'old' } })
+    );
+    expect(isToonChannelStore(store)).toBe(true);
   });
 });

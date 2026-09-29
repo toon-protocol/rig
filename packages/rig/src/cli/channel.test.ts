@@ -174,8 +174,8 @@ describe('rig channel', () => {
 
   function seedStore(overrides: Partial<ChannelMapRecord> = {}): void {
     const store = new ChannelMapStore({
-      mapPath: join(dir, 'rig-channels.json'),
-      watermarkPath: join(dir, 'channels.json'),
+      mapPath: join(dir, 'rig-channels-x402.json'),
+      watermarkPath: join(dir, 'channels-x402.json'),
     });
     store.record({
       channelId: CHANNEL_ID,
@@ -194,9 +194,9 @@ describe('rig channel', () => {
       ...overrides,
     });
     writeFileSync(
-      join(dir, 'channels.json'),
+      join(dir, 'channels-x402.json'),
       JSON.stringify({
-        [CHANNEL_ID]: { nonce: 15, cumulativeAmount: '16120' },
+        [CHANNEL_ID]: { nonce: 0, cumulativeAmount: '16120' },
       })
     );
   }
@@ -204,7 +204,7 @@ describe('rig channel', () => {
   /** Overwrite the watermark entry for CHANNEL_ID. */
   function seedWatermark(entry: Record<string, unknown>): void {
     writeFileSync(
-      join(dir, 'channels.json'),
+      join(dir, 'channels-x402.json'),
       JSON.stringify({ [CHANNEL_ID]: entry })
     );
   }
@@ -220,14 +220,14 @@ describe('rig channel', () => {
       expect(text).toContain('evm:31337');
       expect(text).toContain(`token-network 0x${'22'.repeat(20)}`);
       expect(text).toContain('deposited   100000');
-      expect(text).toContain('claimed     16120 base units (nonce 15)');
+      expect(text).toContain('claimed     16120 base units signed');
       expect(h.err).toEqual([]);
     });
 
     it('shows the withdraw status from the watermark timers', async () => {
       seedStore();
       seedWatermark({
-        nonce: 15,
+        nonce: 0,
         cumulativeAmount: '16120',
         closedAt: '100',
         settleableAt: '200',
@@ -257,7 +257,6 @@ describe('rig channel', () => {
           tokenNetwork: '0x' + '22'.repeat(20),
           depositTotal: '100000',
           cumulativeClaimed: '16120',
-          nonce: 15,
           status: 'open',
           openedAt: expect.stringContaining('T') as unknown,
           lastUsedAt: expect.stringContaining('T') as unknown,
@@ -280,14 +279,45 @@ describe('rig channel', () => {
 
     it('a channel with no watermark entry shows unknown claim state', async () => {
       seedStore();
-      rmSync(join(dir, 'channels.json'));
+      rmSync(join(dir, 'channels-x402.json'));
       const h = makeHarness({ TOON_CLIENT_HOME: dir });
       expect(await runChannel(['list'], h.deps)).toBe(0);
-      expect(h.out.join('\n')).toContain('unknown (no local claim state)');
+      expect(h.out.join('\n')).toContain('unknown (no local voucher state)');
+    });
+
+    it("names a client 3.x rig's toon-channel files without reading them", async () => {
+      seedStore();
+      // A 3.x map that would parse as ours: it must not be listed.
+      writeFileSync(
+        join(dir, 'rig-channels.json'),
+        JSON.stringify({
+          version: 1,
+          channels: { x: { channelId: 'legacy-3x-channel' } },
+        })
+      );
+      writeFileSync(join(dir, 'channels.json'), '{}');
+      const h = makeHarness({ TOON_CLIENT_HOME: dir });
+      expect(await runChannel(['list'], h.deps)).toBe(0);
+      expect(h.out.join('\n')).not.toContain('legacy-3x-channel');
+      expect(h.err.join('\n')).toContain(
+        'client 3.x toon-channel state not shown'
+      );
+      expect(h.err.join('\n')).toContain(join(dir, 'rig-channels.json'));
+      const j = makeHarness({ TOON_CLIENT_HOME: dir });
+      expect(await runChannel(['list', '--json'], j.deps)).toBe(0);
+      const parsed = JSON.parse(j.out.join('\n')) as {
+        channels: unknown[];
+        legacyStateFiles?: string[];
+      };
+      expect(parsed.channels).toHaveLength(1);
+      expect(parsed.legacyStateFiles).toEqual([
+        join(dir, 'rig-channels.json'),
+        join(dir, 'channels.json'),
+      ]);
     });
 
     it('a corrupt store file is a clear error (exit 1), also under --json', async () => {
-      writeFileSync(join(dir, 'rig-channels.json'), 'not-json{');
+      writeFileSync(join(dir, 'rig-channels-x402.json'), 'not-json{');
       const h = makeHarness({ TOON_CLIENT_HOME: dir });
       expect(await runChannel(['list'], h.deps)).toBe(1);
       expect(h.err.join('\n')).toMatch(/corrupt/);
@@ -542,7 +572,7 @@ describe('rig channel', () => {
     it('an already-closing channel is refused with a settle hint (no client start)', async () => {
       seedStore();
       seedWatermark({
-        nonce: 15,
+        nonce: 0,
         cumulativeAmount: '16120',
         closedAt: '100',
         settleableAt: '99999999999',
@@ -560,7 +590,7 @@ describe('rig channel', () => {
     it('an already-settled channel is refused', async () => {
       seedStore();
       seedWatermark({
-        nonce: 15,
+        nonce: 0,
         cumulativeAmount: '16120',
         closedAt: '100',
         settleableAt: '200',
@@ -627,7 +657,7 @@ describe('rig channel', () => {
     function seedSettleable(): void {
       seedStore();
       seedWatermark({
-        nonce: 15,
+        nonce: 0,
         cumulativeAmount: '16120',
         closedAt: '100',
         settleableAt: '200',
@@ -683,7 +713,7 @@ describe('rig channel', () => {
       seedStore();
       const future = String(Math.floor(Date.now() / 1000) + 500);
       seedWatermark({
-        nonce: 15,
+        nonce: 0,
         cumulativeAmount: '16120',
         closedAt: '100',
         settleableAt: future,
@@ -721,7 +751,7 @@ describe('rig channel', () => {
     it('an already-settled channel is refused', async () => {
       seedStore();
       seedWatermark({
-        nonce: 15,
+        nonce: 0,
         cumulativeAmount: '16120',
         closedAt: '100',
         settleableAt: '200',

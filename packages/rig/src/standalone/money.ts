@@ -52,27 +52,27 @@ export interface WalletChainBalanceInfo {
 /** Receipt of an explicit `rig channel open` (fresh open OR resume). */
 export interface ChannelOpenOutcome {
   channelId: string;
-  /** True when the recorded channel was resumed (no on-chain open). */
+  /** True when the recorded channel was resumed (no open). */
   resumed: boolean;
   /** ILP anchor destination the channel is keyed by in the map. */
   destination: string;
-  /** Negotiated settlement chain, when recorded (e.g. `evm:31337`). */
+  /** The x402 network the channel lives on (e.g. `eip155:8453`). */
   chain?: string;
-  /** Registered peer id, when recorded. */
+  /** The node's sealing key id, when it publishes one. */
   peerId?: string;
   /** On-chain deposit total (base units), when known. */
   depositTotal?: string;
-  /** Extra collateral added by `--deposit` (base units), when any. */
+  /** Extra collateral added by `--deposit` (base units, Base only), when any. */
   depositAdded?: string;
   /** Tx hash of the `--deposit` top-up, when any. */
   depositTxHash?: string;
 }
 
-/** Receipt of a channel close (start of the settlement challenge window). */
+/** Receipt of a channel close (start of the exit window). */
 export interface ChannelCloseOutcome {
   channelId: string;
   txHash?: string;
-  /** Unix SECONDS (string-encoded bigint) the close landed on-chain. */
+  /** Unix SECONDS (string-encoded bigint) the close was started. */
   closedAt: string;
   /** Unix SECONDS (string-encoded bigint) settle becomes possible. */
   settleableAt: string;
@@ -91,15 +91,18 @@ export interface ChannelSettleOutcome {
  */
 export interface StandaloneMoneyOps {
   /**
-   * Explicitly open (or resume) the payment channel for the context's
-   * channel anchor — the SAME resume-or-open path lazy paid writes use, so
-   * the result lands in the #262 peer→channel map. `deposit` adds that much
-   * extra collateral (base units) after the open/resume.
+   * Explicitly open (or resume) the x402 channel with the context's node:
+   * the channel lazy paid writes draw on, so the result lands in the #262
+   * peer→channel map. `deposit` adds that much extra collateral (base units)
+   * after the open/resume; only a Base channel can be topped up.
    */
   openChannel(opts?: { deposit?: bigint }): Promise<ChannelOpenOutcome>;
-  /** Close a recorded channel — starts the on-chain challenge window. */
+  /**
+   * Close a recorded channel: starts its exit window. The client leaves
+   * every channel still open with the node in the same call.
+   */
   closeChannel(record: ChannelMapRecord): Promise<ChannelCloseOutcome>;
-  /** Settle a closed channel after its challenge window — releases funds. */
+  /** Settle a closed channel after its exit window: releases funds. */
   settleChannel(record: ChannelMapRecord): Promise<ChannelSettleOutcome>;
   /**
    * The full multi-chain wallet view (#299) for the identity's configured

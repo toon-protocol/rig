@@ -61,16 +61,15 @@ interface ChannelBalanceJson {
   chain: string;
   status: 'open' | 'closing' | 'settleable' | 'settled';
   depositTotal: string | null;
+  /** The running total the vouchers signed on it name (no nonce: x402). */
   cumulativeClaimed: string | null;
-  nonce: number | null;
   /** depositTotal − cumulativeClaimed, when both are known (floored at 0). */
   available: string | null;
   /**
    * cumulativeClaimed − depositTotal, when both are known (floored at 0).
-   * Non-zero means the cumulative signed claims exceed the recorded on-chain
-   * collateral: the peer accepted (and may keep accepting) claims it cannot
-   * fully redeem on-chain until the deposit is topped up — the on-chain
-   * TokenNetwork caps redemption at the deposit. `available 0` alone cannot
+   * Non-zero means the cumulative signed vouchers exceed the recorded on-chain
+   * collateral: the peer accepted vouchers it cannot fully redeem on-chain:
+   * the batch-settlement channel caps redemption at the deposit. `available 0` alone cannot
    * distinguish "exactly spent" from "overdrawn", hence this field.
    */
   overdrawn: string | null;
@@ -154,7 +153,10 @@ export async function readWalletBounded(
   if (timeoutMs <= 0) return settled;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const guard = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new WalletReadTimeoutError(timeoutMs)), timeoutMs);
+    timer = setTimeout(
+      () => reject(new WalletReadTimeoutError(timeoutMs)),
+      timeoutMs
+    );
   });
   // Don't let the loser reject into an unhandled rejection post-race.
   settled.catch(() => undefined);
@@ -229,7 +231,6 @@ export async function runBalance(
           status: channelStatus(watermark),
           depositTotal: deposited ?? null,
           cumulativeClaimed: claimed ?? null,
-          nonce: watermark?.nonce ?? null,
           available,
           overdrawn,
         };
