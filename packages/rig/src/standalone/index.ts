@@ -1,6 +1,6 @@
 /**
  * `@toon-protocol/rig/standalone` — the embedded Publisher that pays a TOON
- * connector (`@toon-protocol/client` 2.x).
+ * connector (`@toon-protocol/client` 4.x, x402 vouchers).
  *
  * Separate subpath entry so the core package stays light at import time:
  * only this entry needs `@toon-protocol/client`.
@@ -39,10 +39,15 @@ export type {
 
 export {
   ChannelMapCorruptError,
+  CHANNEL_STORE_FILENAME,
   ChannelMapStore,
+  LEGACY_CHANNEL_STORE_FILENAME,
+  LEGACY_RIG_CHANNEL_MAP_FILENAME,
   RIG_CHANNEL_MAP_FILENAME,
   channelStatus,
   counterpartyMatch,
+  isToonChannelStore,
+  legacyChannelFiles,
   recordKey,
   resolveChannelPaths,
   sameSettlementAddress,

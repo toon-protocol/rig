@@ -1,40 +1,45 @@
 /**
  * Peer→channel map for the STANDALONE embedded publisher (#262).
  *
- * Why this exists: `@toon-protocol/client`'s `ChannelManager` persists the
- * off-chain nonce/cumulative-claim watermark (its `ChannelStore`,
- * `channels.json`, keyed by channelId) but keeps the peer→channelId mapping
- * ONLY in memory. So every standalone CLI invocation used to open (and fund)
- * a FRESH on-chain channel — the #260 fresh-outsider e2e stranded five
- * deposits across five commands. This store remembers WHICH channel the
- * identity holds with each peer, keyed by
- * `identity pubkey | ILP anchor (peer/apex destination) | chain | tokenNetwork`,
- * so the next invocation resumes it via `ChannelManager.trackChannel` (which
- * rehydrates the nonce watermark from `channels.json`) with zero on-chain
- * writes.
+ * Why this exists: rig used to open (and fund) a FRESH on-chain channel per
+ * invocation, because the client of the day kept the peer→channelId mapping
+ * only in memory (the #260 fresh-outsider e2e stranded five deposits across
+ * five commands). Since client 4.x the client persists its own channel config
+ * beside the watermark (`JsonFileChannelStore`: `channels-x402.json` plus its
+ * `.peers.json` sibling) and resumes from it by itself. This map remains the
+ * record `rig channel list/close/settle`, `rig balance` and `rig ci serve`
+ * read: WHICH channel the identity holds with each peer, keyed by
+ * `identity pubkey | ILP anchor (peer/apex destination) | chain | tokenNetwork`.
+ *
+ * VOUCHERS (client 4.x, connector ADR 0075): every paid packet carries an x402
+ * `batch-settlement` voucher naming the running total. There is no nonce; the
+ * watermark is the cumulative amount alone. The toon-channel claims client
+ * 3.x signed are refused by a current connector, so a 3.x rig's files
+ * (`rig-channels.json`, `channels.json`) are never read by this module and
+ * never written: they are only named, so their deposits can still be taken
+ * back with the rig that opened them ({@link legacyChannelFiles}).
  *
  * It is the standalone twin of the daemon's
  * `packages/client-mcp/src/daemon/apex-channel-store.ts` — same record shape
- * (channelId + the chain context `trackChannel` needs), extended with the
- * identity pubkey (rig identities come from an env/`.env` precedence chain,
- * so one state dir can serve several identities) and the tokenNetwork.
+ * (channelId + the chain context), extended with the identity pubkey (rig
+ * identities come from an env/`.env` precedence chain, so one state dir can
+ * serve several identities) and the tokenNetwork.
  * `@toon-protocol/rig` must not import `@toon-protocol/client-mcp` (that
  * package depends on this one — circular), hence the twin; keep the
  * semantics in sync.
  *
  * CONCURRENCY: writes happen only from paid commands, which already hold the
  * per-identity advisory lockfile (./nonce-guard.ts `NonceLock`) for their
- * whole lifetime — the same guard that serializes the claim watermark also
+ * whole lifetime: the same guard that serializes the voucher watermark also
  * serializes this file for one identity. `rig channel list` reads only.
  *
  * COUNTERPARTY: the key names a ROUTE, not a node — an ILP name can change
  * hands (the devnet apex `g.toon` was retired and another node took over
  * `g.toon.relay`). A record therefore also carries the counterparty
- * settlement address it was opened against (`context.recipient`), which is
- * re-checked against the destination's announced address before every resume
- * ({@link counterpartyMatch}); a rotated counterparty
- * {@link ChannelMapStore.supersede}s the record instead of signing claims a
- * connector with no record of that channel refuses (`F01`).
+ * settlement address it was opened against (`context.recipient`), which can be
+ * re-checked against the destination's announced address ({@link
+ * counterpartyMatch}); a rotated counterparty {@link ChannelMapStore.supersede}s
+ * the record rather than paying a connector with no record of that channel.
  *
  * CORRUPTION: an unreadable/invalid map file is a hard
  * {@link ChannelMapCorruptError} — surfaced BEFORE any on-chain open — never
@@ -46,7 +51,7 @@
  * `@toon-protocol/client` peer dependency installed.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -54,15 +59,28 @@ import { dirname, join } from 'node:path';
 // Paths (TOON_CLIENT_HOME conventions — see nonce-guard.ts module doc)
 // ---------------------------------------------------------------------------
 
-/** Map filename under the shared client state dir. */
-export const RIG_CHANNEL_MAP_FILENAME = 'rig-channels.json';
+/** Map filename under the shared client state dir (x402 voucher channels). */
+export const RIG_CHANNEL_MAP_FILENAME = 'rig-channels-x402.json';
+
+/**
+ * The client's x402 channel store under the shared client state dir: the
+ * voucher watermark, with every channel's config in the `.peers.json` sibling.
+ * A new name for client 4.x so a 3.x store is never read as one.
+ */
+export const CHANNEL_STORE_FILENAME = 'channels-x402.json';
+
+/** What a client 3.x rig kept its toon-channel map in. Never read or written. */
+export const LEGACY_RIG_CHANNEL_MAP_FILENAME = 'rig-channels.json';
+
+/** What a client 3.x rig kept its toon-channel watermark in. Never read or written. */
+export const LEGACY_CHANNEL_STORE_FILENAME = 'channels.json';
 
 /**
  * Resolve the two channel-state files under `TOON_CLIENT_HOME` (default
- * `~/.toon-client`): the rig peer→channel map, and the client's nonce
- * watermark store (`config.json`'s `channelStorePath`, default
- * `<dir>/channels.json` — the same resolution `cli/standalone-mode.ts` feeds
- * the embedded ToonClient).
+ * `~/.toon-client`): the rig peer→channel map, and the client's x402 voucher
+ * store (`config.json`'s `channelStorePath`, default
+ * `<dir>/channels-x402.json`: the same resolution `cli/standalone-mode.ts`
+ * feeds the embedded ToonClient).
  */
 export function resolveChannelPaths(env: NodeJS.ProcessEnv): {
   mapPath: string;
@@ -86,8 +104,60 @@ export function resolveChannelPaths(env: NodeJS.ProcessEnv): {
   }
   return {
     mapPath: join(dir, RIG_CHANNEL_MAP_FILENAME),
-    watermarkPath: configured ?? join(dir, 'channels.json'),
+    watermarkPath: configured ?? join(dir, CHANNEL_STORE_FILENAME),
   };
+}
+
+/**
+ * The client 3.x channel files present in a state dir: a toon-channel map and
+ * watermark a current connector no longer honours. Named so a caller can say
+ * they were skipped; the deposits they record are left for the 3.x rig that
+ * opened them (`npm i -g @toon-protocol/rig@4.7.0`, then `rig channel close`).
+ */
+export function legacyChannelFiles(dir: string): string[] {
+  return [LEGACY_RIG_CHANNEL_MAP_FILENAME, LEGACY_CHANNEL_STORE_FILENAME]
+    .map((name) => join(dir, name))
+    .filter((path) => existsSync(path));
+}
+
+/**
+ * Does `path` hold a client 3.x toon-channel store? Its watermark entries
+ * carry a nonce that moved (a 4.x entry keeps `nonce: 0` for the file's
+ * sake), and its `.peers.json` bindings carry no `batchSettlement` config.
+ * An unreadable file answers false: the client reports it on its own read.
+ */
+export function isToonChannelStore(path: string): boolean {
+  const read = (p: string): Record<string, unknown> | undefined => {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(p, 'utf8'));
+      return typeof parsed === 'object' && parsed !== null
+        ? (parsed as Record<string, unknown>)
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const entries = Object.values(read(path) ?? {});
+  if (
+    entries.some(
+      (e) =>
+        typeof e === 'object' &&
+        e !== null &&
+        typeof (e as { nonce?: unknown }).nonce === 'number' &&
+        (e as { nonce: number }).nonce > 0
+    )
+  ) {
+    return true;
+  }
+  const bindings = Object.values(
+    read(path.replace(/(\.json)?$/, '.peers.json')) ?? {}
+  );
+  return bindings.some(
+    (b) =>
+      typeof b === 'object' &&
+      b !== null &&
+      (b as { batchSettlement?: unknown }).batchSettlement === undefined
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -95,8 +165,8 @@ export function resolveChannelPaths(env: NodeJS.ProcessEnv): {
 // ---------------------------------------------------------------------------
 
 /**
- * Chain context `ChannelManager.trackChannel` needs to resume a channel
- * (same shape the daemon's apex-channel-store persists).
+ * A channel's chain context (same shape the daemon's apex-channel-store
+ * persists, and the client's own binding carries).
  */
 export interface PersistedChannelContext {
   chainType: string;
@@ -111,17 +181,17 @@ export interface PersistedChannelContext {
 export interface ChannelMapRecord {
   /** On-chain payment channel id. */
   channelId: string;
-  /** Registered peer id the negotiation was keyed by (`peerNegotiations`). */
+  /** The node's sealing key id (`GET /ilp` `edgeIdentity.keyId`), else its URL. */
   peerId: string;
   /** Hex Nostr pubkey of the identity that opened the channel. */
   identity: string;
   /** ILP anchor destination the channel was opened against (peer/apex). */
   destination: string;
-  /** Negotiated settlement chain, e.g. `evm:31337`. */
+  /** The x402 network the channel lives on, e.g. `eip155:8453`, `solana:5eykt…`. */
   chain: string;
-  /** TokenNetwork contract address ('' when the peer announced none). */
+  /** The batch-settlement contract (EVM) or program (Solana) holding it. */
   tokenNetwork: string;
-  /** Context for `trackChannel` on resume. */
+  /** Chain context: chain type, token, counterparty. */
   context: PersistedChannelContext;
   /** On-chain deposit total (base units, string), when known. */
   depositTotal?: string;
@@ -148,15 +218,16 @@ export interface ChannelMapKey {
 }
 
 /**
- * One entry of the client's nonce-watermark store (`channels.json`) —
+ * One entry of the client's voucher watermark store (`channels-x402.json`):
  * format DUPLICATED from `@toon-protocol/client`'s `JsonFileChannelStore`
  * (`packages/client/src/channel/ChannelStore.ts`); keep in sync.
  */
 export interface WatermarkEntry {
-  nonce: number;
-  /** Cumulative claimed amount, base units (string-encoded bigint). */
+  /** Always 0 for an x402 channel: vouchers carry no nonce. Kept for the file's shape. */
+  nonce?: number;
+  /** Cumulative amount signed so far, base units (string-encoded bigint). */
   cumulativeAmount: string;
-  /** Withdraw-flow timers, string-encoded unix SECONDS. */
+  /** Exit timers, string-encoded unix SECONDS. */
   closedAt?: string;
   settleableAt?: string;
   settledAt?: string;
@@ -282,12 +353,12 @@ function isRecord(v: unknown): v is ChannelMapRecord {
 export interface ChannelMapStoreOptions {
   /** The rig peer→channel map file (`rig-channels.json`). */
   mapPath: string;
-  /** The client's nonce-watermark store (`channels.json`). */
+  /** The client's voucher watermark store (`channels-x402.json`). */
   watermarkPath: string;
 }
 
 /**
- * File-backed peer→channel map + read/seed access to the client's nonce
+ * File-backed peer→channel map + read/seed access to the client's voucher
  * watermark store. Synchronous I/O (matches the client's `ChannelStore`
  * surface); see the module doc for the locking and corruption contracts.
  */
@@ -322,9 +393,9 @@ export class ChannelMapStore {
 
   /**
    * Record a (freshly opened) channel. Overwrites any previous record under
-   * the same (identity, destination, chain, tokenNetwork) key — the old
-   * channel is closed/stale by then; its claim watermark stays in the
-   * watermark store.
+   * the same (identity, destination, chain, tokenNetwork) key; a caller that
+   * replaces a channel still holding a deposit {@link supersede}s the old
+   * record first. Its watermark stays in the watermark store.
    */
   record(
     record: Omit<ChannelMapRecord, 'openedAt' | 'lastUsedAt'> &
@@ -397,8 +468,8 @@ export class ChannelMapStore {
   }
 
   /**
-   * Read one channel's nonce-watermark entry from the client's
-   * `channels.json` (undefined when the file or entry is missing).
+   * Read one channel's watermark entry from the client's voucher store
+   * (undefined when the file or entry is missing).
    * @throws {ChannelMapCorruptError} when the watermark file is unreadable.
    */
   readWatermark(channelId: string): WatermarkEntry | undefined {
@@ -406,7 +477,7 @@ export class ChannelMapStore {
   }
 
   /**
-   * Seed a fresh channel's watermark entry (`nonce 0, cumulative 0`) so a
+   * Seed a fresh channel's watermark entry (cumulative 0) so a
    * later resume can tell "never claimed against" apart from "watermark
    * lost". Never overwrites an existing entry.
    */
@@ -415,11 +486,7 @@ export class ChannelMapStore {
     if (data[channelId]) return;
     data[channelId] = { nonce: 0, cumulativeAmount: '0' };
     mkdirSync(dirname(this.watermarkPath), { recursive: true });
-    writeFileSync(
-      this.watermarkPath,
-      JSON.stringify(data, null, 2),
-      'utf-8'
-    );
+    writeFileSync(this.watermarkPath, JSON.stringify(data, null, 2), 'utf-8');
   }
 
   // ── file I/O ───────────────────────────────────────────────────────────────
@@ -458,8 +525,7 @@ export class ChannelMapStore {
         'expected { "version": 1, "channels": { … } }'
       );
     }
-    const channels = (parsed as { channels: Record<string, unknown> })
-      .channels;
+    const channels = (parsed as { channels: Record<string, unknown> }).channels;
     for (const [key, value] of Object.entries(channels)) {
       if (!isRecord(value)) {
         throw new ChannelMapCorruptError(
@@ -505,8 +571,8 @@ export class ChannelMapStore {
 // ---------------------------------------------------------------------------
 
 /**
- * Where a channel sits in the withdraw journey, from its watermark timers —
- * mirrors `ChannelManager.getChannelCloseState`. A missing entry reads as
+ * Where a channel sits in the exit journey, from its watermark timers:
+ * mirrors what the client's `channel.channels()` reports. A missing entry reads as
  * `open` (recorded channels are seeded at open time; a lost watermark file
  * surfaces separately as unknown claim state).
  */

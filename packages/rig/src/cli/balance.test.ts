@@ -123,8 +123,8 @@ describe('rig balance', () => {
 
   function seedChannels(): void {
     const store = new ChannelMapStore({
-      mapPath: join(dir, 'rig-channels.json'),
-      watermarkPath: join(dir, 'channels.json'),
+      mapPath: join(dir, 'rig-channels-x402.json'),
+      watermarkPath: join(dir, 'channels-x402.json'),
     });
     store.record({
       channelId: CHANNEL_ID,
@@ -155,9 +155,9 @@ describe('rig balance', () => {
       },
     });
     writeFileSync(
-      join(dir, 'channels.json'),
+      join(dir, 'channels-x402.json'),
       JSON.stringify({
-        [CHANNEL_ID]: { nonce: 15, cumulativeAmount: '16120' },
+        [CHANNEL_ID]: { nonce: 0, cumulativeAmount: '16120' },
       })
     );
   }
@@ -218,7 +218,6 @@ describe('rig balance', () => {
           status: 'open',
           depositTotal: '100000',
           cumulativeClaimed: '16120',
-          nonce: 15,
           // deposited − claimed
           available: '83880',
           // claims within the deposit → no overdraft
@@ -315,8 +314,8 @@ describe('rig balance', () => {
 
   it('an unknown deposit or claim yields a null available (never a guess)', async () => {
     const store = new ChannelMapStore({
-      mapPath: join(dir, 'rig-channels.json'),
-      watermarkPath: join(dir, 'channels.json'),
+      mapPath: join(dir, 'rig-channels-x402.json'),
+      watermarkPath: join(dir, 'channels-x402.json'),
     });
     store.record({
       channelId: CHANNEL_ID,
@@ -350,8 +349,8 @@ describe('rig balance', () => {
     // so the excess is unsecured. `available` floors at 0 (correct: nothing
     // is left) and the overdraft is reported separately.
     const store = new ChannelMapStore({
-      mapPath: join(dir, 'rig-channels.json'),
-      watermarkPath: join(dir, 'channels.json'),
+      mapPath: join(dir, 'rig-channels-x402.json'),
+      watermarkPath: join(dir, 'channels-x402.json'),
     });
     store.record({
       channelId: CHANNEL_ID,
@@ -368,9 +367,9 @@ describe('rig balance', () => {
       depositTotal: '100000',
     });
     writeFileSync(
-      join(dir, 'channels.json'),
+      join(dir, 'channels-x402.json'),
       JSON.stringify({
-        [CHANNEL_ID]: { nonce: 31, cumulativeAmount: '140840' },
+        [CHANNEL_ID]: { nonce: 0, cumulativeAmount: '140840' },
       })
     );
 
@@ -398,8 +397,8 @@ describe('rig balance', () => {
 
   it('a channel exactly spent (claimed == deposited) is NOT flagged overdrawn', async () => {
     const store = new ChannelMapStore({
-      mapPath: join(dir, 'rig-channels.json'),
-      watermarkPath: join(dir, 'channels.json'),
+      mapPath: join(dir, 'rig-channels-x402.json'),
+      watermarkPath: join(dir, 'channels-x402.json'),
     });
     store.record({
       channelId: CHANNEL_ID,
@@ -416,9 +415,9 @@ describe('rig balance', () => {
       depositTotal: '100000',
     });
     writeFileSync(
-      join(dir, 'channels.json'),
+      join(dir, 'channels-x402.json'),
       JSON.stringify({
-        [CHANNEL_ID]: { nonce: 8, cumulativeAmount: '100000' },
+        [CHANNEL_ID]: { nonce: 0, cumulativeAmount: '100000' },
       })
     );
     const h = makeHarness({ TOON_CLIENT_HOME: dir });
@@ -429,7 +428,7 @@ describe('rig balance', () => {
   });
 
   it('a corrupt channel map is a clear error (exit 1)', async () => {
-    writeFileSync(join(dir, 'rig-channels.json'), 'not-json{');
+    writeFileSync(join(dir, 'rig-channels-x402.json'), 'not-json{');
     const h = makeHarness({ TOON_CLIENT_HOME: dir });
     expect(await runBalance(['--json'], h.deps)).toBe(1);
     const parsed = JSON.parse(h.out.join('\n')) as Record<string, unknown>;

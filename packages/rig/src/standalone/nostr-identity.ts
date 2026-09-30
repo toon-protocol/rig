@@ -1,7 +1,7 @@
 /**
  * The Nostr signing key rig derives from a BIP-39 phrase.
  *
- * `@toon-protocol/client` 2.x is a pure payer and carries no Nostr identity
+ * `@toon-protocol/client` 2.x and later is a pure payer and carries no Nostr identity
  * (its own words), so the derivation that lived in the 0.x client moves here,
  * unchanged: `m/44'/1237'/0'/0/<accountIndex>`. Unchanged matters — this is
  * the key every existing rig repo is owned by (`toon.owner`, the kind:30617

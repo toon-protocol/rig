@@ -9,7 +9,7 @@ lives in NIP-34 Nostr events and the objects live on Arweave.
 - **Writes are paid** — pushing objects and publishing events spends from a
   payment channel funded by your wallet. Writes are permanent and non-refundable.
 - **One node URL is the whole network configuration** — `rig` embeds its own
-  payment client (`@toon-protocol/client` 3.x) built from your seed phrase and
+  payment client (`@toon-protocol/client` 4.x) built from your seed phrase and
   pays the TOON connector you name with `rig entry <url>`. The node describes
   itself on `GET /ilp`; there is nothing to discover (see
   [Pointing at a node](#pointing-at-a-node)).
@@ -238,20 +238,27 @@ estimate — nothing is executed or paid).
 
 ## Money: fund, balance, channels
 
-Paid commands spend from a **payment channel** — an on-chain-collateralized channel
-between your wallet and a payment peer, from which each write draws an off-chain
-claim. You rarely touch this directly:
+Paid commands spend from a **payment channel**: an x402 `batch-settlement`
+channel between your wallet and the node, collateralized on chain, on which each
+write signs an off-chain voucher naming the running total (connector ADR 0075;
+there is no nonce). You rarely touch this directly:
 
 - **`rig fund`** tops up your wallet (devnet faucet, or prints addresses to fund
   externally). Both the native coin (gas) and USDC (collateral) are needed.
 - **`rig balance`** shows what your wallet holds across chains.
 - **Channels open lazily.** The first paid write opens a channel from your funded
-  wallet and records it under `~/.toon-client` (`rig-channels.json`); later writes
-  resume the same channel instead of opening a new one.
-- **`rig channel list`** (free) shows current holdings and nonce watermarks.
-  **`rig channel open`** pre-opens one (or `--deposit`s more collateral) using the
-  exact lazy-open path; **`rig channel close`** starts the settlement challenge
-  window; **`rig channel settle`** releases collateral once the window elapses.
+  wallet (on Solana the node sponsors the open: USDC for the deposit, no SOL) and
+  records it under `~/.toon-client` (`rig-channels-x402.json`); later writes
+  resume the same channel, and a write it can no longer cover opens a fresh one.
+- **`rig channel list`** (free) shows current holdings and the running totals
+  signed. **`rig channel open`** pre-opens one (or `--deposit`s more collateral,
+  Base only) using the exact lazy-open path; **`rig channel close`** starts the
+  exit window; **`rig channel settle`** releases collateral once the window
+  elapses.
+- **Upgrading from a client 3.x rig** (4.7.x and earlier): its toon-channel
+  files (`rig-channels.json`, `channels.json`) are never read or written, only
+  named. A current connector refuses those claims; take their deposits back
+  with the rig that opened them.
 
 The `open`/`close`/`settle` lifecycle commands are on-chain wallet operations (gas +
 collateral movement), so they follow the same confirm idiom as `push`: they print
@@ -637,7 +644,7 @@ network — there is no announce to discover (kind:10032 was removed by connecto
 ADR 0046) and no topology to negotiate.
 
 ```sh
-curl -s https://proxy.relay.devnet.toonprotocol.dev/ilp | jq '{ilpAddresses, routes, settlements: [.settlements[].chain]}'
+curl -s https://proxy.relay.devnet.toonprotocol.dev/ilp | jq '{ilpAddresses, routes, batchSettlements: [.batchSettlements[].network]}'
 ```
 
 What rig derives from it, and the knob that overrides each:
@@ -648,16 +655,17 @@ What rig derives from it, and the knob that overrides each:
 | where events go | the node's first own address it also prices | `TOON_CLIENT_PUBLISH_DESTINATION` / `publishDestination` |
 | where git objects go | the node's first priced `*.store` route, else `*.ario` | `TOON_CLIENT_STORE_DESTINATION` / `storeDestination`; `rig name --via` per invocation |
 | a store on another node | — | `storeConnectorUrl` (that node holds its own channel: uploads ride a second client and watermark) or `storeSealTo` (same channel, sealed to that node) |
-| settlement chain | the first chain in `settlements[]` your identity holds a key for | `TOON_CLIENT_CHAIN` / `chain` — `evm` or `solana` (`evm:8453` is read by its family) |
+| settlement chain | the first chain in `batchSettlements[]` your identity holds a key for (a phrase holds both: name one) | `TOON_CLIENT_CHAIN` / `chain`: `evm` or `solana` (`evm:8453` is read by its family) |
 | chain RPC | the client's devnet preset | `TOON_CLIENT_RPC_URL` / `rpcUrl` / `chainRpcUrls[<chain>]` — **set this for a mainnet node** |
 | who pays | the phrase's key on that chain | `RIG_SOLANA_KEY_FILE` / `solanaKeyFile` (a `solana-keygen` JSON), `RIG_EVM_PRIVATE_KEY` / `evmPrivateKey` |
-| claim watermark file | `<TOON_CLIENT_HOME>/channels.json` | `TOON_CLIENT_CHANNEL_STORE` / `channelStorePath` — one file per channel writer, or two processes replay each other's nonces |
-| first-open collateral | the client default | `TOON_CLIENT_DEPOSIT` / `deposit` (base units) |
+| x402 channel store | `<TOON_CLIENT_HOME>/channels-x402.json` (+ `.peers.json`, each channel's config: keep both) | `TOON_CLIENT_CHANNEL_STORE` / `channelStorePath`: one file per channel writer, or two processes race each other's running totals. A client 3.x store is refused |
+| channel collateral | the client default (Solana: at least the node's `minDeposit`) | `TOON_CLIENT_DEPOSIT` / `deposit` (base units) |
+| Base deposit facilitator | none on Solana; the client's own on EVM | `TOON_CLIENT_FACILITATOR_URL` / `facilitatorUrl` |
 | carriage | `auto` (HTTP unless the node requires BTP) | `TOON_CLIENT_TRANSPORT` / `transport` |
 
 **Prices are schedules.** A route publishes a base price and, when it meters by
 size, a `pricePerKib` (connector ADR 0065). `rig push`'s fee table prices every
-object by its sealed size with the same rule the client puts on the claim, so
+object by its sealed size with the same rule the client puts on the voucher, so
 the estimate equals what is paid.
 
 **Who pays and who signs are independent.** The repo owner is the phrase's
@@ -666,7 +674,7 @@ Its EVM wallet is that same key (the client's `keyDerivation: 'legacy'`, rig's
 default, so channels an existing identity funded are still its own); set
 `TOON_CLIENT_KEY_DERIVATION=standard` for a fresh identity you want to import
 into MetaMask. The payer key may be a different key entirely: the connector
-attributes payment from the claim, never from the event.
+attributes payment from the voucher, never from the event.
 
 ### Devnet
 
@@ -746,13 +754,13 @@ phrase itself is never printed and never written to git config or any repo file.
 ## What a paid command does first
 
 Every standalone paid command bootstraps the same way: resolve the identity,
-read the connector's `GET /ilp`, open or adopt the payment channel with that
-node, then sign one claim per packet. Adoption is free — a channel's id derives
-from its participants, so a node you have paid before is found again without a
-transaction. Money state (the claim watermark, the channel map) lives under
-`TOON_CLIENT_HOME` and is never cached away.
+read the connector's `GET /ilp`, open or resume the x402 channel with that
+node, then sign one voucher per packet. Resuming is free: the client keeps each
+channel's config in its store, so a node you have paid before is found again
+without a transaction. Money state (the voucher watermark, the channel configs,
+the channel map) lives under `TOON_CLIENT_HOME` and is never cached away.
 
-Two rig processes on one identity race the claim nonce, so a per-identity lock
+Two rig processes on one identity race the running total, so a per-identity lock
 refuses the second (`RIG_STANDALONE=1` skips only the check for a same-identity
 `toon-clientd`; the lock stays). The `rig` bin exits as soon as a command
 finishes and stdio is flushed.

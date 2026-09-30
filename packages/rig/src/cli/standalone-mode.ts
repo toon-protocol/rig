@@ -3,11 +3,13 @@
  *
  * One URL is the whole configuration. A TOON connector describes itself on
  * `GET /ilp` (connector ADR 0050): its ILP addresses, the routes it prices,
- * the chains it settles on and the key a payload is sealed to. The client
- * (`@toon-protocol/client` 3.x) reads that once, opens or adopts a payment
- * channel against the node, and pays each request with a signed claim. There
- * is nothing to discover and nothing to negotiate — kind:10032 announces were
- * removed by ADR 0046, and a node's word about itself replaced them.
+ * the x402 `batch-settlement` terms it accepts per chain and the key a payload
+ * is sealed to. The client (`@toon-protocol/client` 4.x) reads that once,
+ * opens or resumes an x402 channel with the node, and pays each request with a
+ * signed voucher naming the running total (connector ADR 0075; the
+ * toon-channel claims of client 3.x are refused). There is nothing to
+ * discover and nothing to negotiate: kind:10032 announces were removed by
+ * ADR 0046, and a node's word about itself replaced them.
  *
  * What this module resolves, in precedence order (env > config file):
  *
@@ -28,13 +30,20 @@
  *    the edge's client seal to that node instead.
  *  - `TOON_CLIENT_CHAIN` / `chain` — `evm` or `solana` (a full id such as
  *    `evm:8453` is read by its family). Default: the first chain in the node's
- *    `settlements[]` this identity holds a key for.
+ *    `batchSettlements[]` this identity holds a key for. A phrase holds both,
+ *    so name one when the node offers several.
  *  - `TOON_CLIENT_RPC_URL` / `rpcUrl` / `chainRpcUrls[<chain>]`.
+ *  - `TOON_CLIENT_CHANNEL_STORE` / `channelStorePath`: the client's x402
+ *    channel store. Default `<dir>/channels-x402.json` (+ `.peers.json`). A
+ *    client 3.x toon-channel store is refused here and never written.
+ *  - `TOON_CLIENT_FACILITATOR_URL` / `facilitatorUrl`: the x402 facilitator
+ *    that submits a Base deposit and pays its gas. Solana needs none: the
+ *    connector sponsors the open.
  *  - `RIG_SOLANA_KEY_FILE` / `solanaKeyFile`, `RIG_EVM_PRIVATE_KEY` /
  *    `evmPrivateKey` — pay with THIS key instead of the phrase's derived one.
  *    The author stays the phrase's Nostr key; who pays and who signs the
  *    event are independent facts (the connector attributes payment from the
- *    claim, never from the event).
+ *    voucher, never from the event).
  *
  * Key derivation: a rig phrase yields its Nostr key at `m/44'/1237'/0'/0/i`,
  * and its EVM account has always been that same secp256k1 key — which the
@@ -48,17 +57,25 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
+  PAYMENT_CHANNELS_PROGRAM_ID,
   ToonClient,
+  X402_BATCH_SETTLEMENT_ADDRESS,
   defaultDestinationFor,
-  type ChannelState,
+  evmChainIdOf,
+  type BatchChannelSummary,
+  type BatchExitResult,
+  type ChannelFacade,
   type NodeSelfDescription,
   type ToonClientConfig,
 } from '@toon-protocol/client';
 import { shaResolverFor } from '../git-sha-resolver.js';
 import { fetchRemoteState } from '../remote-state.js';
 import {
+  CHANNEL_STORE_FILENAME,
   ChannelMapStore,
   RIG_CHANNEL_MAP_FILENAME,
+  isToonChannelStore,
+  legacyChannelFiles,
   type ChannelMapRecord,
 } from '../standalone/channel-map.js';
 import { ConnectorPublisher } from '../standalone/connector-publisher.js';
@@ -102,7 +119,10 @@ export interface ClientConfigFile {
   storeConnectorUrl?: string;
   storeSealTo?: string;
   feePerEvent?: string;
+  /** The client's x402 channel store; default `<dir>/channels-x402.json`. */
   channelStorePath?: string;
+  /** The x402 facilitator for a Base deposit. */
+  facilitatorUrl?: string;
   /** `evm` | `solana`, or a full id (`evm:8453`) read by its family. */
   chain?: string;
   /** @deprecated pre-2.0 chain list; the first entry is read as `chain`. */
@@ -112,7 +132,7 @@ export interface ClientConfigFile {
   transport?: 'auto' | 'http' | 'btp';
   keyDerivation?: 'standard' | 'legacy';
   mnemonicAccountIndex?: number;
-  /** Collateral for a first channel open, base units. */
+  /** What each x402 channel is opened with, base units. */
   deposit?: string;
   /** Path to a Solana keypair JSON (64-byte array) that pays instead of the phrase's key. */
   solanaKeyFile?: string;
@@ -171,6 +191,7 @@ export interface ConnectorSettings {
   transport: 'auto' | 'http' | 'btp';
   keyDerivation: 'standard' | 'legacy';
   channelStorePath: string;
+  facilitatorUrl?: string;
   deposit?: bigint;
   eventFee: bigint;
   solanaKeyFile?: string;
@@ -282,7 +303,14 @@ export function resolveConnectorSettings(args: {
     channelStorePath:
       env['TOON_CLIENT_CHANNEL_STORE'] ??
       file.channelStorePath ??
-      join(args.configDir, 'channels.json'),
+      join(args.configDir, CHANNEL_STORE_FILENAME),
+    ...((env['TOON_CLIENT_FACILITATOR_URL'] ?? file.facilitatorUrl) !==
+    undefined
+      ? {
+          facilitatorUrl:
+            env['TOON_CLIENT_FACILITATOR_URL'] ?? file.facilitatorUrl,
+        }
+      : {}),
     ...(depositRaw !== undefined ? { deposit: BigInt(depositRaw) } : {}),
     eventFee: BigInt(
       env['TOON_CLIENT_FEE_PER_EVENT'] ?? file.feePerEvent ?? '0'
@@ -372,90 +400,190 @@ export function readSolanaKeyFile(path: string): Uint8Array {
 // Money ops on the client's channel and wallet facades
 // ---------------------------------------------------------------------------
 
-function recordFor(
-  state: ChannelState,
+/** One x402 channel as the peer→channel map records it. */
+export function recordFor(
+  summary: BatchChannelSummary,
   args: { identity: string; destination: string; peerId: string }
 ): Omit<ChannelMapRecord, 'openedAt' | 'lastUsedAt'> {
+  const { channel } = summary;
   const tokenNetwork =
-    state.domain.tokenNetwork ?? state.domain.programId ?? '';
+    channel.chain === 'evm'
+      ? X402_BATCH_SETTLEMENT_ADDRESS
+      : PAYMENT_CHANNELS_PROGRAM_ID;
   return {
-    channelId: state.channelId,
+    channelId: channel.channelId,
     peerId: args.peerId,
     identity: args.identity,
     destination: args.destination,
-    chain: state.domain.chain,
+    chain: channel.network,
     tokenNetwork,
     context: {
-      chainType: state.chain,
-      chainId: state.domain.chainId ?? 0,
+      chainType: channel.chain,
+      chainId: channel.chain === 'evm' ? evmChainIdOf(channel.network) : 0,
       tokenNetworkAddress: tokenNetwork,
-      tokenAddress: state.domain.token,
-      recipient: state.domain.counterparty,
+      tokenAddress: channel.config.token,
+      recipient: channel.config.receiver,
     },
-    depositTotal: state.depositTotal.toString(),
+    depositTotal: summary.depositTotal.toString(),
   };
 }
 
-function buildMoneyOps(args: {
-  client: ToonClient;
+/**
+ * Record `summary` in the peer→channel map, or refresh its deposit when it is
+ * already there. A different channel recorded under the same key (one the
+ * client replaced when it ran out) is superseded, not overwritten: it still
+ * holds what it has left, and `rig channel close/settle` find it by listing.
+ */
+export function recordChannel(
+  channelMap: ChannelMapStore,
+  summary: BatchChannelSummary,
+  args: { identity: string; destination: string; peerId: string }
+): void {
+  const next = recordFor(summary, args);
+  const previous = channelMap
+    .listFor(args.identity, args.destination)
+    .find(
+      (r) =>
+        r.chain === next.chain &&
+        r.tokenNetwork === next.tokenNetwork &&
+        r.channelId !== next.channelId
+    );
+  if (previous) channelMap.supersede(previous);
+  if (channelMap.list().some((r) => r.channelId === next.channelId)) {
+    channelMap.touch(
+      {
+        identity: next.identity,
+        destination: next.destination,
+        chain: next.chain,
+        tokenNetwork: next.tokenNetwork,
+      },
+      { depositTotal: next.depositTotal ?? '0' }
+    );
+  } else {
+    channelMap.record(next);
+  }
+}
+
+/** The slice of `ToonClient` the money ops drive (structural, so tests fake it). */
+export interface MoneyClientLike {
+  readonly chain: 'evm' | 'solana';
+  readonly channel: ChannelFacade;
+  readonly wallet: Pick<ToonClient['wallet'], 'balances'>;
+}
+
+/** This channel's step out of a close()/settle() that walks every channel. */
+function exitResultFor(
+  results: BatchExitResult[],
+  channelId: string,
+  step: 'close' | 'settle'
+): BatchExitResult | undefined {
+  const result = results.find((r) => r.channelId === channelId);
+  if (result?.error !== undefined) {
+    throw new Error(`channel ${step} of ${channelId} failed: ${result.error}`);
+  }
+  return result;
+}
+
+export function buildMoneyOps(args: {
+  client: MoneyClientLike;
   channelMap: ChannelMapStore;
   identity: string;
   destination: string;
   peerId: string;
+  now?: () => bigint;
 }): StandaloneMoneyOps {
   const { client, channelMap } = args;
+  const now = args.now ?? (() => BigInt(Math.floor(Date.now() / 1000)));
   const known = (channelId: string) =>
     channelMap.list().some((r) => r.channelId === channelId);
-  const requireSameChannel = async (record: ChannelMapRecord) => {
-    const state = await client.channel.state();
-    if (state.channelId !== record.channelId) {
+  /**
+   * The client's own record of a recorded channel. Exit is by channel config,
+   * which only the client's store holds; a record it does not know belongs to
+   * another store or another node.
+   */
+  const held = (record: ChannelMapRecord): BatchChannelSummary => {
+    const summary = client.channel
+      .channels()
+      .find((c) => c.channel.channelId === record.channelId);
+    if (!summary) {
       throw new Error(
-        `this identity's channel with ${args.destination} is ${state.channelId}, ` +
-          `not the recorded ${record.channelId} — the record is stale or belongs to another node`
+        `channel ${record.channelId} is not in this client's x402 channel store: ` +
+          'the record belongs to another store (TOON_CLIENT_CHANNEL_STORE) or another node'
       );
     }
+    return summary;
   };
+  const record = (summary: BatchChannelSummary) =>
+    recordChannel(channelMap, summary, args);
   return {
     async openChannel(opts): Promise<ChannelOpenOutcome> {
-      const before = await client.channel.state().catch(() => undefined);
-      const resumed = before !== undefined && known(before.channelId);
-      const state =
-        opts?.deposit !== undefined && before?.status === 'open'
-          ? await client.channel.deposit(opts.deposit)
-          : await client.channel.open(
-              opts?.deposit !== undefined ? { deposit: opts.deposit } : {}
-            );
-      channelMap.record(recordFor(state, args));
+      const before = await client.channel.current();
+      // A Solana channel has no top-up that costs no SOL: the client opens a
+      // fresh sponsored one when the next packet no longer fits instead. Say
+      // so before anything is opened, rather than open and then refuse.
+      if (opts?.deposit !== undefined && client.chain === 'solana') {
+        throw new Error(
+          'a Solana x402 channel cannot be topped up: set TOON_CLIENT_DEPOSIT ' +
+            '(config `deposit`) to what a channel opens with; the client opens a ' +
+            'fresh sponsored channel when the current one runs out'
+        );
+      }
+      const resumed = before !== undefined && known(before.channel.channelId);
+      let summary = before ?? (await client.channel.open());
+      if (opts?.deposit !== undefined) {
+        summary = await client.channel.deposit(opts.deposit);
+      }
+      record(summary);
       return {
-        channelId: state.channelId,
+        channelId: summary.channel.channelId,
         resumed,
         destination: args.destination,
-        chain: state.domain.chain,
+        chain: summary.channel.network,
         peerId: args.peerId,
-        depositTotal: state.depositTotal.toString(),
+        depositTotal: summary.depositTotal.toString(),
         ...(opts?.deposit !== undefined
           ? { depositAdded: opts.deposit.toString() }
           : {}),
       };
     },
-    async closeChannel(record): Promise<ChannelCloseOutcome> {
-      await requireSameChannel(record);
-      const result = await client.channel.close();
-      const closedAt = result.closedAt ?? BigInt(Math.floor(Date.now() / 1000));
+    async closeChannel(rec): Promise<ChannelCloseOutcome> {
+      held(rec);
+      // The client leaves EVERY channel still open with the node in one call:
+      // a channel replaced when it ran out still holds what it has left.
+      const results = await client.channel.close();
+      const result = exitResultFor(results, rec.channelId, 'close');
+      const after = held(rec);
+      const closedAt = after.closedAt ?? now();
       return {
-        channelId: record.channelId,
-        ...(result.txHash ? { txHash: result.txHash } : {}),
+        channelId: rec.channelId,
+        ...(result?.transaction ? { txHash: result.transaction } : {}),
         closedAt: closedAt.toString(),
-        settleableAt: (result.settleableAt ?? closedAt).toString(),
+        settleableAt: (
+          result?.settleableAt ??
+          after.settleableAt ??
+          closedAt
+        ).toString(),
       };
     },
-    async settleChannel(record): Promise<ChannelSettleOutcome> {
-      await requireSameChannel(record);
-      const result = await client.channel.settle();
-      channelMap.supersede(record);
+    async settleChannel(rec): Promise<ChannelSettleOutcome> {
+      held(rec);
+      const results = await client.channel.settle();
+      const result = exitResultFor(results, rec.channelId, 'settle');
+      const after = held(rec);
+      if (after.settledAt === undefined) {
+        const at = after.settleableAt;
+        throw new Error(
+          `channel ${rec.channelId} is not settleable yet` +
+            (at !== undefined
+              ? ` (settleable at ${new Date(Number(at) * 1000).toISOString()})`
+              : '') +
+            ': nothing was spent; re-run after that time'
+        );
+      }
+      channelMap.supersede(rec);
       return {
-        channelId: record.channelId,
-        ...(result.txHash ? { txHash: result.txHash } : {}),
+        channelId: rec.channelId,
+        ...(result?.transaction ? { txHash: result.transaction } : {}),
       };
     },
     async walletChainBalances(): Promise<WalletChainBalanceInfo[]> {
@@ -538,13 +666,38 @@ export async function createStandaloneContext(
   }
   const connectorUrl = settings.connectorUrl;
 
-  // One writer per identity per machine: two rig processes signing claims on
-  // one channel race the nonce watermark, and the connector refuses the loser.
+  // Client 4.x pays with x402 vouchers from its own store. A 3.x toon-channel
+  // store is never handed to it (the connector refuses those claims, and the
+  // file is what the 3.x rig needs to take its deposits back): only named.
+  if (isToonChannelStore(settings.channelStorePath)) {
+    throw new Error(
+      `${settings.channelStorePath} is a client 3.x toon-channel store, which a current ` +
+        'connector no longer honours: point TOON_CLIENT_CHANNEL_STORE (config ' +
+        `channelStorePath) at a new file, e.g. ${join(dir, CHANNEL_STORE_FILENAME)}; ` +
+        'the old file is left as it is'
+    );
+  }
+  for (const legacy of legacyChannelFiles(dir)) {
+    if (legacy === settings.channelStorePath) continue;
+    warn(
+      `rig: ${legacy} is client 3.x toon-channel state; client 4.x ignores it and keeps its ` +
+        `x402 channels in ${settings.channelStorePath}`
+    );
+  }
+
+  // One writer per identity per machine: two rig processes signing vouchers on
+  // one channel race the running total, and the connector refuses the loser.
   if (!standaloneForced(env)) await checkDaemonIdentity(nostr.pubkey);
   const lock = await NonceLock.acquire(nostr.pubkey);
 
   const clients: ToonClient[] = [];
+  // Set once the client is up: records the channel paid work drew on (the
+  // client opens one on first use), so `rig channel list/close/settle` and
+  // `rig balance` see it. Best effort: a failure here loses no money, the
+  // client's own store still holds the channel.
+  let recordHeld: (() => Promise<void>) | undefined;
   const stop = async () => {
+    await recordHeld?.().catch(() => undefined);
     for (const c of clients) await c.close();
     lock.release();
   };
@@ -573,8 +726,18 @@ export async function createStandaloneContext(
       ...(settings.chain ? { chain: settings.chain } : {}),
       ...(settings.rpcUrl ? { rpcUrl: settings.rpcUrl } : {}),
       transport: settings.transport,
+      // The first paid send opens the channel (on Solana the connector
+      // sponsors the open: USDC for the deposit, no SOL), and a send the
+      // channel cannot cover opens a fresh one.
       autoOpenChannel: true,
       ...(settings.deposit !== undefined ? { deposit: settings.deposit } : {}),
+      // A Base deposit goes through a facilitator; Solana names none, so an
+      // unset facilitator on Solana is '' rather than the devnet default.
+      ...(settings.facilitatorUrl !== undefined
+        ? { facilitatorUrl: settings.facilitatorUrl }
+        : settings.chain === 'solana'
+          ? { facilitatorUrl: '' }
+          : {}),
     };
     if (settings.chain && !settings.rpcUrl) {
       warn(
@@ -591,9 +754,16 @@ export async function createStandaloneContext(
     clients.push(client);
     const desc = await client.describe();
     const destinations = resolveDestinations(desc, settings, connectorUrl);
+    if (!settings.chain && desc.batchSettlements.length > 1) {
+      warn(
+        `rig: paying on ${client.chain}, the first chain ${connectorUrl} offers that this ` +
+          `identity holds a key for (it offers ${desc.batchSettlements.map((t) => t.network).join(', ')}); ` +
+          'set TOON_CLIENT_CHAIN (config chain) to choose'
+      );
+    }
 
     // The store leg: the same client unless the store terminates on another
-    // node that holds its own channel (then its own client + watermark file).
+    // node that holds its own channel (then its own client + channel store).
     let storeClient = client;
     if (
       settings.storeConnectorUrl &&
@@ -631,13 +801,16 @@ export async function createStandaloneContext(
       mapPath: join(dir, RIG_CHANNEL_MAP_FILENAME),
       watermarkPath: settings.channelStorePath,
     });
-    const money = buildMoneyOps({
-      client,
-      channelMap,
+    const anchor = {
       identity: nostr.pubkey,
       destination: options.channelDestination ?? destinations.publish,
       peerId: desc.edgeIdentity?.keyId ?? connectorUrl,
-    });
+    };
+    const money = buildMoneyOps({ client, channelMap, ...anchor });
+    recordHeld = async () => {
+      const current = await client.channel.current();
+      if (current) recordChannel(channelMap, current, anchor);
+    };
 
     return {
       ownerPubkey: nostr.pubkey,

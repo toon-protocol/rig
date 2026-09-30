@@ -57,8 +57,8 @@ importers:
         specifier: ^1.0.0
         version: 1.4.0
       '@toon-protocol/client':
-        specifier: ^3.0.0
-        version: 3.0.0(typescript@5.9.3)(zod@3.25.76)
+        specifier: ^4.1.2
+        version: 4.1.2(typescript@5.9.3)(zod@3.25.76)
       '@toon-protocol/core':
         specifier: ^3.5.0
         version: 3.5.0(typescript@5.9.3)
@@ -8383,8 +8383,8 @@ packages:
       - zod
     dev: true
 
-  /@toon-protocol/client@3.0.0(typescript@5.9.3)(zod@3.25.76):
-    resolution: {integrity: sha512-q49vE4ZmeQXfd9lHpqZMsoqpdaJfoWbfKC9sNLTWZR0m5JJBK+t4rHywp4EaEHZDKbV2lbgbPil/dEP4hCWicA==}
+  /@toon-protocol/client@4.1.2(typescript@5.9.3)(zod@3.25.76):
+    resolution: {integrity: sha512-0ZGlMnqoDmJaLfW3ZWvW1MeMzz+DsTJL0ZF4d9mOf529TJbvyf/jFn+0ctlnRtsl3YaWTDhTkjWgOHx/I96Q5A==}
     engines: {node: '>=22'}
     hasBin: true
     dependencies:
