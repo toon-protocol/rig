@@ -678,9 +678,7 @@ attributes payment from the voucher, never from the event.
 
 ### Devnet
 
-The shared devnet's nodes and the faucet (authoritative:
-[toon-meta `docs/deployment.md`](https://github.com/toon-protocol/toon-meta/blob/main/docs/deployment.md);
-the node URLs are also `@toon-protocol/client`'s `DEVNET` preset):
+The shared devnet's nodes and the faucet (the node URLs are also `@toon-protocol/client`'s `DEVNET` preset):
 
 | What | URL |
 |---|---|
