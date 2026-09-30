@@ -16,7 +16,7 @@ rig is a pnpm workspace with two packages (`packages/rig`, the CLI, and `package
 
 ```
 /
-├── CONTEXT.md                 
+├── CONTEXT.md
 ├── docs/adr/
 │   └── 0001-rig-web-ownership-and-url-permanence.md
 └── packages/

@@ -235,10 +235,13 @@ async function main() {
       maxIterations: 1,
       agent: sandcastle.claudeCode('claude-opus-5-5'),
       promptFile: './.sandcastle/review-prompt.md',
+      // Not TARGET_BRANCH: the engine reserves that name and sets it to the sandbox's
+      // own branch, which would make the review's fixed point an empty diff.
       promptArgs: {
         ISSUE_URL: issue.url,
         ISSUE_NUMBER: issueNumber,
         BRANCH: branch,
+        BASE_BRANCH: BASE,
       },
     });
     const summary = reviewSummary(review.stdout);
