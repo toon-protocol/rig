@@ -14,4 +14,14 @@ When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the 
 
 Category roles map to the stock GitHub labels: `bug` and `enhancement`.
 
-These are deliberately separate from the Sandcastle factory labels (`agent:implement`, `agent:review`, `agent:fix`, `needs:human`; see `docs/factory-runbook.md`). `ready-for-agent` means a ticket is fully specified and a developer's own agent session may pick it up with `/implement`. It never starts a factory run; only a human applying `agent:implement` does that.
+## These labels drive the AFK factory
+
+There is no separate trigger label. `ready-for-agent` is the queue, as `to-spec`, `to-tickets` and `triage` assume: `.github/workflows/agent-implement.yml` picks up every open `ready-for-agent` issue whose blockers are closed and turns it into a PR. The factory moves labels like this:
+
+- **`ready-for-agent`** on an issue: queued. Removed once the agent's PR is open. Put it back to retry.
+- **`ready-for-human`** on a PR: the agent finished and the gate is green. A human merges.
+- **`needs-triage`** on an issue: the AFK run failed. The issue has a comment linking the run.
+
+A spec (an issue with sub-issues, or one written from the to-spec template) is never built directly, even with `ready-for-agent` on it. Its tickets are.
+
+Record blockers with GitHub's native "blocked by" relationship, or under a `## Blocked by` heading as `to-tickets` writes them, so the factory waits for them.
