@@ -1,5 +1,9 @@
 FROM node:22-bookworm
 
+# Links the published GHCR package (ghcr.io/toon-protocol/rig:sandcastle-agent, see the
+# pull step in .github/workflows/agent-implement.yml) to this repo.
+LABEL org.opencontainers.image.source="https://github.com/toon-protocol/rig"
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
   git \
@@ -41,6 +45,14 @@ USER ${AGENT_UID}:${AGENT_GID}
 
 # Install Claude Code CLI
 RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# Matt Pocock's skills, the same plugin used interactively. The runner starts each agent
+# session with `/mattpocock-skills:implement` or `/mattpocock-skills:code-review`, so they
+# must be installed here. A fresh install doesn't know the official marketplace yet, so add
+# it first. This takes the plugin's latest release when the image is built; rebuild the
+# image to pick up a newer one.
+RUN /home/agent/.local/bin/claude plugin marketplace add anthropics/claude-plugins-official \
+  && /home/agent/.local/bin/claude plugin install mattpocock-skills@claude-plugins-official
 
 # Add Claude to PATH
 ENV PATH="/home/agent/.local/bin:$PATH"

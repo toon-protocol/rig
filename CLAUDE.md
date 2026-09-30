@@ -6,7 +6,7 @@ TOON Protocol's git-to-TOON write path (`@toon-protocol/rig`, CLI) and its decen
 
 ### Workflow
 
-Planning is done by a human at the keyboard: `/wayfinder` (when what to build is still unclear) or `/grill-with-docs` (when the design is solid and needs ADRs and glossary written), then `/to-spec`, then `/to-tickets` with each ticket added as a sub-issue of the spec issue. Only after that does an agent drive the spec issue to completion with `/implement`. No one-shot prompts for features.
+Planning is done by a human at the keyboard: `/wayfinder` (when what to build is still unclear) or `/grill-with-docs` (when the design is solid and needs ADRs and glossary written), then `/to-spec`, then `/to-tickets` with each ticket added as a sub-issue of the spec issue. Only after that does an agent drive the spec issue to completion with `/implement`, or the AFK factory builds a ticket: putting `ready-for-agent` on it queues a run (`.github/workflows/agent-implement.yml`). No one-shot prompts for features.
 
 ### Issue tracker
 
@@ -14,7 +14,7 @@ Issues and specs are GitHub issues in `toon-protocol/rig`, driven with the `gh` 
 
 ### Triage labels
 
-The five default triage labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`), kept separate from the Sandcastle factory labels so a triage decision never starts a factory run. See `docs/agents/triage-labels.md`.
+The five canonical triage labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) are the only labels the factory uses; `ready-for-agent` is its queue. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
