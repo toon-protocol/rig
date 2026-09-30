@@ -1,5 +1,11 @@
 # @toon-protocol/rig
 
+## 5.0.1
+
+### Patch Changes
+
+- 6ca4a2e: README: the devnet section no longer points at a toon-meta document.
+
 ## 5.0.0
 
 ### Major Changes
