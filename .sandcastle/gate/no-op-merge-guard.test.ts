@@ -39,7 +39,7 @@ function mergeResult(headContent: string, baseContent: string): { dir: string; h
   return { dir, head };
 }
 
-function run(dir: string, head: string, event = 'pull_request') {
+function run(dir: string, head: string, event = 'pull_request', changedFiles = '1') {
   return spawnSync('bash', [script], {
     cwd: dir,
     encoding: 'utf8',
@@ -49,7 +49,7 @@ function run(dir: string, head: string, event = 'pull_request') {
       PR_HEAD_SHA: head,
       PR_BASE_REF: 'main',
       PR_NUMBER: '1',
-      PR_CHANGED_FILES: '1',
+      PR_CHANGED_FILES: changedFiles,
     },
   });
 }
@@ -60,6 +60,13 @@ describe('no-op merge guard', () => {
     const r = run(dir, head);
     assert.equal(r.status, 1);
     assert.match(r.stdout, /EMPTY commit/);
+  });
+
+  it("fails when the branch's own commits cancel out", () => {
+    const { dir, head } = mergeResult('same\n', 'same\n');
+    const r = run(dir, head, 'pull_request', '0');
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /commits cancel out/);
   });
 
   it('passes when the merge result has a real diff', () => {
