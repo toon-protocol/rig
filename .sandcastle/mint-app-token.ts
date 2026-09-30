@@ -1,6 +1,6 @@
 // Mint a FRESH GitHub App installation token, on demand, on the host.
 //
-// WHY THIS EXISTS — root cause of connector#462, ported here per toon-meta#248
+// WHY THIS EXISTS — root cause of connector#462
 // -------------------------------------------------------------------------
 // GitHub App installation tokens expire ONE HOUR after issue.
 // agent-implement.yml minted a single token in an early step
