@@ -1,17 +1,17 @@
-# Rig
+# rig
 
-Git with a TOON remote: repo state lives in NIP-34 events on a relay, objects live on Arweave, writes are paid, reads are free. Rig is also the first tenant tooling for TOON Network, and it reuses that project's compute vocabulary unchanged.
+Git with a TOON remote: repo state lives in NIP-34 events on a relay, objects live on Arweave, writes are paid, reads are free. rig is also the first tenant tooling for TOON Compute, and it reuses that project's compute vocabulary unchanged.
 
 ## Language
 
-### Compute (from TOON Network)
+### Compute (from TOON Compute's glossary)
 
-Terms for leases, workloads, providers, listings, and the Provider Directory are defined in TOON Network's `CONTEXT.md` (toon-protocol/TOON_Network) and are used here with exactly those meanings. In particular: Provider, Tenant, Payer, Workload, Lease, Lease Interval, Spawn, Extension, Capability, Listing, Provider Profile, Liveness, Provider Directory, Template.
+Terms for leases, workloads, providers, listings, and the Provider Directory are defined in TOON Compute's `CONTEXT.md` (toon-protocol/TOON_Network) and are used here with exactly those meanings. In particular: Provider, Tenant, Payer, Workload, Lease, Lease Interval, Spawn, Extension, Capability, Listing, Provider Profile, Liveness, Provider Directory, Template.
 
 _Avoid_: deploy (as a synonym for Spawn), pod, node, marketplace (for the Provider Directory)
 
 **Deployment**:
-TOON Network's kind 30437 — a Tenant-signed event pairing an environment with the Lease, Provider, workload and image serving it. rig never publishes one; which Lease serves which environment is local client state. See ADR-0004.
+TOON Compute's kind 30437 — a Tenant-signed event pairing an environment with the Lease, Provider, workload and image serving it. rig never publishes one; which Lease serves which environment is local client state. See ADR-0004.
 _Avoid_: deployment (as loose English for a Site — see _Avoid_ under Site)
 
 ### Continuous integration

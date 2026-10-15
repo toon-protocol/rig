@@ -118,7 +118,7 @@ function MergeStatusBox({ pr }: { pr: PRMetadata }) {
         variant="success"
         size="sm"
         disabled
-        title="Rig Web is read-only; merging happens via the rig CLI"
+        title="rig web is read-only; merging happens via the rig CLI"
       >
         Merge pull request
       </Button>

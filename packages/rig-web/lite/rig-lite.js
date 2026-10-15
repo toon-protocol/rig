@@ -523,7 +523,7 @@ async function boot() {
   const relayQ = `?relay=${encodeURIComponent(relay)}`;
 
   status.remove();
-  document.title = `${name ?? repo} — Rig`;
+  document.title = `${name ?? repo} — rig`;
 
   // ── Repo header: glyph + owner / name + Public pill (repo-layout.tsx) ─────
   const refSelect = el('select');

@@ -122,7 +122,7 @@ clone or a rewritten history that would compute a different root locally.
   touched the repo), rig's lossless amendment path preserves it verbatim —
   rig only ever adds to or edits its own known slots, never `clone`. A
   git-clonable endpoint for rig repos (git smart-HTTP over Arweave behind a
-  TOON Network Workload Gateway) is out of scope for spec #153; see that
+  TOON Compute Workload Gateway) is out of scope for spec #153; see that
   spec's Out of Scope section.
 
 ---

@@ -2,7 +2,7 @@
   "name": "toon-rig",
   "version": "0.0.0",
   "private": true,
-  "description": "The Rig — git-to-TOON write path (@toon-protocol/rig) and the decentralized control-plane frontend (@toon-protocol/rig-web) for TOON Protocol.",
+  "description": "rig — git on TOON: the git-to-TOON write path (@toon-protocol/rig) and the decentralized control-plane frontend (@toon-protocol/rig-web) for TOON Protocol.",
   "type": "module",
   "scripts": {
     "build": "pnpm -r build",
