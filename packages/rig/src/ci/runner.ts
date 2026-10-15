@@ -13,7 +13,7 @@
  *     Docker daemon — the first-slice "coordinator is its own runner" shape
  *     ngit's reference coordinator also uses.
  *
- * A later TOON-lease runner (rent a workload from a TOON Network provider,
+ * A later TOON-lease runner (rent a workload from a TOON Compute provider,
  * blocked on TOON_Network Milestone 1) is a third class behind the SAME
  * interface; that is the whole point of the seam.
  */

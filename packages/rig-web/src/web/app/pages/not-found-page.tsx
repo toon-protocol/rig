@@ -10,7 +10,7 @@ export function NotFoundPage() {
     <div className="rounded-md border p-8 text-center">
       <div className="text-lg font-medium">Page not found</div>
       <p className="mt-1 text-sm text-muted-foreground">
-        This URL doesn&apos;t match any view in The Rig.
+        This URL doesn&apos;t match any view in rig.
       </p>
       <Link
         to="/"

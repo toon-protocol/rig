@@ -44,7 +44,7 @@ export function generatePointerHtml({
   // Escape < as \u003c to prevent </script> breakout XSS
   const safeConfig = JSON.stringify(config).replace(/</g, '\\u003c');
 
-  const title = repo ? `${repo} — Rig` : 'Rig';
+  const title = repo ? `${repo} — rig` : 'rig';
   const baseUrl = `${GATEWAY}/${rigTx}`;
 
   return `<!DOCTYPE html>

@@ -36,12 +36,12 @@ describe('Rig-UI Pointer HTML Generation', () => {
 
     expect(html).toContain('"repo":"my-project"');
     expect(html).toContain('"owner":"npub1abc"');
-    expect(html).toContain('<title>my-project — Rig</title>');
+    expect(html).toContain('<title>my-project — rig</title>');
   });
 
-  it('[P0] relay-wide pointer title is just "Rig"', () => {
+  it('[P0] relay-wide pointer title is just "rig"', () => {
     const html = generatePointerHtml(BASE_OPTS);
-    expect(html).toContain('<title>Rig</title>');
+    expect(html).toContain('<title>rig</title>');
   });
 
   it('[P0] references canonical Rig-UI JS and CSS assets', () => {

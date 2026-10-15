@@ -1,6 +1,6 @@
 # @toon-protocol/rig-web
 
-The Rig — a browser-only SPA that renders TOON Protocol events (NIP-34 git vocabulary first: repos, refs, issues, PRs) from a relay over WebSocket, with git objects fetched from Arweave gateways. No backend, no accounts, no servers.
+rig — a browser-only SPA that renders TOON Protocol events (NIP-34 git vocabulary first: repos, refs, issues, PRs) from a relay over WebSocket, with git objects fetched from Arweave gateways. No backend, no accounts, no servers.
 
 ## Development
 
