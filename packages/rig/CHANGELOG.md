@@ -1,5 +1,11 @@
 # @toon-protocol/rig
 
+## 5.0.2
+
+### Patch Changes
+
+- 83dae40: Brand naming: rig is written lowercase ("rig, git on TOON"), and the compute marketplace formerly called TOON Network is TOON Compute. Docs and comments only.
+
 ## 5.0.1
 
 ### Patch Changes
