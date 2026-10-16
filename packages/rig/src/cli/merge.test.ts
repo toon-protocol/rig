@@ -115,6 +115,7 @@ interface MergeJson {
   revisionId?: string;
   target?: string;
   error?: string;
+  detail?: string;
   partial?: boolean;
   hint?: string;
   closed?: string[];
@@ -557,5 +558,126 @@ describe('rig pr merge', () => {
     it('falls back to the default branch', async () => {
       expect(await target([], [], 'refs/heads/dev')).toBe('refs/heads/dev');
     });
+  });
+});
+
+describe('rig pr merge: multi-event series', () => {
+  const P2 = 'b4'.repeat(32); // sorts after P3, so id order alone is wrong
+  const P3 = 'b3'.repeat(32);
+  const FIRST = '1a'.repeat(20);
+  const LAST = '2b'.repeat(20);
+
+  type Mails = [string, string, string];
+
+  /** Three commits as three format-patch mails, as ngit sends them. */
+  function seriesMails(): Mails {
+    git(fx.dir, 'checkout', '-b', 'series');
+    commitFile(fx.dir, 'one.txt', '1\n', 'one');
+    commitFile(fx.dir, 'two.txt', '2\n', 'two');
+    commitFile(fx.dir, 'three.txt', '3\n', 'three');
+    const mail = (back: number) =>
+      git(fx.dir, 'format-patch', '--stdout', '-1', `HEAD~${back}`) + '\n';
+    const mails: Mails = [mail(2), mail(1), mail(0)];
+    git(fx.dir, 'checkout', 'main');
+    return mails;
+  }
+
+  /**
+   * Root plus two follow-ons, each `e`-replying to the previous patch. The
+   * ngit shape also tags every follow-on with the series root and gives all
+   * three the same `created_at`, so only the reply chain orders them.
+   */
+  function series(
+    mails: Mails,
+    opts: { lastAuthor?: string; middleAuthor?: string; ngit?: boolean } = {}
+  ): NostrEvent[] {
+    const at = (t: number) => (opts.ngit ? 100 : t);
+    const root = opts.ngit ? [['e', PATCH_ID, '', 'root']] : [];
+    return [
+      patchEvent(PATCH_ID, CONTRIB, mails[0], [['commit', FIRST]], at(100)),
+      patchEvent(
+        P2,
+        opts.middleAuthor ?? CONTRIB,
+        mails[1],
+        [['e', PATCH_ID, '', opts.ngit ? 'reply' : 'root']],
+        at(101)
+      ),
+      patchEvent(
+        P3,
+        opts.lastAuthor ?? CONTRIB,
+        mails[2],
+        [...root, ['e', P2, '', 'reply'], ['commit', LAST]],
+        at(102)
+      ),
+    ];
+  }
+
+  it('applies every event of the series and names all SHAs in the 1631', async () => {
+    const w = makeWorld(fx, { events: series(seriesMails()) });
+    expect(await w.run([PATCH_ID, '--yes', '--json'])).toBe(0);
+    const shas = w.last().mergedShas;
+    expect(shas).toHaveLength(3);
+    expect(git(fx.dir, 'rev-parse', 'main')).toBe(shas[2]);
+    expect(git(fx.dir, 'log', '--format=%s', '-3', 'main')).toBe(
+      'three\ntwo\none'
+    );
+    const status = w.published.find((e) => e.kind === 1631);
+    expect(status?.tags).toContainEqual(['applied-as-commits', ...shas]);
+  });
+
+  it('orders an ngit series (root-tagged, same created_at) by its reply chain', async () => {
+    const w = makeWorld(fx, { events: series(seriesMails(), { ngit: true }) });
+    expect(await w.run([PATCH_ID, '--yes', '--json'])).toBe(0);
+    expect(w.last().mergedShas).toHaveLength(3);
+    expect(git(fx.dir, 'log', '--format=%s', '-3', 'main')).toBe(
+      'three\ntwo\none'
+    );
+  });
+
+  it('gates CI on the final commit of the series', async () => {
+    const w = makeWorld(fx, { events: series(seriesMails()) });
+    expect(
+      await w.run([
+        PATCH_ID,
+        '--yes',
+        '--json',
+        '--require-ci-trust',
+        'maintainer-directed',
+      ])
+    ).toBe(1);
+    expect(w.last().error).toBe('ci_gate_failed');
+    expect(w.last().detail).toContain(LAST.slice(0, 12));
+    expect(w.calls).toEqual([]);
+  });
+
+  it('ignores a follow-on patch from a stranger', async () => {
+    const w = makeWorld(fx, {
+      events: series(seriesMails(), { lastAuthor: STRANGER }),
+    });
+    expect(await w.run([PATCH_ID, '--yes', '--json'])).toBe(0);
+    expect(w.last().mergedShas).toHaveLength(2);
+  });
+
+  it("drops what follows a stranger's patch rather than applying over the gap", async () => {
+    const w = makeWorld(fx, {
+      events: series(seriesMails(), { middleAuthor: STRANGER, ngit: true }),
+    });
+    expect(await w.run([PATCH_ID, '--yes', '--json'])).toBe(0);
+    expect(w.last().mergedShas).toHaveLength(1);
+  });
+
+  it('restores everything and publishes nothing when a later patch conflicts', async () => {
+    const mails = seriesMails();
+    const conflicted = commitFile(fx.dir, 'two.txt', 'other\n', 'diverge');
+    const w = makeWorld(fx, {
+      events: series(mails),
+      refs: { 'refs/heads/main': conflicted },
+    });
+    expect(await w.run([PATCH_ID, '--yes', '--json'])).toBe(1);
+    expect(w.last().error).toBe('apply_conflict');
+    expect(w.calls).toEqual([]);
+    expect(git(fx.dir, 'rev-parse', 'main')).toBe(conflicted);
+    expect(git(fx.dir, 'status', '--porcelain')).toBe('');
+    expect(git(fx.dir, 'worktree', 'list').split('\n')).toHaveLength(1);
   });
 });
