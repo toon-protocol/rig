@@ -1,5 +1,16 @@
 # @toon-protocol/rig
 
+## 5.1.0
+
+### Minor Changes
+
+- 8a7a2a2: CLI readers (`rig clone`, `rig fetch`, `rig ci serve`) now honor repo state (kind:30618) signed by the owner or a maintainer declared in the owner's announcement, newest wins. The rule is exported as `authorizedAuthors` and `honoredRepoState`; `authorizedStatusAuthors` is renamed `authorizedAuthors` (the old name stays as a deprecated alias). `rig maintainers add/remove` note that maintainers can move refs.
+- f800760: Add `rig issue status <id> <open|closed>`, `rig issue close <id>` and `rig issue reopen <id>`: aliases over the paid status publish (kind:1632 / kind:1630). `applied` and `draft` are rejected for issues before anything is paid.
+
+### Patch Changes
+
+- 04254ad: Pin `@toon-protocol/client` to exactly 4.1.2. Client 4.2.0 and 5.x sign x402 vouchers for a newer connector wire than the devnet and provider fleet run (`rust-2026.09.29.1`), so `^4.1.2` let a fresh install of rig pick up a client the network refuses.
+
 ## 5.0.2
 
 ### Patch Changes
