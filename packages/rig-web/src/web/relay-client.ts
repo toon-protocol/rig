@@ -29,15 +29,20 @@ export function buildProfileFilter(pubkeys: string[]): NostrFilter {
 /**
  * Build a Nostr filter for querying repository refs events (kind:30618).
  *
- * @param pubkey - Repository owner's pubkey (hex)
+ * @param authors - Authorized author pubkey(s) (hex): the owner, plus the
+ *   maintainers of the owner's announcement (ADR-0005)
  * @param repoId - Repository identifier (d tag value from kind:30617)
  * @returns Nostr filter for kind:30618 events
  */
 export function buildRepoRefsFilter(
-  pubkey: string,
+  authors: string | readonly string[],
   repoId: string
 ): NostrFilter {
-  return { kinds: [30618], authors: [pubkey], '#d': [repoId] };
+  return {
+    kinds: [30618],
+    authors: typeof authors === 'string' ? [authors] : [...authors],
+    '#d': [repoId],
+  };
 }
 
 /**

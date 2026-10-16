@@ -19,6 +19,12 @@ import {
   PATCH_KIND,
   REPOSITORY_ANNOUNCEMENT_KIND,
 } from '@toon-protocol/core/nip34';
+import { REVISION_ROOT_MARKER } from './repo-authority.js';
+export {
+  MAINTAINERS_TAG,
+  parseMaintainers,
+  REVISION_ROOT_MARKER,
+} from './repo-authority.js';
 import type {
   STATUS_APPLIED_KIND,
   STATUS_CLOSED_KIND,
@@ -53,22 +59,10 @@ export interface UnsignedEvent {
   created_at: number;
 }
 
+
 // ---------------------------------------------------------------------------
 // kind:30617 — Repository Announcement (+ maintainer authority, #287)
 // ---------------------------------------------------------------------------
-
-/**
- * NIP-34 tag naming the repo's declared maintainers: one multi-valued tag
- * `["maintainers", "<hex-pubkey>", "<hex-pubkey>", …]` on the kind:30617
- * announcement (mirrors the spec's multi-valued `relays` tag). The repo
- * OWNER — the announcement event's own pubkey — is ALWAYS an implicit
- * maintainer and need not be listed. Consumers derive an issue/PR's status
- * ONLY from kind:1630-1633 events signed by owner ∪ maintainers (#287): the
- * relay is permissionless, so this is the CONSUMER-side authority filter.
- */
-export const MAINTAINERS_TAG = 'maintainers';
-
-const HEX64 = /^[0-9a-f]{64}$/;
 
 /**
  * First value of the named tag, or `undefined`. Tag names are matched
@@ -80,27 +74,6 @@ export function firstTagValue(
   name: string
 ): string | undefined {
   return tags.find((t) => t[0] === name)?.[1];
-}
-
-/**
- * Collect the declared maintainer pubkeys (lowercased hex) from a kind:30617
- * event's tags. Tolerant of repeated `maintainers` tags and non-hex noise —
- * only 64-char hex values survive. Does NOT include the owner (implicit).
- */
-export function parseMaintainers(tags: string[][]): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const tag of tags) {
-    if (tag[0] !== MAINTAINERS_TAG) continue;
-    for (const value of tag.slice(1)) {
-      const hex = value.toLowerCase();
-      if (HEX64.test(hex) && !seen.has(hex)) {
-        seen.add(hex);
-        out.push(hex);
-      }
-    }
-  }
-  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -463,6 +436,9 @@ export function commentBelongsToThread(
  *                  to '' for callers that only reference commits by tag
  * @param description - PR body/cover text (`description` tag) — kept out of
  *                      `content` so `git am` still applies it
+ * @param revises - Makes this a NIP-34 revision of an existing root patch:
+ *                  `["t","root-revision"]` plus a NIP-10 `reply`-marked `e`
+ *                  tag to the root (and a `p` tag for the root's author)
  */
 export function buildPatch(
   repoOwnerPubkey: string,
@@ -471,13 +447,25 @@ export function buildPatch(
   commits: { sha: string; parentSha: string }[],
   branchTag?: string,
   content = '',
-  description?: string
+  description?: string,
+  revises?: { rootEventId: string; rootAuthorPubkey?: string }
 ): UnsignedEvent {
   const tags: string[][] = [
     ['a', `${REPOSITORY_ANNOUNCEMENT_KIND}:${repoOwnerPubkey}:${repoId}`],
     ['p', repoOwnerPubkey],
     ['subject', title],
   ];
+
+  if (revises) {
+    tags.push(['t', REVISION_ROOT_MARKER]);
+    tags.push(['e', revises.rootEventId, '', 'reply']);
+    if (
+      revises.rootAuthorPubkey &&
+      revises.rootAuthorPubkey.toLowerCase() !== repoOwnerPubkey.toLowerCase()
+    ) {
+      tags.push(['p', revises.rootAuthorPubkey]);
+    }
+  }
 
   if (description !== undefined && description !== '') {
     tags.push(['description', description]);

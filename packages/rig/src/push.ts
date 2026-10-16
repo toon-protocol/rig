@@ -73,7 +73,8 @@ export class NonFastForwardError extends Error {
     super(
       `non-fast-forward update rejected for ${refs
         .map((r) => r.refname)
-        .join(', ')} — re-run with force to overwrite the remote ref(s)`
+        .join(', ')} — run \`rig fetch\` and integrate the remote commits, ` +
+        'or re-run with force to overwrite the remote ref(s)'
     );
     this.name = 'NonFastForwardError';
   }
