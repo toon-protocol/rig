@@ -1141,6 +1141,105 @@ describe('daemon delegation (#279)', () => {
     return { posts, fetchImpl };
   }
 
+  describe('maintainer push with a daemon running (#252)', () => {
+    const REPO_OWNER = 'cd'.repeat(32);
+
+    /** Remote state announced by REPO_OWNER, declaring OWNER a maintainer. */
+    function ownerState(refs: Map<string, string>): RemoteState {
+      return emptyRemoteState({
+        announced: true,
+        refs,
+        announceEvent: {
+          id: '1'.repeat(64),
+          pubkey: REPO_OWNER,
+          created_at: 1,
+          kind: 30617,
+          content: '',
+          sig: '',
+          tags: [
+            ['d', 'demo'],
+            ['maintainers', OWNER],
+          ],
+        },
+      });
+    }
+
+    /** A same-identity daemon running; neither SELF nor OWNER is toon.owner. */
+    async function daemonDeps(remote: RemoteState) {
+      await writeToonConfig(repoDir, { repoId: 'demo', owner: REPO_OWNER });
+      const fake = makeStandalone(remote);
+      const { posts, fetchImpl } = daemonFetch(daemonPlan());
+      const h = makeDeps({ ...env, RIG_MNEMONIC: TEST_MNEMONIC }, repoDir, {
+        loadStandalone: fake.load,
+        probeDaemon: sameIdentityProbe(),
+        fetchImpl,
+      });
+      return { fake, posts, h };
+    }
+
+    it("fast-forwards the owner's honored state via standalone, carrying other refs over", async () => {
+      const first = git(['rev-parse', 'HEAD'], repoDir).trim();
+      writeFileSync(join(repoDir, 'more.txt'), 'more\n');
+      git(['add', '.'], repoDir);
+      git(['commit', '-m', 'second'], repoDir);
+      const other = 'e'.repeat(40);
+      const { fake, posts, h } = await daemonDeps(
+        ownerState(
+          new Map([
+            ['refs/heads/main', first],
+            ['refs/heads/theirs', other],
+          ])
+        )
+      );
+      expect(await runPush(['--yes'], h.deps)).toBe(0);
+      expect(posts).toHaveLength(0);
+      expect(fake.remoteRequests.map((r) => r.ownerPubkey)).toEqual([
+        REPO_OWNER,
+      ]);
+      expect(fake.published.map((p) => p.kind)).toEqual([30618]);
+      expect(fake.published[0]?.tags).toContainEqual(['d', 'demo']);
+      expect(fake.published[0]?.tags).toContainEqual([
+        'refs/heads/theirs',
+        other,
+      ]);
+      const text = h.err.join('\n');
+      expect(text).toContain('running standalone instead of the daemon');
+      expect(text).not.toContain('differs from the active identity');
+    });
+
+    it("refuses a diverged ref against the owner's state", async () => {
+      const { fake, posts, h } = await daemonDeps(
+        ownerState(new Map([['refs/heads/main', 'd'.repeat(40)]]))
+      );
+      expect(await runPush(['--yes'], h.deps)).toBe(1);
+      expect(posts).toHaveLength(0);
+      expect(fake.uploads).toHaveLength(0);
+      expect(fake.published).toHaveLength(0);
+      expect(h.err.join('\n')).toContain('rig fetch');
+    });
+
+    it('--force publishes into the owner despite divergence', async () => {
+      const { fake, posts, h } = await daemonDeps(
+        ownerState(new Map([['refs/heads/main', 'd'.repeat(40)]]))
+      );
+      expect(await runPush(['--yes', '--force'], h.deps)).toBe(0);
+      expect(posts).toHaveLength(0);
+      expect(fake.published.map((p) => p.kind)).toEqual([30618]);
+      expect(fake.published[0]?.tags).toContainEqual(['d', 'demo']);
+    });
+
+    it('a non-maintainer still gets the warning and pushes to their own namespace', async () => {
+      const { fake, h } = await daemonDeps(emptyRemoteState());
+      expect(await runPush(['--yes'], h.deps)).toBe(0);
+      expect(h.err.join('\n')).toContain('differs from the active identity (');
+      expect(fake.remoteRequests.map((r) => r.ownerPubkey)).toEqual([
+        REPO_OWNER,
+        OWNER,
+      ]);
+      expect(fake.published.length).toBeGreaterThan(0);
+    });
+  });
+
   it('delegates estimate + execute to the daemon; standalone loader untouched', async () => {
     const fake = makeStandalone(emptyRemoteState());
     const { posts, fetchImpl } = daemonFetch(daemonPlan());
