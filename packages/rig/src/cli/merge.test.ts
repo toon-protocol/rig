@@ -504,6 +504,29 @@ describe('rig pr merge', () => {
       ).toBe(1);
       expect(w.published.filter((p) => p.kind === 1632)).toEqual([]);
     });
+
+    it('a failed push closes no issues', async () => {
+      const w = makeWorld(fx, { events: [patch()], failKind: 30618 });
+      expect(
+        await w.run([PATCH_ID, '--yes', '--json', '--closes', ISSUE_A])
+      ).toBe(1);
+      expect(w.calls).not.toContain('publish:1632');
+    });
+
+    it('reports a failed close after a successful merge as a partial success', async () => {
+      const w = makeWorld(fx, { events: [patch()], failKind: 1632 });
+      expect(
+        await w.run([PATCH_ID, '--yes', '--json', '--closes', ISSUE_A])
+      ).toBe(1);
+      const doc = w.last();
+      expect(doc.partial).toBe(true);
+      expect(doc.error).toBe('close_publish_failed');
+      expect(doc.closed).toEqual([]);
+      expect(doc.closeErrors).toEqual([
+        { issueId: ISSUE_A, error: 'relay said no' },
+      ]);
+      expect(doc.hint).toContain(`rig issue close ${ISSUE_A}`);
+    });
   });
 
   describe('target resolution', () => {

@@ -477,8 +477,9 @@ export async function runPrMerge(
 
     // ── 5b. CI gate: refuse before any fee is shown or spent ────────────────
     if (flags.requireTrust !== undefined) {
-      // The series head as the contributor tagged it (what CI ran on); the
-      // applied head when the patch carries no commit tags.
+      // The series head as the contributor tagged it (what CI ran on). With
+      // no commit tags we fall back to the locally rebuilt head, which no CI
+      // run can have seen, so the gate then refuses.
       const headCommit = (
         latest.tags.filter((t) => t[0] === 'commit').at(-1)?.[1] ??
         applied.newHead
@@ -607,7 +608,7 @@ export async function runPrMerge(
 
     // ── 9. Closes: only after the push landed, one 1632 per issue ───────────
     const closed: string[] = [];
-    const closeErrors: string[] = [];
+    const closeErrors: { issueId: string; error: string }[] = [];
     for (const issueId of flags.closes) {
       try {
         await ctx.publisher.publishEvent(
@@ -616,11 +617,15 @@ export async function runPrMerge(
         );
         closed.push(issueId);
       } catch (err) {
-        closeErrors.push(
-          `${issueId}: ${err instanceof Error ? err.message : String(err)}`
-        );
+        closeErrors.push({
+          issueId,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
+    const closeRetryHints = closeErrors.map(
+      (e) => `rig issue close ${e.issueId}`
+    );
 
     const retryHint = `rig pr status ${root.id} applied`;
     if (flags.json) {
@@ -644,7 +649,18 @@ export async function runPrMerge(
               detail: statusError,
               hint: `the push succeeded but the applied status was not published — retry with \`${retryHint}\``,
             }
-          : {}),
+          : closeErrors.length > 0
+            ? {
+                partial: true,
+                error: 'close_publish_failed',
+                detail: closeErrors
+                  .map((e) => `${e.issueId}: ${e.error}`)
+                  .join('; '),
+                hint: `the push succeeded but some issues were not closed — retry with ${closeRetryHints
+                  .map((h) => `\`${h}\``)
+                  .join(', ')}`,
+              }
+            : {}),
       });
     } else {
       for (const line of renderResult(result)) io.out(line);
@@ -654,19 +670,24 @@ export async function runPrMerge(
         );
       }
     }
-    for (const e of closeErrors) io.err(`failed to close issue ${e}`);
     if (!flags.json && closed.length > 0) {
       io.out(`Closed ${closed.length} issue(s): ${closed.join(', ')}`);
     }
-    if (statusError !== undefined || closeErrors.length > 0) {
-      if (statusError === undefined) return 1;
+    if (statusError !== undefined) {
       io.err(
         `partial success: the push succeeded but publishing the applied status failed: ${statusError}`
       );
       io.err(`retry the status with: ${retryHint}`);
-      return 1;
     }
-    return 0;
+    if (closeErrors.length > 0) {
+      for (const e of closeErrors) {
+        io.err(
+          `partial success: the push succeeded but closing issue ${e.issueId} failed: ${e.error}`
+        );
+      }
+      for (const h of closeRetryHints) io.err(`retry the close with: ${h}`);
+    }
+    return statusError !== undefined || closeErrors.length > 0 ? 1 : 0;
   } catch (err) {
     return emitCliError(io, flags.json, 'pr merge', err);
   } finally {
