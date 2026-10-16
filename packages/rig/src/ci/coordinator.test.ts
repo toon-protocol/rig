@@ -661,6 +661,50 @@ describe('push trigger', () => {
     await handle.stop();
   });
 
+  it.each([
+    ['lower id first', true],
+    ['higher id first', false],
+  ])(
+    'two authorized 30618s sharing a created_at settle on the lower id, whatever the arrival order (%s)',
+    async (_name, lowFirst) => {
+      const world = makeWorld();
+      const { announce, refsEvent } = world.snapshot(1000);
+      world.relay.serve([announce, refsEvent]);
+      const handle = await world.start();
+
+      const shaA = world.commit('a.txt', 'a\n', 'a');
+      const { refsEvent: stateA } = world.snapshot(2000);
+      const shaB = world.commit('b.txt', 'b\n', 'b');
+      const { refsEvent: stateB } = world.snapshot(2000);
+      const low = { ...stateA, id: 'a'.repeat(64) };
+      const high = { ...stateB, id: 'b'.repeat(64) };
+      for (const ev of lowFirst ? [low, high] : [high, low]) {
+        world.relay.push(ev);
+        await handle.idle();
+      }
+
+      const cursor = JSON.parse(
+        readFileSync(cursorPath(world.stateDir), 'utf-8')
+      );
+      expect(cursor.repos[ADDR].lastEventId).toBe(low.id);
+      expect(cursor.repos[ADDR].refs['refs/heads/main']).toBe(shaA);
+      expect(shaA).not.toBe(shaB);
+
+      // A newer state still replaces it; an older one is ignored.
+      const shaC = world.commit('c.txt', 'c\n', 'c');
+      const { refsEvent: newer } = world.snapshot(3000);
+      world.relay.push(newer);
+      await handle.idle();
+      world.relay.push({ ...stateA, id: 'c'.repeat(64), created_at: 1500 });
+      await handle.idle();
+      const after = JSON.parse(
+        readFileSync(cursorPath(world.stateDir), 'utf-8')
+      );
+      expect(after.repos[ADDR].refs['refs/heads/main']).toBe(shaC);
+      await handle.stop();
+    }
+  );
+
   it('a tag move runs only the workflows whose on: push filter matches refs/tags, tagged o=push and r=refs/tags/… (#129)', async () => {
     const world = makeWorld();
     writeFileSync(

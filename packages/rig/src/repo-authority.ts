@@ -72,6 +72,17 @@ export function authorizedAuthors(
   ]);
 }
 
+/** True when `candidate` beats `current`: newer `created_at`, a tie to the lowest id. */
+export function supersedes(
+  candidate: { created_at: number; id: string },
+  current: { created_at: number; id: string }
+): boolean {
+  return (
+    candidate.created_at > current.created_at ||
+    (candidate.created_at === current.created_at && candidate.id < current.id)
+  );
+}
+
 /**
  * The honored repo state: among `candidates` signed by an authorized author,
  * the highest `created_at`, ties broken by lowest event id. `null` when none
@@ -84,13 +95,7 @@ export function honoredRepoState<E extends AuthorityEvent>(
   let winner: E | null = null;
   for (const event of candidates) {
     if (!authorized.has(event.pubkey.toLowerCase())) continue;
-    if (
-      winner === null ||
-      event.created_at > winner.created_at ||
-      (event.created_at === winner.created_at && event.id < winner.id)
-    ) {
-      winner = event;
-    }
+    if (winner === null || supersedes(event, winner)) winner = event;
   }
   return winner;
 }

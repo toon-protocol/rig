@@ -64,7 +64,7 @@ import { join } from 'node:path';
 import { REPOSITORY_ANNOUNCEMENT_KIND } from '@toon-protocol/core/nip34';
 import { contentTypeForPath } from '../mime.js';
 import { REPOSITORY_STATE_KIND } from '../nip34-events.js';
-import { authorizedAuthors } from '../repo-authority.js';
+import { authorizedAuthors, supersedes } from '../repo-authority.js';
 import type { UnsignedEvent } from '../nip34-events.js';
 import { parseStateRefTags } from '../nip34-refs.js';
 import type { FetchLike } from '../object-fetch.js';
@@ -1332,7 +1332,12 @@ export async function startCoordinator(
   const markRepoProcessed = (repo: RepoRuntime, ev: NostrEvent): void => {
     const cursor = repo.cursor as RepoCursor;
     cursor.processed.push(ev.id);
-    if (ev.created_at > cursor.lastCreatedAt) {
+    if (
+      supersedes(ev, {
+        created_at: cursor.lastCreatedAt,
+        id: cursor.lastEventId,
+      })
+    ) {
       cursor.lastCreatedAt = ev.created_at;
       cursor.lastEventId = ev.id;
     }
@@ -1345,7 +1350,16 @@ export async function startCoordinator(
     ev: NostrEvent
   ): Promise<void> => {
     const cursor = repo.cursor as RepoCursor;
-    if (repoSeen(repo, ev) || ev.created_at < cursor.lastCreatedAt) return;
+    if (repoSeen(repo, ev)) return;
+    // The shared honored-state rule: newest `created_at`, a tie to the lowest
+    // id — so every arrival order converges on the refs rig clone shows.
+    if (
+      !supersedes(ev, {
+        created_at: cursor.lastCreatedAt,
+        id: cursor.lastEventId,
+      })
+    )
+      return;
     // Both ref tag shapes, through the shared parser (`../nip34-refs.ts`), so
     // a coordinator serves repos whose state was written by ngit or any other
     // conformant NIP-34 client exactly as it serves rig's own (rig#156).
