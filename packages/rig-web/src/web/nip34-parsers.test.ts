@@ -11,6 +11,7 @@ import {
 import {
   parseRepoAnnouncement,
   parseRepoRefs,
+  parseHonoredRepoRefs,
   parseIssue,
   parsePR,
   parseComment,
@@ -820,9 +821,7 @@ describe('NIP-34 Parsers - the captured ngit kind:1111 thread (#155/#159)', () =
 
     expect(parsed.every((c) => c !== null)).toBe(true);
     expect(
-      parsed.every(
-        (c) => c?.rootEventId === NGIT_COMMENT_THREAD_ROOT_EVENT_ID
-      )
+      parsed.every((c) => c?.rootEventId === NGIT_COMMENT_THREAD_ROOT_EVENT_ID)
     ).toBe(true);
     expect(
       NGIT_COMMENT_THREAD_COMMENTS.every((e) =>
@@ -1015,9 +1014,7 @@ describe('NIP-34 Parsers - resolvePRStatus (8.5-UNIT-004)', () => {
         marker: true,
       }),
     ];
-    expect(resolvePRStatus(prEventId, statusEvents, AUTHORIZED)).toBe(
-      'closed'
-    );
+    expect(resolvePRStatus(prEventId, statusEvents, AUTHORIZED)).toBe('closed');
   });
 
   it('[P0] the winner is the LATEST authorized status regardless of which form each event uses (rig#160)', () => {
@@ -1034,9 +1031,7 @@ describe('NIP-34 Parsers - resolvePRStatus (8.5-UNIT-004)', () => {
         marker: true,
       }), // marker, closed — later, wins
     ];
-    expect(resolvePRStatus(prEventId, statusEvents, AUTHORIZED)).toBe(
-      'closed'
-    );
+    expect(resolvePRStatus(prEventId, statusEvents, AUTHORIZED)).toBe('closed');
   });
 
   it('[P0] a marker-form status from an unauthorized pubkey is ignored, same as the bare form (rig#160)', () => {
@@ -1562,5 +1557,57 @@ describe('NIP-34 Parsers - parseRepoRefs: dual ref tag shapes', () => {
     ).toHaveLength(60);
     expect(refs.size).toBe(64);
     expect([...refs.keys()].some((r) => r.endsWith('^{}'))).toBe(false);
+  });
+});
+
+describe('NIP-34 Parsers - parseHonoredRepoRefs (ADR-0005)', () => {
+  const owner = 'aa'.repeat(32);
+  const maintainer = 'bb'.repeat(32);
+  const stranger = 'cc'.repeat(32);
+
+  function state(pubkey: string, created_at: number, sha: string, id: string) {
+    return {
+      id,
+      pubkey,
+      created_at,
+      kind: 30618,
+      content: '',
+      sig: '',
+      tags: [
+        ['d', 'repo'],
+        ['refs/heads/main', sha],
+      ],
+    } as NostrEvent;
+  }
+
+  it("resolves a maintainer-signed state newer than the owner's", () => {
+    const events = [
+      state(owner, 100, '1'.repeat(40), '01'),
+      state(maintainer, 200, '2'.repeat(40), '02'),
+    ];
+    const refs = parseHonoredRepoRefs(
+      events,
+      new Set([owner, maintainer]),
+      'repo'
+    );
+    expect(refs?.refs.get('refs/heads/main')).toBe('2'.repeat(40));
+  });
+
+  it("ignores a stranger's newer state", () => {
+    const events = [
+      state(owner, 100, '1'.repeat(40), '01'),
+      state(stranger, 999, '3'.repeat(40), '03'),
+    ];
+    const refs = parseHonoredRepoRefs(
+      events,
+      new Set([owner, maintainer]),
+      'repo'
+    );
+    expect(refs?.refs.get('refs/heads/main')).toBe('1'.repeat(40));
+  });
+
+  it('returns null when only strangers signed', () => {
+    const events = [state(stranger, 999, '3'.repeat(40), '03')];
+    expect(parseHonoredRepoRefs(events, new Set([owner]), 'repo')).toBeNull();
   });
 });

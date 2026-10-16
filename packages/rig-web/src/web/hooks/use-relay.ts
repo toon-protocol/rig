@@ -27,6 +27,10 @@ export function useRelay(
 
   // Only re-fetch if filter JSON actually changed
   const filterJson = filter ? JSON.stringify(filter) : null;
+  // The filter whose fetch the effect last started. Until the effect catches
+  // up with a new filter (e.g. a dependent query going null → filter), report
+  // loading rather than a settled empty result for one render.
+  const [startedJson, setStartedJson] = useState<string | null>(null);
 
   useEffect(() => {
     if (!filterJson) {
@@ -38,6 +42,7 @@ export function useRelay(
 
     const parsed = JSON.parse(filterJson) as NostrFilter;
     filterRef.current = parsed;
+    setStartedJson(filterJson);
     setLoading(true);
     setError(null);
 
@@ -64,5 +69,6 @@ export function useRelay(
     };
   }, [relayUrl, filterJson]);
 
-  return { events, unparseable, loading, error };
+  const pending = filterJson !== null && filterJson !== startedJson;
+  return { events, unparseable, loading: loading || pending, error };
 }

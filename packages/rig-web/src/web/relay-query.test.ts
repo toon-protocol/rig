@@ -78,6 +78,16 @@ describe('Repo Refs Query Builder', () => {
       '#d': [repoId],
     });
   });
+
+  it('[P1] buildRepoRefsFilter queries every authorized author', () => {
+    const owner = 'ab'.repeat(32);
+    const maintainer = 'cd'.repeat(32);
+    expect(buildRepoRefsFilter([owner, maintainer], 'r')).toEqual({
+      kinds: [30618],
+      authors: [owner, maintainer],
+      '#d': ['r'],
+    });
+  });
 });
 
 // ============================================================================

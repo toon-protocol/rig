@@ -19,7 +19,8 @@
     "noPropertyAccessFromIndexSignature": true,
     "jsx": "react-jsx",
     "paths": {
-      "@/*": ["./src/web/*"]
+      "@/*": ["./src/web/*"],
+      "@toon-protocol/rig/repo-authority": ["../rig/src/repo-authority.ts"]
     }
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts", "tests/**/*.tsx", "*.config.ts"],
