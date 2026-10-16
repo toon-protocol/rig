@@ -28,7 +28,9 @@ import {
   MAINTAINERS_TAG,
   authorizedAuthors,
   honoredRepoState,
+  isPatchRevision,
   parseMaintainers,
+  selectRevision,
 } from '@toon-protocol/rig/repo-authority';
 
 // -------------------------------------------------------------------------
@@ -355,6 +357,25 @@ export interface PRMetadata {
   mergeBase?: string;
   /** kind:1618 only: labels, from `t` tags. */
   labels?: string[];
+  /**
+   * kind:1617 roots only, set by {@link collapsePatchRevisions}: every
+   * authorized revision of the patch set, oldest first (the root first). The
+   * fields above are the latest revision's; `eventId`, `authorPubkey`,
+   * `createdAt` and status stay the root's.
+   */
+  revisions?: PRRevision[];
+}
+
+/** One revision of a patch set: the root patch, or an authorized revision. */
+export interface PRRevision {
+  eventId: string;
+  authorPubkey: string;
+  createdAt: number;
+  title: string;
+  content: string;
+  commitShas: string[];
+  baseBranch: string;
+  description?: string;
 }
 
 /**
@@ -462,6 +483,61 @@ export function parsePR(event: NostrEvent): PRMetadata | null {
     sourceKind: isPullRequest ? 1618 : 1617,
     ...(description !== undefined ? { description } : {}),
     ...(isPullRequest ? parsePullRequestPointer(event.tags) : {}),
+  };
+}
+
+/**
+ * Fold patch revisions into their roots. A kind:1617 carrying the
+ * `root-revision` marker is a revision of its root, never a list entry (even
+ * when unauthorized or orphaned). Each root takes the content of its latest
+ * authorized revision (the shared {@link selectRevision} rule, the same one
+ * `rig pr show` uses) and lists all authorized revisions in `revisions`; a
+ * stranger's revision is never the current one. `authorized` is the repo's
+ * authorized authors (lowercased hex); a root's own author counts too.
+ */
+export function collapsePatchRevisions(
+  events: readonly NostrEvent[],
+  authorized: ReadonlySet<string>
+): PRMetadata[] {
+  const isRevision = (e: NostrEvent) => e.kind === 1617 && isPatchRevision(e);
+  const revisions = events.filter(isRevision);
+  const out: PRMetadata[] = [];
+  for (const ev of events) {
+    if (isRevision(ev)) continue;
+    const root = parsePR(ev);
+    if (!root) continue;
+    if (ev.kind !== 1617) {
+      out.push(root);
+      continue;
+    }
+    const { latest, earlier } = selectRevision(ev, revisions, authorized);
+    const parsed = [...earlier, latest].map((e) =>
+      e === ev ? root : (parsePR(e) as PRMetadata)
+    );
+    const tip = parsed[parsed.length - 1] as PRMetadata;
+    // The latest revision's content, under the root's identity and status.
+    out.push({
+      ...tip,
+      eventId: root.eventId,
+      authorPubkey: root.authorPubkey,
+      createdAt: root.createdAt,
+      status: root.status,
+      revisions: parsed.map(toPRRevision),
+    });
+  }
+  return out;
+}
+
+function toPRRevision(pr: PRMetadata): PRRevision {
+  return {
+    eventId: pr.eventId,
+    authorPubkey: pr.authorPubkey,
+    createdAt: pr.createdAt,
+    title: pr.title,
+    content: pr.content,
+    commitShas: pr.commitShas,
+    baseBranch: pr.baseBranch,
+    ...(pr.description !== undefined ? { description: pr.description } : {}),
   };
 }
 
