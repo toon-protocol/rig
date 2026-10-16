@@ -1071,6 +1071,56 @@ describe('error mapping', () => {
   });
 });
 
+describe('rig issue status / close / reopen', () => {
+  it('status closed and close publish kind:1632 with the repo a-tag', async () => {
+    for (const args of [
+      ['status', ROOT_EVENT, 'closed', '--yes'],
+      ['close', ROOT_EVENT, '--yes'],
+    ]) {
+      fake.published.length = 0;
+      expect(await runIssue(args, deps().deps)).toBe(0);
+      const { event } = fake.published[0] as FakeStandalone['published'][0];
+      expect(event.kind).toBe(1632);
+      expect(event.tags).toContainEqual(['a', `30617:${CONFIG_OWNER}:demo`]);
+    }
+  });
+
+  it('status open and reopen publish kind:1630', async () => {
+    for (const args of [
+      ['status', ROOT_EVENT, 'open', '--yes'],
+      ['reopen', ROOT_EVENT, '--yes'],
+    ]) {
+      fake.published.length = 0;
+      expect(await runIssue(args, deps().deps)).toBe(0);
+      expect(fake.published[0]?.event.kind).toBe(1630);
+    }
+  });
+
+  it('rejects applied/draft with a usage error before paying (exit 2)', async () => {
+    for (const word of ['applied', 'draft']) {
+      const h = deps();
+      expect(
+        await runIssue(['status', ROOT_EVENT, word, '--yes'], h.deps)
+      ).toBe(2);
+      expect(h.err.join('\n')).toContain('Usage: rig issue status');
+    }
+    expect(await runIssue(['close'], deps().deps)).toBe(2);
+    expect(await runIssue(['close', ROOT_EVENT, 'extra'], deps().deps)).toBe(2);
+    expect(fake.published).toHaveLength(0);
+  });
+
+  it('--json names the command like pr status', async () => {
+    const h = deps();
+    expect(
+      await runIssue(['close', ROOT_EVENT, '--json', '--yes'], h.deps)
+    ).toBe(0);
+    expect(JSON.parse(h.out.join('\n'))).toMatchObject({
+      command: 'issue status',
+      kind: 1632,
+    });
+  });
+});
+
 describe('usage', () => {
   it('per-command --help prints usage and exits 0 without publishing', async () => {
     for (const [run, args, needle] of [

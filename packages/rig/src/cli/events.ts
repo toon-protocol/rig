@@ -227,6 +227,19 @@ now passes through to \`git status\`.)
 Options:
 ${COMMON_FLAGS_USAGE}`;
 
+export const ISSUE_STATUS_USAGE = `Usage: rig issue status <issue-event-id> <open|closed> [options]
+       rig issue close <issue-event-id> [options]
+       rig issue reopen <issue-event-id> [options]
+
+Set the status of an issue — a paid publish; writes are permanent and
+non-refundable. Aliases over \`rig pr status\`: \`closed\` / \`close\` publish
+kind:1632, \`open\` / \`reopen\` publish kind:1630, against the 64-char hex id
+of the issue, with the repo a-tag attached. \`applied\` and \`draft\` apply to
+patches only and are rejected for issues (use \`rig pr status\`).
+
+Options:
+${COMMON_FLAGS_USAGE}`;
+
 export const PR_USAGE = `${PR_CREATE_USAGE}
 
 ${PR_STATUS_USAGE}
@@ -298,7 +311,7 @@ function pickCommon(values: Record<string, unknown>): CommonFlags {
 // Shared publish pipeline
 // ---------------------------------------------------------------------------
 
-type EventCommand = 'issue' | 'comment' | 'pr' | 'pr status';
+type EventCommand = 'issue' | 'comment' | 'pr' | 'pr status' | 'issue status';
 
 interface RunEventOptions {
   command: EventCommand;
@@ -549,7 +562,17 @@ export async function runIssue(
     io.out(ISSUE_LIST_USAGE);
     io.out('');
     io.out(ISSUE_SHOW_USAGE);
+    io.out('');
+    io.out(ISSUE_STATUS_USAGE);
     return 0;
+  }
+  // Paid status aliases over the kind:1630/1632 publish.
+  if (sub === 'status') return runStatusCommand(rest, deps, ISSUE_STATUS_SPEC);
+  if (sub === 'close') {
+    return runStatusCommand(rest, deps, ISSUE_STATUS_SPEC, 'closed');
+  }
+  if (sub === 'reopen') {
+    return runStatusCommand(rest, deps, ISSUE_STATUS_SPEC, 'open');
   }
   // FREE read subcommands (#278): relay queries only, no payment path.
   if (sub === 'list') return runIssueList(rest, deps);
@@ -557,7 +580,7 @@ export async function runIssue(
   if (sub !== 'create') {
     io.err(
       sub === undefined
-        ? 'missing subcommand: rig issue <create|list|show>'
+        ? 'missing subcommand: rig issue <create|list|show|status|close|reopen>'
         : `unknown rig issue subcommand: ${sub}`
     );
     io.err(ISSUE_USAGE);
@@ -842,7 +865,7 @@ export async function runPr(
     case 'create':
       return runPrCreate(rest, deps);
     case 'status':
-      return runPrStatus(rest, deps);
+      return runStatusCommand(rest, deps, PR_STATUS_SPEC);
     // FREE read subcommands (#278): relay queries only, no payment path.
     case 'list':
       return runPrList(rest, deps);
@@ -1025,10 +1048,38 @@ function isStatusValue(value: string): value is GitStatusValue {
   return Object.hasOwn(STATUS_KIND_BY_VALUE, value);
 }
 
-/** `rig pr status` — kind:1630-1633 status publish. */
-async function runPrStatus(
+interface StatusSpec {
+  command: 'pr status' | 'issue status';
+  usage: string;
+  allowed: readonly GitStatusValue[];
+  /** Positional shape shown in the arity error. */
+  shape: string;
+}
+
+const PR_STATUS_SPEC: StatusSpec = {
+  command: 'pr status',
+  usage: PR_STATUS_USAGE,
+  allowed: ['open', 'applied', 'closed', 'draft'],
+  shape: '<target-event-id> <open|applied|closed|draft>',
+};
+
+const ISSUE_STATUS_SPEC: StatusSpec = {
+  command: 'issue status',
+  usage: ISSUE_STATUS_USAGE,
+  allowed: ['open', 'closed'],
+  shape: '<issue-event-id> <open|closed>',
+};
+
+/**
+ * Status publish (kind:1630-1633) behind `rig pr status` and the `rig issue
+ * status|close|reopen` aliases. `fixedStatus` is set by the shortcuts, which
+ * take only the target id. Validation happens before anything is paid.
+ */
+async function runStatusCommand(
   args: string[],
-  deps: EventCommandDeps
+  deps: EventCommandDeps,
+  spec: StatusSpec,
+  fixedStatus?: GitStatusValue
 ): Promise<number> {
   const { io } = deps;
 
@@ -1043,31 +1094,34 @@ async function runPrStatus(
     });
     flags = pickCommon(values);
     if (flags.help) {
-      io.out(PR_STATUS_USAGE);
+      io.out(spec.usage);
       return 0;
     }
-    if (positionals.length !== 2) {
+    const want = fixedStatus === undefined ? 2 : 1;
+    if (positionals.length !== want) {
       throw new Error(
-        'expected exactly two arguments: <target-event-id> <open|applied|closed|draft>'
+        fixedStatus === undefined
+          ? `expected exactly two arguments: ${spec.shape}`
+          : 'expected exactly one argument: <issue-event-id>'
       );
     }
     targetEventId = positionals[0] as string;
     assertHex64(targetEventId, '<target-event-id>');
-    const rawStatus = positionals[1] as string;
-    if (!isStatusValue(rawStatus)) {
+    const rawStatus = fixedStatus ?? (positionals[1] as string);
+    if (!isStatusValue(rawStatus) || !spec.allowed.includes(rawStatus)) {
       throw new Error(
-        `status must be one of open | applied | closed | draft (got ${JSON.stringify(rawStatus)})`
+        `status must be one of ${spec.allowed.join(' | ')} (got ${JSON.stringify(rawStatus)})`
       );
     }
     status = rawStatus;
   } catch (err) {
     io.err(err instanceof Error ? err.message : String(err));
-    io.err(PR_STATUS_USAGE);
+    io.err(spec.usage);
     return 2;
   }
 
   return runEvent({
-    command: 'pr status',
+    command: spec.command,
     flags,
     deps,
     actionLabel: `status ${status} on ${targetEventId.slice(0, 8)}…`,

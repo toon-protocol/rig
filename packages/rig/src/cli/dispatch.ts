@@ -85,6 +85,8 @@ Commands rig owns:
   site url [ref]             print the last-published site URL for a ref (free)
   issue create               file an issue (kind:1621) against a repo
   issue list | show <id>     read the repo's issues + comments (free)
+  issue status <id> <open|closed>  set an issue's status (kind:1630/1632);
+  issue close | reopen <id>  shortcuts for the above (paid)
   pr list | show <id>        read the repo's patches; show prints the full
                              patch text (free)
   comment <target-event-id>  comment (NIP-22 kind:1111) on an issue or patch,
