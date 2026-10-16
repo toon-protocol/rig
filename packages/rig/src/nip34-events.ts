@@ -103,21 +103,6 @@ export function parseMaintainers(tags: string[][]): string[] {
   return out;
 }
 
-/**
- * The set of pubkeys whose kind:1630-1633 status events are authoritative for
- * a repo: the owner (always) ∪ the declared maintainers (from the 30617's
- * `maintainers` tag). All values are lowercased hex.
- */
-export function authorizedStatusAuthors(
-  ownerPubkey: string,
-  repoAnnouncementTags: string[][]
-): Set<string> {
-  return new Set([
-    ownerPubkey.toLowerCase(),
-    ...parseMaintainers(repoAnnouncementTags),
-  ]);
-}
-
 // ---------------------------------------------------------------------------
 // Payout pointer (rig#92, part of the payout epic toon-protocol/toon-meta#391)
 // ---------------------------------------------------------------------------

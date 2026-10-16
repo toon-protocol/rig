@@ -13,7 +13,6 @@ import {
   MAX_ARWEAVE_TAGS_PER_EVENT,
   PAYOUT_TAG,
   REPOSITORY_STATE_KIND,
-  authorizedStatusAuthors,
   buildComment,
   buildIssue,
   buildPatch,
@@ -23,6 +22,7 @@ import {
   parseMaintainers,
   parsePayout,
 } from './nip34-events.js';
+import { authorizedAuthors } from './repo-authority.js';
 import { parseStateRefTags } from './nip34-refs.js';
 import {
   NGIT_COMMENT_THREAD_COMMENTS,
@@ -74,8 +74,12 @@ describe('buildRepoAnnouncement (kind:30617)', () => {
     const event = buildRepoAnnouncement('test', 'Test', 'Desc');
 
     expect((event as unknown as Record<string, unknown>)['id']).toBeUndefined();
-    expect((event as unknown as Record<string, unknown>)['sig']).toBeUndefined();
-    expect((event as unknown as Record<string, unknown>)['pubkey']).toBeUndefined();
+    expect(
+      (event as unknown as Record<string, unknown>)['sig']
+    ).toBeUndefined();
+    expect(
+      (event as unknown as Record<string, unknown>)['pubkey']
+    ).toBeUndefined();
   });
 
   it('includes a created_at timestamp', () => {
@@ -153,18 +157,18 @@ describe('amendRepoAnnouncement (kind:30617, #154)', () => {
       maintainers: [OWNER_PUBKEY, AUTHOR_PUBKEY],
     });
 
-    expect(event.tags.filter((t) => UNKNOWN_NAMES.includes(t[0] ?? ''))).toEqual(
-      [
-        ['clone', 'https://relay.ngit.dev/npub1abc/hello-toon.git'],
-        ['M', OWNER_PUBKEY],
-        ['m', AUTHOR_PUBKEY],
-        ['o', AUTHOR_PUBKEY],
-        ['blossoms', 'https://blossom.example'],
-        ['t', 'rust'],
-        ['alt', 'git repository: hello-toon'],
-        ['x-rig-knows-nothing', 'keep', 'me'],
-      ]
-    );
+    expect(
+      event.tags.filter((t) => UNKNOWN_NAMES.includes(t[0] ?? ''))
+    ).toEqual([
+      ['clone', 'https://relay.ngit.dev/npub1abc/hello-toon.git'],
+      ['M', OWNER_PUBKEY],
+      ['m', AUTHOR_PUBKEY],
+      ['o', AUTHOR_PUBKEY],
+      ['blossoms', 'https://blossom.example'],
+      ['t', 'rust'],
+      ['alt', 'git repository: hello-toon'],
+      ['x-rig-knows-nothing', 'keep', 'me'],
+    ]);
   });
 
   it('rewrites the edited field and leaves every other tag untouched', () => {
@@ -368,13 +372,23 @@ describe('announcedEuc / conformanceEdits (#158)', () => {
 
   it('NEVER recomputes an announced euc, even when local git disagrees', () => {
     const edits = conformanceEdits(
-      { tags: [['d', 'demo'], ['r', ANNOUNCED, 'euc']] },
+      {
+        tags: [
+          ['d', 'demo'],
+          ['r', ANNOUNCED, 'euc'],
+        ],
+      },
       FACTS
     );
     // Omitted → amendRepoAnnouncement leaves the slot exactly as it is.
     expect('earliestUniqueCommit' in edits).toBe(false);
     const event = amendRepoAnnouncement(
-      { tags: [['d', 'demo'], ['r', ANNOUNCED, 'euc']] },
+      {
+        tags: [
+          ['d', 'demo'],
+          ['r', ANNOUNCED, 'euc'],
+        ],
+      },
       { repoId: 'demo', ...edits }
     );
     expect(event.tags).toContainEqual(['r', ANNOUNCED, 'euc']);
@@ -382,15 +396,22 @@ describe('announcedEuc / conformanceEdits (#158)', () => {
   });
 
   it('omits the euc when there is no local repo to compute one from', () => {
-    const edits = conformanceEdits(null, { ...FACTS, earliestUniqueCommit: null });
+    const edits = conformanceEdits(null, {
+      ...FACTS,
+      earliestUniqueCommit: null,
+    });
     expect('earliestUniqueCommit' in edits).toBe(false);
     expect(edits.relays).toEqual(FACTS.relays);
   });
 
   it('omits web when no viewer URL can be derived, and relays when there are none', () => {
-    expect(conformanceEdits(null, { relays: [], web: null, earliestUniqueCommit: null })).toEqual(
-      {}
-    );
+    expect(
+      conformanceEdits(null, {
+        relays: [],
+        web: null,
+        earliestUniqueCommit: null,
+      })
+    ).toEqual({});
   });
 
   it('UNIONS relays and web with what another client already announced', () => {
@@ -411,10 +432,7 @@ describe('announcedEuc / conformanceEdits (#158)', () => {
       'wss://shared.example',
       'wss://relay.test.example',
     ]);
-    expect(edits.web).toEqual([
-      'https://gitworkshop.example/demo',
-      FACTS.web,
-    ]);
+    expect(edits.web).toEqual(['https://gitworkshop.example/demo', FACTS.web]);
   });
 
   it('a republish that adds nothing new changes no tag', () => {
@@ -435,7 +453,12 @@ describe('announcedEuc / conformanceEdits (#158)', () => {
 
   it('never produces a clone tag', () => {
     const event = amendRepoAnnouncement(
-      { tags: [['d', 'demo'], ['clone', 'https://ngit.example/demo.git']] },
+      {
+        tags: [
+          ['d', 'demo'],
+          ['clone', 'https://ngit.example/demo.git'],
+        ],
+      },
       { repoId: 'demo', ...conformanceEdits(null, FACTS) }
     );
     expect(event.tags.filter((t) => t[0] === 'clone')).toEqual([
@@ -492,19 +515,19 @@ describe('diffAnnouncementTags (#158)', () => {
 });
 
 describe('maintainer authority helpers (#287)', () => {
-  it('authorizedStatusAuthors = owner ∪ declared maintainers (lowercased)', () => {
+  it('authorizedAuthors = owner ∪ declared maintainers (lowercased)', () => {
     const tags = [
       ['d', 'r'],
       [MAINTAINERS_TAG, AUTHOR_PUBKEY],
     ];
-    const set = authorizedStatusAuthors(OWNER_PUBKEY, tags);
+    const set = authorizedAuthors(OWNER_PUBKEY, tags);
     expect(set.has(OWNER_PUBKEY)).toBe(true); // owner always implicit
     expect(set.has(AUTHOR_PUBKEY)).toBe(true);
     expect(set.has(EVENT_ID)).toBe(false); // a stranger
   });
 
   it('owner is authorized even with no maintainers tag', () => {
-    const set = authorizedStatusAuthors(OWNER_PUBKEY, [['d', 'r']]);
+    const set = authorizedAuthors(OWNER_PUBKEY, [['d', 'r']]);
     expect([...set]).toEqual([OWNER_PUBKEY]);
   });
 
@@ -562,17 +585,14 @@ describe('payout pointer (rig#92)', () => {
   it('parsePayout: malformed checksum — mixed-case address failing EIP-55 is ignored', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const badChecksum =
-      EVM_ADDRESS.slice(0, -1) +
-      (EVM_ADDRESS.slice(-1) === 'a' ? 'A' : 'a');
+      EVM_ADDRESS.slice(0, -1) + (EVM_ADDRESS.slice(-1) === 'a' ? 'A' : 'a');
     expect(parsePayout([[PAYOUT_TAG, 'evm', badChecksum]])).toBeNull();
     warn.mockRestore();
   });
 
   it('parsePayout: non-evm chain is ignored (v1 accepts evm only)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    expect(
-      parsePayout([[PAYOUT_TAG, 'sol', EVM_ADDRESS]])
-    ).toBeNull();
+    expect(parsePayout([[PAYOUT_TAG, 'sol', EVM_ADDRESS]])).toBeNull();
     warn.mockRestore();
   });
 
@@ -795,13 +815,10 @@ describe('buildComment (NIP-22 kind:1111, rig#159)', () => {
     const PARENT_ID = 'aa'.repeat(32);
     const PARENT_AUTHOR = 'bb'.repeat(32);
 
-    const event = buildComment(
-      OWNER_PUBKEY,
-      'hello-toon',
-      ROOT,
-      'Reply body',
-      { eventId: PARENT_ID, authorPubkey: PARENT_AUTHOR }
-    );
+    const event = buildComment(OWNER_PUBKEY, 'hello-toon', ROOT, 'Reply body', {
+      eventId: PARENT_ID,
+      authorPubkey: PARENT_AUTHOR,
+    });
 
     expect(event.tags).toEqual([
       ['E', EVENT_ID, '', AUTHOR_PUBKEY],
@@ -1045,7 +1062,12 @@ describe('buildPatch (kind:1617)', () => {
 describe('buildStatus (kinds 1630-1633, rig#160 root marker + a tag)', () => {
   it('builds each status kind with the NIP-10 root-marked e tag and the repo a tag', () => {
     for (const statusKind of [1630, 1631, 1632, 1633] as const) {
-      const event = buildStatus(OWNER_PUBKEY, 'hello-toon', EVENT_ID, statusKind);
+      const event = buildStatus(
+        OWNER_PUBKEY,
+        'hello-toon',
+        EVENT_ID,
+        statusKind
+      );
       expect(event.kind).toBe(statusKind);
       expect(event.tags).toEqual(
         expect.arrayContaining([

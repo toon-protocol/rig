@@ -437,6 +437,10 @@ own, "unchanged … plus target author" is a little confusing, since a thing
 that changed to add a clause is not unchanged by the plain meaning of the
 word. This section exists to make the actual before/after unambiguous.)
 
+(Since rig#226 the function is `authorizedAuthors()` in `repo-authority.ts`,
+shared with repo-state honoring — ADR-0005; the old name is a deprecated
+alias.)
+
 Before rig#160, `authorizedStatusAuthors()` (`nip34-events.ts`) was owner ∪
 declared `maintainers` only, and every call site used that set directly.
 rig#160 keeps `authorizedStatusAuthors()` itself unchanged, but every call

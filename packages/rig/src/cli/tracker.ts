@@ -27,10 +27,10 @@ import {
 import {
   COMMENT_KIND,
   LEGACY_COMMENT_KIND,
-  authorizedStatusAuthors,
   commentBelongsToThread,
   firstTagValue,
 } from '../nip34-events.js';
+import { authorizedAuthors } from '../repo-authority.js';
 import { ownerToHex } from '../npub.js';
 import {
   queryRelay,
@@ -139,7 +139,7 @@ function tagValues(tags: string[][], name: string): string[] {
  * state; they never move it. No authorized status events ⇒ open.
  *
  * `authorized` is the caller's authority set for THIS target: the repo-wide
- * {@link authorizedStatusAuthors} result (owner ∪ maintainers) unioned with
+ * {@link authorizedAuthors} result (owner ∪ maintainers) unioned with
  * the target event's own author pubkey — callers do that union per item,
  * since the target author varies per target while the repo-wide set does
  * not (see `fetchItems`/`fetchItem`). When it is empty NOTHING is authorized
@@ -392,7 +392,7 @@ async function fetchAuthorizedAuthors(
   } catch {
     // Relay read failed — fall back to owner-only authority.
   }
-  return authorizedStatusAuthors(ownerPubkey, announceTags);
+  return authorizedAuthors(ownerPubkey, announceTags);
 }
 
 // ---------------------------------------------------------------------------
@@ -605,7 +605,11 @@ async function fetchItem(
   const repoATag = tagValue(event.tags, 'a') ?? null;
   const parsedAddr = parseRepoATag(repoATag) ?? ctx.repoAddr;
   const authorized = parsedAddr
-    ? await fetchAuthorizedAuthors(ctx, parsedAddr.ownerPubkey, parsedAddr.repoId)
+    ? await fetchAuthorizedAuthors(
+        ctx,
+        parsedAddr.ownerPubkey,
+        parsedAddr.repoId
+      )
     : new Set<string>();
 
   return {
@@ -629,7 +633,11 @@ function parseRepoATag(
   if (!aTag) return null;
   const [kind, ownerPubkey, ...repoIdParts] = aTag.split(':');
   const repoId = repoIdParts.join(':');
-  if (kind !== String(REPOSITORY_ANNOUNCEMENT_KIND) || !ownerPubkey || !repoId) {
+  if (
+    kind !== String(REPOSITORY_ANNOUNCEMENT_KIND) ||
+    !ownerPubkey ||
+    !repoId
+  ) {
     return null;
   }
   return { ownerPubkey, repoId };

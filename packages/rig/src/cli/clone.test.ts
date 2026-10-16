@@ -244,6 +244,45 @@ describe('rig clone happy path', () => {
     expect(gitText(join(world.cwd, 'my-dir'), ['fsck', '--strict'])).toBe('');
   });
 
+  it("resolves refs from a maintainer-signed 30618 newer than the owner's (ADR-0005)", async () => {
+    const world = makeWorld();
+    const MAINTAINER = 'cd'.repeat(32);
+    const [announce, ownerState] = world.events as [NostrEvent, NostrEvent];
+    announce.tags.push(['maintainers', MAINTAINER]);
+    // The maintainer's state is newer and drops the `feature` branch.
+    world.events.push({
+      ...ownerState,
+      id: 'c1'.repeat(32),
+      pubkey: MAINTAINER,
+      created_at: ownerState.created_at + 10,
+      tags: ownerState.tags.filter(
+        (t) => !t.some((v) => v === 'refs/heads/feature')
+      ),
+    });
+    // A stranger's newest state must be ignored.
+    world.events.push({
+      ...ownerState,
+      id: 'c2'.repeat(32),
+      pubkey: 'ee'.repeat(32),
+      created_at: ownerState.created_at + 20,
+      tags: [
+        ['d', REPO],
+        ['HEAD', 'ref: refs/heads/stranger'],
+      ],
+    });
+
+    const code = await runClone([RELAY, `${OWNER}/${REPO}`], world.deps);
+    expect(world.io.errLines.join('\n')).toBe('');
+    expect(code).toBe(0);
+    const dest = join(world.cwd, REPO);
+    expect(gitText(dest, ['rev-parse', 'refs/heads/main'])).toBe(
+      gitText(world.srcDir, ['rev-parse', 'refs/heads/main'])
+    );
+    expect(
+      gitText(dest, ['branch', '--list', 'feature', '--format=%(refname)'])
+    ).toBe('');
+  });
+
   it('walks the gateway fallback chain when the primary host fails', async () => {
     const world = makeWorld({ failHosts: ['ar-io.dev'] });
     const code = await runClone([RELAY, `${OWNER}/${REPO}`], world.deps);

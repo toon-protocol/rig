@@ -12,7 +12,7 @@ import type { UnsignedEvent } from '../nip34-events.js';
 import { parseMaintainers } from '../nip34-events.js';
 import type { CliIo } from './output.js';
 import type { EventCommandDeps } from './events.js';
-import { runMaintainers } from './maintainers.js';
+import { REF_AUTHORITY_NOTICE, runMaintainers } from './maintainers.js';
 import { repoWebUrl } from '../rig-pointer.js';
 import type { StandaloneContext } from './standalone-context.js';
 import {
@@ -134,7 +134,12 @@ const ADDR = ['--repo-id', REPO, '--owner', OWNER, '--relay', RELAY];
 
 /** The `web` tag value #158 backfills — the Pointer's own route shape. */
 function webUrl(): string {
-  return repoWebUrl({ env: {}, relay: RELAY, ownerPubkey: OWNER, repoId: REPO });
+  return repoWebUrl({
+    env: {},
+    relay: RELAY,
+    ownerPubkey: OWNER,
+    repoId: REPO,
+  });
 }
 
 describe('rig maintainers list (free)', () => {
@@ -213,6 +218,21 @@ describe('rig maintainers add/remove (paid, owner-only)', () => {
     expect(code).toBe(0);
     expect(fake.published).toHaveLength(1);
     expect(parseMaintainers(fake.published[0]!.event.tags)).toEqual([M2]);
+  });
+
+  it('add and remove print the ref-authority notice (ADR-0005)', async () => {
+    for (const [op, current] of [
+      ['add', []],
+      ['remove', [M1]],
+    ] as const) {
+      const io = makeIo();
+      const code = await runMaintainers(
+        [op, M1, ...ADDR, '--yes'],
+        makeDeps(io, makeStandalone(), [announcement(OWNER, [...current])])
+      );
+      expect(code).toBe(0);
+      expect(io.out).toContain(REF_AUTHORITY_NOTICE);
+    }
   });
 
   it('add preserves every tag rig does not model, in order (#154)', async () => {
