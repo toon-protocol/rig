@@ -75,7 +75,7 @@ describe('Pubkey Identity - Authorization', () => {
   // Risk: E3-R002 (Authorization bypass in PR lifecycle)
   // ---------------------------------------------------------------------------
 
-  it.skip('[P0] non-maintainer pubkey attempting merge is rejected with F06', () => {
+  it('[P0] non-maintainer pubkey attempting merge is rejected with F06', () => {
     // Arrange
     const maintainerPubkey = 'aa'.repeat(32);
     const nonMaintainerPubkey = 'bb'.repeat(32);
@@ -90,7 +90,7 @@ describe('Pubkey Identity - Authorization', () => {
     expect(result.rejectMessage).toMatch(/unauthorized/i);
   });
 
-  it.skip('[P0] maintainer pubkey is authorized (no rejection)', () => {
+  it('[P0] maintainer pubkey is authorized (no rejection)', () => {
     // Arrange
     const maintainerPubkey = 'aa'.repeat(32);
     const repoEvent = createMockRepoAnnouncementEvent([maintainerPubkey]);
@@ -103,7 +103,7 @@ describe('Pubkey Identity - Authorization', () => {
     expect(result.rejectCode).toBeUndefined();
   });
 
-  it.skip('[P0] repo owner pubkey (event author) is implicitly authorized', () => {
+  it('[P0] repo owner pubkey (event author) is implicitly authorized', () => {
     // Arrange
     const ownerPubkey = 'cc'.repeat(32);
     const repoEvent = createMockRepoAnnouncementEvent([]);
@@ -117,7 +117,7 @@ describe('Pubkey Identity - Authorization', () => {
     expect(result.authorized).toBe(true);
   });
 
-  it.skip('[P0] multiple maintainers are all authorized', () => {
+  it('[P0] multiple maintainers are all authorized', () => {
     // Arrange
     const maintainer1 = 'aa'.repeat(32);
     const maintainer2 = 'bb'.repeat(32);

@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRelay } from './use-relay.js';
 import { useRigConfig } from './use-rig-config.js';
-import { parseRepoRefs } from '../nip34-parsers.js';
+import {
+  parseHonoredRepoRefs,
+  repoAuthorizedAuthors,
+} from '../nip34-parsers.js';
 import type { RepoMetadata, RepoRefs, NostrFilter } from '../nip34-parsers.js';
 import { resolveDefaultRef } from '../ref-resolver.js';
 import { resolveGitSha, fetchArweaveObject } from '../arweave-client.js';
@@ -111,49 +114,50 @@ export function useRepoLanguages(repos: RepoMetadata[]): Map<string, Language> {
   const [languages, setLanguages] = useState<Map<string, Language>>(new Map());
 
   // A stable, order-independent identity for "this exact set of repos at
-  // these branches" — repo-list re-renders may hand us a new array
+  // these branches, with these maintainers" — repo-list re-renders may hand us a new array
   // reference every time even when nothing meaningful changed, so effects
   // below key off this string instead of `repos` itself.
   const reposKey = useMemo(
     () =>
       repos
-        .map((r) => `${r.ownerPubkey}:${r.repoId}:${r.defaultBranch}`)
+        .map(
+          (r) =>
+            `${r.ownerPubkey}:${r.repoId}:${r.defaultBranch}:${r.maintainers.join(',')}`
+        )
         .sort()
         .join('|'),
     [repos]
   );
 
-  const uniqueOwners = useMemo(() => {
+  // Every repo's authorized authors (owner + announced maintainers,
+  // ADR-0005), so a maintainer's repo state is fetched too.
+  const uniqueAuthors = useMemo(() => {
     const seen = new Set<string>();
-    for (const r of repos) seen.add(r.ownerPubkey);
+    for (const r of repos) {
+      for (const author of repoAuthorizedAuthors(r)) seen.add(author);
+    }
     return Array.from(seen).sort();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on reposKey, not `repos` identity
   }, [reposKey]);
 
   const refsFilter = useMemo<NostrFilter | null>(() => {
-    if (uniqueOwners.length === 0) return null;
-    return { kinds: [30618], authors: uniqueOwners, limit: 500 };
-  }, [uniqueOwners]);
+    if (uniqueAuthors.length === 0) return null;
+    return { kinds: [30618], authors: uniqueAuthors, limit: 500 };
+  }, [uniqueAuthors]);
 
   const { events } = useRelay(relayUrl, refsFilter);
 
-  // Repo key -> its parsed refs, for repos that actually have a matching
-  // kind:30618 event on this relay (matched by owner pubkey + `d` tag).
+  // Repo key -> its honored refs: the newest kind:30618 for its `d` tag signed
+  // by one of ITS authorized authors (the same rule `useRepo` uses).
   const refsByRepo = useMemo(() => {
     const map = new Map<string, RepoRefs>();
-    if (repos.length === 0) return map;
-
-    const parsedByKey = new Map<string, RepoRefs>();
-    for (const ev of events) {
-      const parsed = parseRepoRefs(ev);
-      if (!parsed) continue;
-      parsedByKey.set(repoKey(ev.pubkey, parsed.repoId), parsed);
-    }
-
     for (const repo of repos) {
-      const key = repoKey(repo.ownerPubkey, repo.repoId);
-      const refs = parsedByKey.get(key);
-      if (refs) map.set(key, refs);
+      const refs = parseHonoredRepoRefs(
+        events,
+        repoAuthorizedAuthors(repo),
+        repo.repoId
+      );
+      if (refs) map.set(repoKey(repo.ownerPubkey, repo.repoId), refs);
     }
     return map;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on reposKey, not `repos` identity

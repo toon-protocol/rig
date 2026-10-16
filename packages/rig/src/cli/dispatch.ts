@@ -103,7 +103,8 @@ Commands rig owns:
                              patches, revisions, issues, comments, statuses
                              and CI results for repos you own or maintain,
                              plus events that tag you; --since/--all look
-                             back without moving the cursor
+                             back without moving the cursor; --follow keeps
+                             streaming new events as JSON lines
   maintainers list           show the repo's declared maintainers (free); add/
   maintainers add <pubkey>   remove republish the kind:30617 to change who may
   maintainers remove <pubkey>  author authoritative issue/PR status (owner is

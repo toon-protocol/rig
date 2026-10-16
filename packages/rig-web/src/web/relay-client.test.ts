@@ -439,3 +439,66 @@ describe('subscribeRelay - keeps the REQ open after EOSE', () => {
     }
   });
 });
+
+// ============================================================================
+// rig#227: repo state from the authorized authors (ADR-0005)
+// ============================================================================
+
+import { buildRepoRefsFilter } from './relay-client.js';
+import { parseHonoredRepoRefs } from './nip34-parsers.js';
+
+describe('queryRelay - repo state honors maintainers, not strangers (rig#227)', () => {
+  it('[P0] REQs every authorized author and resolves the maintainer-signed 30618 over the owner and a stranger', async () => {
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    MockWebSocket.instances = [];
+    try {
+      const owner = 'aa'.repeat(32);
+      const maintainer = 'bb'.repeat(32);
+      const stranger = 'cc'.repeat(32);
+      const filter = buildRepoRefsFilter([owner, maintainer], 'demo');
+      const promise = queryRelay('wss://mock.example', filter, 1000);
+
+      await new Promise((r) => setTimeout(r, 0));
+      const ws = MockWebSocket.instances[0];
+      if (!ws) throw new Error('no socket opened');
+      const req = JSON.parse(ws.sent[0] ?? '[]') as [string, string, unknown];
+      expect(req[2]).toEqual({
+        kinds: [30618],
+        authors: [owner, maintainer],
+        '#d': ['demo'],
+      });
+      const subId = req[1];
+
+      const state = (pubkey: string, createdAt: number, sha: string) => ({
+        id: sha.slice(0, 1).repeat(64),
+        pubkey,
+        created_at: createdAt,
+        kind: 30618,
+        tags: [
+          ['d', 'demo'],
+          ['refs/heads/main', sha],
+        ],
+        content: '',
+        sig: 'f'.repeat(128),
+      });
+      // A permissionless relay may still hand back a stranger's state.
+      for (const ev of [
+        state(owner, 100, '1'.repeat(40)),
+        state(maintainer, 200, '2'.repeat(40)),
+        state(stranger, 999, '3'.repeat(40)),
+      ]) {
+        ws.onmessage?.({ data: JSON.stringify(['EVENT', subId, encode(ev)]) });
+      }
+      ws.onmessage?.({ data: JSON.stringify(['EOSE', subId]) });
+
+      const refs = parseHonoredRepoRefs(
+        await promise,
+        new Set([owner, maintainer]),
+        'demo'
+      );
+      expect(refs?.refs.get('refs/heads/main')).toBe('2'.repeat(40));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});

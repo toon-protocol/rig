@@ -1,5 +1,18 @@
 # @toon-protocol/rig
 
+## 5.2.0
+
+### Minor Changes
+
+- 2ffb573: A declared maintainer can run `rig push` against the owner's repo (`toon.owner`): the fast-forward check runs against the honored repo state, refs not being pushed are carried over, and a diverged ref is refused before any fee is paid (`non_fast_forward` under `--json`) unless `--force` is given.
+- 5185ce1: `rig pr create --revises <patch-id>` publishes a patch as a NIP-34 revision of an existing one (works with `--range` and `--patch-file`; warns when readers will ignore it). `rig pr show` shows the latest revision by the root's author or an authorized author and lists the earlier ones; `rig pr list` shows a revised patch once. Exports `selectRevision`.
+- e23dd3c: Add `rig inbox --follow`: emit the backlog since the cursor, then stay connected to the same relays and stream one JSON object per line (the `--json` entry shape) for each new event, with no duplicates. Dropped relays reconnect with backoff and report on stderr; the cursor advances as events are emitted, so a restart resumes where it left off.
+- a45b838: Add `rig inbox`, a free read command that prints everything new since you last checked: patches, revisions, issues, comments, authorized statuses and CI results for repos you own or maintain, plus any event that tags your pubkey. A per-identity cursor advances after each read; `--since` and `--all` look back without moving it. `--json` returns an array of events.
+
+### Patch Changes
+
+- 31f9a81: Move `parseMaintainers` and `MAINTAINERS_TAG` into the dependency-free `repo-authority` module so rig-web can share it; no behavior change.
+
 ## 5.1.0
 
 ### Minor Changes
