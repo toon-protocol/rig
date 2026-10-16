@@ -1131,6 +1131,10 @@ describe('usage', () => {
       [runPr, ['--help'], 'cover-letter'],
       [runPr, ['--help'], 'Usage: rig pr status'],
       [runPr, ['status', '--help'], 'open|applied|closed|draft'],
+      [runIssue, ['--help'], 'Usage: rig issue status'],
+      [runIssue, ['status', '--help'], '<open|closed>'],
+      [runIssue, ['close', '--help'], 'rig issue close'],
+      [runIssue, ['reopen', '--help'], 'rig issue reopen'],
     ] as const) {
       const h = deps();
       expect(await run(args as unknown as string[], h.deps)).toBe(0);

@@ -166,7 +166,11 @@ ${COMMON_FLAGS_USAGE}
 
 Related (FREE reads — no payment):
   rig issue list [--state open|closed|all]   list the repo's issues
-  rig issue show <event-id>                  one issue + its comments`;
+  rig issue show <event-id>                  one issue + its comments
+
+Related (paid status — see \`rig issue status --help\`):
+  rig issue status <event-id> <open|closed>  set an issue's status
+  rig issue close | reopen <event-id>        shortcuts for closed / open`;
 
 export const COMMENT_USAGE = `Usage: rig comment <target-event-id> --body <text> [options]
 
@@ -1033,7 +1037,8 @@ async function runPrCreate(
 }
 
 // ---------------------------------------------------------------------------
-// rig pr status (top-level `rig status` before #250 — now git's)
+// rig pr status (top-level `rig status` before #250 — now git's) and the
+// rig issue status|close|reopen aliases (#231)
 // ---------------------------------------------------------------------------
 
 /** NIP-34 status kinds by wire value (mirrors the daemon's mapping). */
@@ -1054,6 +1059,8 @@ interface StatusSpec {
   allowed: readonly GitStatusValue[];
   /** Positional shape shown in the arity error. */
   shape: string;
+  /** Label for the target id in errors. */
+  targetLabel: string;
 }
 
 const PR_STATUS_SPEC: StatusSpec = {
@@ -1061,6 +1068,7 @@ const PR_STATUS_SPEC: StatusSpec = {
   usage: PR_STATUS_USAGE,
   allowed: ['open', 'applied', 'closed', 'draft'],
   shape: '<target-event-id> <open|applied|closed|draft>',
+  targetLabel: '<target-event-id>',
 };
 
 const ISSUE_STATUS_SPEC: StatusSpec = {
@@ -1068,6 +1076,7 @@ const ISSUE_STATUS_SPEC: StatusSpec = {
   usage: ISSUE_STATUS_USAGE,
   allowed: ['open', 'closed'],
   shape: '<issue-event-id> <open|closed>',
+  targetLabel: '<issue-event-id>',
 };
 
 /**
@@ -1102,11 +1111,11 @@ async function runStatusCommand(
       throw new Error(
         fixedStatus === undefined
           ? `expected exactly two arguments: ${spec.shape}`
-          : 'expected exactly one argument: <issue-event-id>'
+          : `expected exactly one argument: ${spec.targetLabel}`
       );
     }
     targetEventId = positionals[0] as string;
-    assertHex64(targetEventId, '<target-event-id>');
+    assertHex64(targetEventId, spec.targetLabel);
     const rawStatus = fixedStatus ?? (positionals[1] as string);
     if (!isStatusValue(rawStatus) || !spec.allowed.includes(rawStatus)) {
       throw new Error(
