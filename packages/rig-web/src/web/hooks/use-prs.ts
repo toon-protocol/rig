@@ -2,7 +2,11 @@ import { useMemo } from 'react';
 import { useRigConfig } from './use-rig-config.js';
 import { useRelay } from './use-relay.js';
 import { npubToHex } from '../npub.js';
-import { parsePR, resolvePRStatus, withTargetAuthor } from '../nip34-parsers.js';
+import {
+  collapsePatchRevisions,
+  resolvePRStatus,
+  withTargetAuthor,
+} from '../nip34-parsers.js';
 import { buildPRListFilter, buildStatusFilter } from '../relay-client.js';
 import type { PRMetadata, NostrFilter } from '../nip34-parsers.js';
 
@@ -59,17 +63,13 @@ export function usePRs(
   );
 
   const prs = useMemo(() => {
-    const parsed: PRMetadata[] = [];
-    for (const ev of prEvents) {
-      const pr = parsePR(ev);
-      if (pr) {
-        pr.status = resolvePRStatus(
-          pr.eventId,
-          statusEvents,
-          withTargetAuthor(authorized, pr.authorPubkey)
-        );
-        parsed.push(pr);
-      }
+    const parsed = collapsePatchRevisions(prEvents, authorized);
+    for (const pr of parsed) {
+      pr.status = resolvePRStatus(
+        pr.eventId,
+        statusEvents,
+        withTargetAuthor(authorized, pr.authorPubkey)
+      );
     }
     return parsed.sort((a, b) => b.createdAt - a.createdAt);
   }, [prEvents, statusEvents, authorized]);
