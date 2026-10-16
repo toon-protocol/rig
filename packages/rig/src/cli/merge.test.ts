@@ -118,6 +118,7 @@ interface MergeJson {
   partial?: boolean;
   hint?: string;
   closed?: string[];
+  closeErrors?: { issueId: string; error: string }[];
 }
 
 interface World {
