@@ -52,7 +52,11 @@ import {
   selectRevision,
 } from '../repo-authority.js';
 import { GitRepoReader, type GitRef, type RepoRefs } from '../repo-reader.js';
-import { defaultWebSocketFactory } from '../remote-state.js';
+import {
+  defaultWebSocketFactory,
+  type NostrEvent,
+  type WebSocketFactory,
+} from '../remote-state.js';
 import { serializePushPlan, serializePushResult } from '../routes.js';
 import {
   emitCliError,
@@ -69,9 +73,8 @@ import {
 } from './push.js';
 import { resolveRelays, singleRelayRefusal } from './remote.js';
 import { renderIdentityLine, renderPlan, renderResult } from './render.js';
-import { queryAll } from './tracker.js';
+import { queryAll, withTargetAuthor } from './tracker.js';
 import type { EventCommandDeps } from './events.js';
-import type { NostrEvent } from '../remote-state.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -235,23 +238,45 @@ class OverlayReader extends GitRepoReader {
   }
 }
 
+/** Hop limit on the follow-on walk, so a reply cycle on a relay can't spin. */
+const MAX_SERIES_DEPTH = 256;
+
+/**
+ * The event a follow-on patch replies to (NIP-10): its `reply`-marked `e`
+ * tag, else its `root`-marked one, else its last `e` tag. ngit tags every
+ * follow-on with both the series root and the previous patch, so the
+ * `reply` marker is what chains the series.
+ */
+function replyParentId(event: NostrEvent): string | undefined {
+  const eTags = event.tags.filter((t) => t[0] === 'e' && t[1] !== undefined);
+  return (eTags.find((t) => t[3] === 'reply') ??
+    eTags.find((t) => t[3] === 'root') ??
+    eTags.at(-1))?.[1];
+}
+
 /**
  * The follow-on patches of `head` (NIP-34 / ngit multi-commit series): 1617s
  * that `e`-reply to it, directly or through earlier follow-ons, are not
  * revisions, and are signed by the head's author or an authorized author.
- * Ordered by reply depth, then `created_at`, then lowest id — the order ngit
- * sends them in. `head` itself is not included.
+ * Ordered along the reply chain (each patch after the one it replies to;
+ * siblings by `created_at`, then lowest id), the order ngit sends them in. A
+ * patch whose parent was dropped (a stranger's) is dropped with it. `head`
+ * itself is not included.
  */
 async function fetchSeriesFollowOns(
   relays: string[],
   head: NostrEvent,
   authorized: ReadonlySet<string>,
-  webSocketFactory: Parameters<typeof queryAll>[2]
+  webSocketFactory: WebSocketFactory
 ): Promise<NostrEvent[]> {
-  const allowed = new Set([...authorized, head.pubkey.toLowerCase()]);
-  const found = new Map<string, { event: NostrEvent; depth: number }>();
+  const allowed = withTargetAuthor(authorized, head.pubkey);
+  const found = new Map<string, NostrEvent>();
   let frontier = [head.id];
-  for (let depth = 1; frontier.length > 0 && depth <= 256; depth++) {
+  for (
+    let depth = 1;
+    frontier.length > 0 && depth <= MAX_SERIES_DEPTH;
+    depth++
+  ) {
     const replies = await queryAll(
       relays,
       [{ kinds: [PATCH_KIND], '#e': frontier }],
@@ -268,18 +293,29 @@ async function fetchSeriesFollowOns(
       ) {
         continue;
       }
-      found.set(e.id, { event: e, depth });
+      found.set(e.id, e);
       frontier.push(e.id);
     }
   }
-  return [...found.values()]
-    .sort(
-      (a, b) =>
-        a.depth - b.depth ||
-        a.event.created_at - b.event.created_at ||
-        (a.event.id < b.event.id ? -1 : 1)
-    )
-    .map((f) => f.event);
+
+  const children = new Map<string, NostrEvent[]>();
+  for (const e of found.values()) {
+    const parent = replyParentId(e);
+    if (parent === undefined) continue;
+    children.set(parent, [...(children.get(parent) ?? []), e]);
+  }
+  const ordered: NostrEvent[] = [];
+  const visit = (id: string): void => {
+    const kids = (children.get(id) ?? []).sort(
+      (a, b) => a.created_at - b.created_at || (a.id < b.id ? -1 : 1)
+    );
+    for (const kid of kids) {
+      ordered.push(kid);
+      visit(kid.id);
+    }
+  };
+  visit(head.id);
+  return ordered;
 }
 
 interface AppliedPatch {
@@ -446,6 +482,16 @@ export async function runPrMerge(
       authorized
     );
 
+    // ── 2. Refuse a caller who cannot move refs, before anything is spent ───
+    if (!authorized.has(identity.pubkey.toLowerCase())) {
+      throw new PrMergeError(
+        'not_authorized',
+        `only the owner or a declared maintainer can merge — ` +
+          `${identity.pubkey.slice(0, 8)}… is neither for ${aTag}. ` +
+          'Readers would ignore the pushed state. Nothing was pushed or paid.'
+      );
+    }
+
     const followOns = await fetchSeriesFollowOns(
       relays,
       latest,
@@ -456,16 +502,6 @@ export async function runPrMerge(
     const seriesText = series
       .map((e) => (e.content.endsWith('\n') ? e.content : `${e.content}\n`))
       .join('');
-
-    // ── 2. Refuse a caller who cannot move refs, before anything is spent ───
-    if (!authorized.has(identity.pubkey.toLowerCase())) {
-      throw new PrMergeError(
-        'not_authorized',
-        `only the owner or a declared maintainer can merge — ` +
-          `${identity.pubkey.slice(0, 8)}… is neither for ${aTag}. ` +
-          'Readers would ignore the pushed state. Nothing was pushed or paid.'
-      );
-    }
 
     // ── 3. Target branch on the honored state ───────────────────────────────
     if (!remote.announced) {
