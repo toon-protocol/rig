@@ -28,7 +28,7 @@ export interface FollowRelayOptions {
   filters: () => NostrFilter[];
   webSocketFactory: WebSocketFactory;
   onEvent: (event: NostrEvent, url: string) => void;
-  /** A connection problem; the follower keeps going after reporting it. */
+  /** A connection problem or relay NOTICE; the follower keeps going after it. */
   onError: (message: string) => void;
   signal: AbortSignal;
   /** Delay before reconnect attempt `n` (1-based), in ms. */

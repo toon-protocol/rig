@@ -81,6 +81,7 @@ class FakeRelaySocket implements WebSocketLike {
 
   /** Send `["CLOSED", subId, reason]` for every open subscription. */
   closeSubs(reason: string): void {
+    if (this.readyState !== 1) return;
     for (const subId of [...this.subs.keys()]) {
       this.subs.delete(subId);
       this.emit('message', {
@@ -91,6 +92,7 @@ class FakeRelaySocket implements WebSocketLike {
 
   /** Send a `["NOTICE", message]` frame. */
   notice(message: string): void {
+    if (this.readyState !== 1) return;
     this.emit('message', { data: JSON.stringify(['NOTICE', message]) });
   }
 
@@ -143,9 +145,7 @@ export function makeMockRelay(
       for (const s of sockets) if (!url || s.url === url) s.closeSubs(reason);
     },
     notice: (message, url) => {
-      for (const s of sockets) {
-        if (s.readyState === 1 && (!url || s.url === url)) s.notice(message);
-      }
+      for (const s of sockets) if (!url || s.url === url) s.notice(message);
     },
     drop: (url) => {
       for (const s of sockets) if (!url || s.url === url) s.close();
