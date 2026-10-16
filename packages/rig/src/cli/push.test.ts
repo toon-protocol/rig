@@ -1141,6 +1141,62 @@ describe('daemon delegation (#279)', () => {
     return { posts, fetchImpl };
   }
 
+  it('a declared maintainer with a daemon running publishes into the owner via standalone (#252)', async () => {
+    const REPO_OWNER = 'cd'.repeat(32);
+    await writeToonConfig(repoDir, { repoId: 'demo', owner: REPO_OWNER });
+    const first = git(['rev-parse', 'HEAD'], repoDir).trim();
+    writeFileSync(join(repoDir, 'more.txt'), 'more\n');
+    git(['add', '.'], repoDir);
+    git(['commit', '-m', 'second'], repoDir);
+    const fake = makeStandalone(
+      emptyRemoteState({
+        announced: true,
+        refs: new Map([['refs/heads/main', first]]),
+        announceEvent: {
+          id: '1'.repeat(64),
+          pubkey: REPO_OWNER,
+          created_at: 1,
+          kind: 30617,
+          content: '',
+          sig: '',
+          tags: [
+            ['d', 'demo'],
+            ['maintainers', OWNER],
+          ],
+        },
+      })
+    );
+    const { posts, fetchImpl } = daemonFetch(daemonPlan());
+    const h = makeDeps({ ...env, RIG_MNEMONIC: TEST_MNEMONIC }, repoDir, {
+      loadStandalone: fake.load,
+      probeDaemon: sameIdentityProbe(),
+      fetchImpl,
+    });
+    // The daemon's identity (SELF) must differ from toon.owner to take this path.
+    expect(await runPush(['--yes'], h.deps)).toBe(0);
+    expect(posts).toHaveLength(0);
+    expect(fake.remoteRequests.map((r) => r.ownerPubkey)).toEqual([
+      REPO_OWNER,
+    ]);
+    expect(fake.published.map((p) => p.kind)).toEqual([30618]);
+    const text = h.err.join('\n');
+    expect(text).toContain('running standalone instead of the daemon');
+    expect(text).not.toContain('differs from the active identity (');
+  });
+
+  it('a non-maintainer with a foreign toon.owner still gets the warning and own namespace (#252)', async () => {
+    await writeToonConfig(repoDir, { repoId: 'demo', owner: 'cd'.repeat(32) });
+    const fake = makeStandalone(emptyRemoteState());
+    const { fetchImpl } = daemonFetch(daemonPlan());
+    const h = makeDeps({ ...env, RIG_MNEMONIC: TEST_MNEMONIC }, repoDir, {
+      loadStandalone: fake.load,
+      probeDaemon: sameIdentityProbe(),
+      fetchImpl,
+    });
+    expect(await runPush(['--yes'], h.deps)).toBe(0);
+    expect(h.err.join('\n')).toContain('differs from');
+  });
+
   it('delegates estimate + execute to the daemon; standalone loader untouched', async () => {
     const fake = makeStandalone(emptyRemoteState());
     const { posts, fetchImpl } = daemonFetch(daemonPlan());

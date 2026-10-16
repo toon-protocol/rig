@@ -582,7 +582,23 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
 
     // ── Paid session (#279): same-identity daemon → delegate; else the
     // standalone context (identity chain + nonce guard).
-    const session = await loadPaidSession(deps, relaysUsed[0]);
+    let session = await loadPaidSession(deps, relaysUsed[0]);
+    // A declared maintainer's push must read the OWNER's honored state, which
+    // the daemon's /git routes cannot (they resolve under the daemon's own
+    // identity). A foreign toon.owner on the daemon path therefore forces
+    // standalone, as `rig pr merge` does; the maintainer check runs below.
+    if (
+      session.path === 'daemon' &&
+      toonConfig.owner &&
+      toonConfig.owner.toLowerCase() !== session.identity.pubkey.toLowerCase()
+    ) {
+      io.err(
+        `toon.owner (${toonConfig.owner.slice(0, 8)}…) differs from the active identity — ` +
+          'running standalone instead of the daemon so a declared maintainer ' +
+          "can publish into the owner's repo."
+      );
+      session = await loadPaidSession(withForcedStandalone(deps), relaysUsed[0]);
+    }
     const path = session.path;
     let identity: IdentityReport;
     if (session.path === 'standalone') {
