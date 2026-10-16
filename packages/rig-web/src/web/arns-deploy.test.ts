@@ -34,7 +34,7 @@ function makeConfig(overrides: Partial<ArnsDeployConfig> = {}): ArnsDeployConfig
     years: 1,
     ttlSeconds: DEFAULT_ARNS_TTL_SECONDS,
     gateway: DEFAULT_ARNS_GATEWAY,
-    relay: 'wss://relay-ws.devnet.toonprotocol.dev',
+    relay: 'wss://relay.toonprotocol.dev',
     ...overrides,
   };
 }
@@ -263,7 +263,7 @@ describe('pointNameAtManifest (mock-only)', () => {
 describe('buildArnsUrl', () => {
   it('[P0] builds https://<name>.<gateway-host>/#relay=<relay>', () => {
     expect(buildArnsUrl(makeConfig())).toBe(
-      'https://toon-rig.permagate.io/#relay=wss://relay-ws.devnet.toonprotocol.dev',
+      'https://toon-rig.permagate.io/#relay=wss://relay.toonprotocol.dev',
     );
   });
 

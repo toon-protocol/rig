@@ -90,8 +90,8 @@ your default publish target, and it also tells `rig fund` (next step) which
 faucet to use.
 
 ```sh
-rig entry https://proxy.relay.devnet.toonprotocol.dev   # the shared devnet relay node
-rig remote add origin wss://relay-ws.devnet.toonprotocol.dev
+rig entry https://toonprotocol.dev   # the shared devnet's one connector
+rig remote add origin wss://relay.toonprotocol.dev
 rig remote list
 ```
 
@@ -153,7 +153,7 @@ your own pubkey as the owner — `rig identity show` prints it as an `npub1…`.
 
 ```sh
 cd /tmp
-rig clone wss://relay-ws.devnet.toonprotocol.dev npub1youriden…/hello-toon
+rig clone wss://relay.toonprotocol.dev npub1youriden…/hello-toon
 cd hello-toon && rig log --oneline
 ```
 
@@ -644,7 +644,7 @@ network — there is no announce to discover (kind:10032 was removed by connecto
 ADR 0046) and no topology to negotiate.
 
 ```sh
-curl -s https://proxy.relay.devnet.toonprotocol.dev/ilp | jq '{ilpAddresses, routes, batchSettlements: [.batchSettlements[].network]}'
+curl -s https://toonprotocol.dev/ilp | jq '{ilpAddresses, routes, batchSettlements: [.batchSettlements[].network]}'
 ```
 
 What rig derives from it, and the knob that overrides each:
@@ -653,7 +653,7 @@ What rig derives from it, and the knob that overrides each:
 |---|---|---|
 | the connector | — (required) | `TOON_CONNECTOR` / `connectorUrl` (`rig entry <url>` writes it) |
 | where events go | the node's first own address it also prices | `TOON_CLIENT_PUBLISH_DESTINATION` / `publishDestination` |
-| where git objects go | the node's first priced `*.store` route, else `*.ario` | `TOON_CLIENT_STORE_DESTINATION` / `storeDestination`; `rig name --via` per invocation |
+| where git objects go | a priced `*.store` route the node terminates itself, else its first priced `*.store` route, else `*.ario` | `TOON_CLIENT_STORE_DESTINATION` / `storeDestination`; `rig name --via` per invocation |
 | a store on another node | — | `storeConnectorUrl` (that node holds its own channel: uploads ride a second client and watermark) or `storeSealTo` (same channel, sealed to that node) |
 | settlement chain | the first chain in `batchSettlements[]` your identity holds a key for (a phrase holds both: name one) | `TOON_CLIENT_CHAIN` / `chain`: `evm` or `solana` (`evm:8453` is read by its family) |
 | chain RPC | the client's devnet preset | `TOON_CLIENT_RPC_URL` / `rpcUrl` / `chainRpcUrls[<chain>]` — **set this for a mainnet node** |
@@ -678,14 +678,14 @@ attributes payment from the voucher, never from the event.
 
 ### Devnet
 
-The shared devnet's nodes and the faucet (the node URLs are also `@toon-protocol/client`'s `DEVNET` preset):
+The shared devnet and its faucet. Since 2026-10-16 the devnet runs **one connector** for every app (relay, store, gas station, echo, workload gateway); the node URLs are also `@toon-protocol/client`'s `DEVNET` preset:
 
 | What | URL |
 |---|---|
 | Faucet (web UI + API) | `https://faucet.devnet.toonprotocol.dev` |
-| Relay node (paid writes: `rig entry`) | `https://proxy.relay.devnet.toonprotocol.dev` |
-| Relay (free reads: `rig remote add origin`) | `wss://relay-ws.devnet.toonprotocol.dev` |
-| Store route (`--via` for ArNS jobs) | an ILP **destination** the node prices, e.g. `g.toon.relay.store` |
+| Connector (paid writes and uploads: `rig entry`) | `https://toonprotocol.dev` |
+| Relay (free reads: `rig remote add origin`) | `wss://relay.toonprotocol.dev` |
+| Store route (`--via` for ArNS jobs) | an ILP **destination** the node prices, e.g. `g.toon.store` |
 
 `--via` names an ILP destination rather than an HTTP endpoint. The store sits
 behind the connector's payment termination, so it has no public job endpoint to

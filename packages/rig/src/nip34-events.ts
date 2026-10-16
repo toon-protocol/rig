@@ -175,10 +175,12 @@ export function parsePayout(tags: string[][]): PayoutPointer | null {
  *   2000 of them     = 202,000 bytes ≈ 197 KiB   ← the map's whole budget
  *
  * Which limit is that 197 KiB measured against? rig's own relay
- * (`relay-ws.devnet.toonprotocol.dev`) advertises no `limitation` in its
- * NIP-11 document — probed 2026-09-17, the HTTPS origin answers `Upgrade
- * Required` rather than a relay-information document — so there is no
- * self-declared number to size against. The smallest limit any relay surveyed
+ * (then `relay-ws.devnet.toonprotocol.dev`, now `relay.toonprotocol.dev`)
+ * advertised no `limitation` in its NIP-11 document when probed 2026-09-17 —
+ * the HTTPS origin answered `Upgrade Required` rather than a
+ * relay-information document. Re-probed 2026-10-16 it does answer one, but
+ * its `limitation` names no `max_message_length` or `max_content_length`, so
+ * there is still no self-declared size to measure against. The smallest limit any relay surveyed
  * for #153 declares is `relay.ngit.dev`'s 5 MiB message cap (probed the same
  * day), and that is the figure used here: the map is capped at under 4% of
  * it. That leaves the rest of the budget to the refs, which are the other

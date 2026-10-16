@@ -34,7 +34,7 @@ export const TEST_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 
 export const DEFAULT_ARNS_NAME = 'ardrive';
-export const DEFAULT_DEVNET_RELAY = 'wss://relay-ws.devnet.toonprotocol.dev';
+export const DEFAULT_DEVNET_RELAY = 'wss://relay.toonprotocol.dev';
 
 // A connector URL is MANDATORY as of 4.0.0. #116 removed the `apex`/`sandbox`
 // presets and the genesis-seed/topology discovery rig used to bootstrap from,
@@ -49,8 +49,8 @@ export const DEFAULT_DEVNET_RELAY = 'wss://relay-ws.devnet.toonprotocol.dev';
 // having nothing to do with the published artifact. Since it runs automatically
 // on `workflow_run: Release`, that turned every release red.
 //
-// This is the shared devnet relay node documented at README.md:93 and :398.
-export const DEFAULT_CONNECTOR = 'https://proxy.relay.devnet.toonprotocol.dev';
+// This is the shared devnet's one connector, documented in packages/rig/README.md.
+export const DEFAULT_CONNECTOR = 'https://toonprotocol.dev';
 
 // ---------------------------------------------------------------------------
 // Pure validators (unit-tested in smoke-published.test.mjs)

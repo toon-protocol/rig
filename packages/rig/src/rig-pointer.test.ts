@@ -21,7 +21,7 @@ function options(overrides: Partial<RigPointerOptions> = {}): RigPointerOptions 
     bundle: DEFAULT_RIG_WEB_BUNDLE,
     gateway: 'https://arweave.net',
     rigWebUrl: DEFAULT_RIG_WEB_URL,
-    relay: 'wss://relay-ws.devnet.toonprotocol.dev',
+    relay: 'wss://relay.toonprotocol.dev',
     ownerNpub: NPUB,
     repoId: 'hello-toon',
     ...overrides,
@@ -37,7 +37,7 @@ describe('DEFAULT_RIG_WEB_URL', () => {
 describe('repo routes', () => {
   it('builds the hash route rig-web understands, relay inside the fragment', () => {
     expect(repoHashRoute(options())).toBe(
-      `#/${NPUB}/hello-toon?relay=wss%3A%2F%2Frelay-ws.devnet.toonprotocol.dev`
+      `#/${NPUB}/hello-toon?relay=wss%3A%2F%2Frelay.toonprotocol.dev`
     );
     expect(rigWebRoute(options())).toBe(
       `${DEFAULT_RIG_WEB_URL}/${repoHashRoute(options())}`
@@ -77,7 +77,7 @@ describe('generateRigPointerHtml', () => {
     const html = generateRigPointerHtml(options());
     const base = `https://arweave.net/${DEFAULT_RIG_WEB_BUNDLE.manifestTx}`;
     expect(html).toContain(
-      `window.__RIG_CONFIG__={"relay":"wss://relay-ws.devnet.toonprotocol.dev","owner":"${NPUB}","repo":"hello-toon"}`
+      `window.__RIG_CONFIG__={"relay":"wss://relay.toonprotocol.dev","owner":"${NPUB}","repo":"hello-toon"}`
     );
     // HashRouter route preset in the pointer's own fragment (rig-web routes
     // by hash; the config pins relay/filter, not the route).
