@@ -1,5 +1,14 @@
 # @toon-protocol/rig
 
+## 5.4.1
+
+### Patch Changes
+
+- 4b50932: `rig push` by a declared maintainer now publishes into the owner's repo even when a same-identity daemon is running: a foreign `toon.owner` forces the standalone path, which reads the owner's honored state.
+- c97c44f: `rig inbox --follow` now reports a relay's `CLOSED` reason and any `NOTICE` on stderr. A `CLOSED` subscription reconnects with backoff; a `NOTICE` keeps the connection. Neither exits the follower.
+- eb5acb1: `rig pr merge` now applies the whole multi-event patch series (a root 1617 plus its `e`-replying follow-ons, as ngit sends them) in one isolated `git am`, gates `--require-ci-trust` on the series' final commit, and names every applied SHA in the applied status.
+- 0969063: `rig ci serve` now breaks a repo-state `created_at` tie by lowest event id, the same rule `rig clone` uses, so a coordinator serves the refs everyone else sees.
+
 ## 5.4.0
 
 ### Minor Changes
