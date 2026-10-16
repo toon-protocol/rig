@@ -53,6 +53,9 @@ export interface UnsignedEvent {
   created_at: number;
 }
 
+/** NIP-34 patch-revision marker: `["t", "root-revision"]` on the revision. */
+export const REVISION_ROOT_MARKER = 'root-revision';
+
 // ---------------------------------------------------------------------------
 // kind:30617 — Repository Announcement (+ maintainer authority, #287)
 // ---------------------------------------------------------------------------
@@ -484,11 +487,11 @@ export function buildPatch(
   ];
 
   if (revises) {
-    tags.push(['t', 'root-revision']);
+    tags.push(['t', REVISION_ROOT_MARKER]);
     tags.push(['e', revises.rootEventId, '', 'reply']);
     if (
       revises.rootAuthorPubkey &&
-      revises.rootAuthorPubkey !== repoOwnerPubkey
+      revises.rootAuthorPubkey.toLowerCase() !== repoOwnerPubkey.toLowerCase()
     ) {
       tags.push(['p', revises.rootAuthorPubkey]);
     }

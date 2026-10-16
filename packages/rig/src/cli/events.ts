@@ -39,6 +39,7 @@ import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import {
   PATCH_KIND,
+  REPOSITORY_ANNOUNCEMENT_KIND,
   STATUS_APPLIED_KIND,
   STATUS_CLOSED_KIND,
   STATUS_DRAFT_KIND,
@@ -904,7 +905,7 @@ async function resolveRevisedRoot(
       `event ${rootId} has kind ${root.kind}, not a kind:1617 patch — nothing was published or paid`
     );
   }
-  const aTag = `30617:${addr.ownerPubkey}:${addr.repoId}`;
+  const aTag = `${REPOSITORY_ANNOUNCEMENT_KIND}:${addr.ownerPubkey}:${addr.repoId}`;
   if (!root.tags.some((t) => t[0] === 'a' && t[1] === aTag)) {
     throw new Error(
       `patch ${rootId} belongs to a different repository than ${aTag} — nothing was published or paid`
@@ -912,7 +913,7 @@ async function resolveRevisedRoot(
   }
   if (isPatchRevision(root)) {
     throw new Error(
-      `patch ${rootId} is itself a revision — pass the ROOT patch id to --revises`
+      `patch ${rootId} is itself a revision — pass the ROOT patch id to --revises; nothing was published or paid`
     );
   }
   return { pubkey: root.pubkey };

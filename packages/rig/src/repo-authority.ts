@@ -12,7 +12,7 @@
  *     signed by the root's author or an authorized author.
  */
 
-import { parseMaintainers } from './nip34-events.js';
+import { parseMaintainers, REVISION_ROOT_MARKER } from './nip34-events.js';
 
 /** The slice of a signed event the honoring rules read. */
 export interface AuthorityEvent {
@@ -60,8 +60,7 @@ export function honoredRepoState<E extends AuthorityEvent>(
   return winner;
 }
 
-/** NIP-34 patch-revision marker: `["t", "root-revision"]` on the revision. */
-export const REVISION_ROOT_MARKER = 'root-revision';
+export { REVISION_ROOT_MARKER };
 
 /** True when a kind:1617 carries the `root-revision` marker. */
 export function isPatchRevision(event: { tags: string[][] }): boolean {
