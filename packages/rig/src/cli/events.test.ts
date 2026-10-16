@@ -982,9 +982,9 @@ describe('rig pr status', () => {
 
   it('rejects an unknown pr subcommand with the pr usage (exit 2)', async () => {
     const h = deps();
-    expect(await runPr(['merge', ROOT_EVENT], h.deps)).toBe(2);
+    expect(await runPr(['frobnicate', ROOT_EVENT], h.deps)).toBe(2);
     const text = h.err.join('\n');
-    expect(text).toContain('unknown rig pr subcommand: merge');
+    expect(text).toContain('unknown rig pr subcommand: frobnicate');
     expect(text).toContain('Usage: rig pr status');
     expect(await runPr([], deps().deps)).toBe(2);
     expect(fake.published).toHaveLength(0);

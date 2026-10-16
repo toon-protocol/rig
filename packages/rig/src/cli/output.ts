@@ -52,6 +52,12 @@ export interface CliIo {
    * single stdout emission; call it at most once per invocation.
    */
   emitJson(payload: unknown): void;
+  /**
+   * One compact JSON line on the REAL stdout, usable many times per run —
+   * the JSONL stream of `rig inbox --follow`. Optional so hand-built test
+   * ios need not provide it; commands fall back to `out`.
+   */
+  emitJsonLine?(payload: unknown): void;
   /** True when stdin+stdout are TTYs (interactive confirm possible). */
   isInteractive: boolean;
   /** Ask a y/N question; resolves true on explicit yes. */
@@ -120,6 +126,10 @@ export function makeCliIo(options: CliIoOptions): RigIo {
     emitJson: (payload) => {
       emittedJson = true;
       writeStdout(`${JSON.stringify(payload, null, 2)}\n`);
+    },
+    emitJsonLine: (payload) => {
+      emittedJson = true;
+      writeStdout(`${JSON.stringify(payload)}\n`);
     },
     isInteractive: options.isInteractive,
     confirm: options.confirm,
