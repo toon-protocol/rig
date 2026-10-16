@@ -498,6 +498,14 @@ export async function startCoordinator(
       repo.cursor = {
         lastCreatedAt: remote.refsEvent?.created_at ?? 0,
         lastEventId: remote.refsEvent?.id ?? '',
+        ...(remote.refsEvent
+          ? {
+              honoredState: {
+                created_at: remote.refsEvent.created_at,
+                id: remote.refsEvent.id,
+              },
+            }
+          : {}),
         refs: Object.fromEntries(remote.refs),
         processed: remote.refsEvent ? [remote.refsEvent.id] : [],
       };
@@ -1353,13 +1361,13 @@ export async function startCoordinator(
     if (repoSeen(repo, ev)) return;
     // The shared honored-state rule: newest `created_at`, a tie to the lowest
     // id — so every arrival order converges on the refs rig clone shows.
-    if (
-      !supersedes(ev, {
-        created_at: cursor.lastCreatedAt,
-        id: cursor.lastEventId,
-      })
-    )
-      return;
+    // Measured against the last applied 30618 only: a pull request in the
+    // same second must not decide which state wins.
+    const current = cursor.honoredState ?? {
+      created_at: cursor.lastCreatedAt,
+      id: cursor.lastEventId,
+    };
+    if (!supersedes(ev, current)) return;
     // Both ref tag shapes, through the shared parser (`../nip34-refs.ts`), so
     // a coordinator serves repos whose state was written by ngit or any other
     // conformant NIP-34 client exactly as it serves rig's own (rig#156).
@@ -1368,6 +1376,7 @@ export async function startCoordinator(
     if (headSymref) repo.defaultBranch = headSymref;
     const moved = movedRefs(cursor.refs, refs);
     cursor.refs = refs;
+    cursor.honoredState = { created_at: ev.created_at, id: ev.id };
     markRepoProcessed(repo, ev);
     await persistCursor();
     if (moved.length === 0) return;

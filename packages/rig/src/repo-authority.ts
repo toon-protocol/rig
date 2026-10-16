@@ -74,8 +74,8 @@ export function authorizedAuthors(
 
 /** True when `candidate` beats `current`: newer `created_at`, a tie to the lowest id. */
 export function supersedes(
-  candidate: { created_at: number; id: string },
-  current: { created_at: number; id: string }
+  candidate: Pick<AuthorityEvent, 'created_at' | 'id'>,
+  current: Pick<AuthorityEvent, 'created_at' | 'id'>
 ): boolean {
   return (
     candidate.created_at > current.created_at ||
