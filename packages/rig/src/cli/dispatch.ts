@@ -2,7 +2,7 @@
  * `rig` subcommand dispatch (#250): rig-owned verbs first, git for the rest.
  *
  * rig owns exactly: init, identity, remote, clone, fetch, push, site, issue,
- * comment, pr, maintainers, payout, refresh, channel (+ the `channels` list
+ * comment, pr, inbox, maintainers, payout, refresh, channel (+ the `channels` list
  * shorthand), fund,
  * balance, chain, entry, name, ci, help/-h/--help, and --version. EVERY other
  * subcommand is executed as `git <argv...>` verbatim (./git-passthrough.ts)
@@ -41,6 +41,7 @@ import { runFetch } from './fetch.js';
 import { runFund } from './fund.js';
 import { runGitPassthrough, type GitRunner } from './git-passthrough.js';
 import { runIdentity } from './identity-cmd.js';
+import { runInbox } from './inbox.js';
 import { runInit } from './init.js';
 import { runMaintainers } from './maintainers.js';
 import { runRefresh } from './refresh.js';
@@ -85,6 +86,8 @@ Commands rig owns:
   site url [ref]             print the last-published site URL for a ref (free)
   issue create               file an issue (kind:1621) against a repo
   issue list | show <id>     read the repo's issues + comments (free)
+  issue status <id> <open|closed>  set an issue's status (kind:1630/1632);
+                             close | reopen <id> are shortcuts
   pr list | show <id>        read the repo's patches; show prints the full
                              patch text (free)
   comment <target-event-id>  comment (NIP-22 kind:1111) on an issue or patch,
@@ -94,6 +97,11 @@ Commands rig owns:
                              publishes a revision of an existing patch)
   pr status <event-id> <state>  set an issue/patch status (kind:1630-1633):
                              open | applied | closed | draft
+  inbox                      everything new since you last read it (free):
+                             patches, revisions, issues, comments, statuses
+                             and CI results for repos you own or maintain,
+                             plus events that tag you; --since/--all look
+                             back without moving the cursor
   maintainers list           show the repo's declared maintainers (free); add/
   maintainers add <pubkey>   remove republish the kind:30617 to change who may
   maintainers remove <pubkey>  author authoritative issue/PR status (owner is
@@ -154,7 +162,8 @@ Any other command is passed through to git verbatim: \`rig status\` runs
 Run \`rig <command> --help\` for a rig command's flags. \`rig init\`,
 \`rig remote\`, \`rig clone\`, \`rig fetch\`, \`rig issue list/show\`,
 \`rig pr list/show\`, \`rig fund\`, \`rig balance\`, and \`rig channel list\`
-are free; push/issue create/comment/pr create/pr status are paid writes —
+are free; push/issue create/issue status/close/reopen/comment/pr create/pr
+status are paid writes —
 permanent and non-refundable —
 and channel open/close/settle are on-chain wallet transactions; each states
 what it will spend and asks for confirmation before doing so (--yes skips,
@@ -239,6 +248,8 @@ export async function dispatch(
       return runComment(rest, deps);
     case 'pr':
       return runPr(rest, deps);
+    case 'inbox':
+      return runInbox(rest, deps);
     case 'maintainers':
       return runMaintainers(rest, deps);
     case 'payout':

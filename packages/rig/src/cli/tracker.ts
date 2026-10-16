@@ -211,7 +211,7 @@ function defaultWebSocketFactory(url: string): WebSocketLike {
  * Query every relay with every filter and merge events by id. Resolves as
  * long as at least one relay answered; throws when all fail.
  */
-async function queryAll(
+export async function queryAll(
   relays: string[],
   filters: NostrFilter[],
   webSocketFactory: WebSocketFactory
