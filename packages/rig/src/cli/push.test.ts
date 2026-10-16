@@ -634,10 +634,10 @@ describe('standalone push (Publisher seam)', () => {
       ]);
       expect(fake.published.map((p) => p.kind)).toEqual([30618]);
       expect(h.err.join('\n')).not.toContain('differs from');
-      expect(JSON.stringify(fake.published[0]?.tags)).toContain(
-        'refs/heads/theirs'
-      );
-      expect(JSON.stringify(fake.published[0]?.tags)).toContain(other);
+      expect(fake.published[0]?.tags).toContainEqual([
+        'refs/heads/theirs',
+        other,
+      ]);
     });
 
     it('refuses a diverged ref before uploading or publishing, with a stable --json code', async () => {
@@ -652,6 +652,21 @@ describe('standalone push (Publisher seam)', () => {
       const text = [...h.out, ...h.err].join('\n');
       expect(text).toContain('non_fast_forward');
       expect(text).toContain('d'.repeat(40));
+      expect(text).toContain(git(['rev-parse', 'HEAD'], repoDir).trim());
+      expect(text).toContain('rig fetch');
+    });
+
+    it('tells the human to rig fetch and integrate on divergence', async () => {
+      const fake = makeStandalone(
+        maintainerRemote(new Map([['refs/heads/main', 'd'.repeat(40)]]))
+      );
+      const h = makeDeps(env, repoDir, { loadStandalone: fake.load });
+      const code = await runPush(['--yes'], h.deps);
+      expect(code).toBe(1);
+      expect(fake.published).toHaveLength(0);
+      const text = h.err.join('\n');
+      expect(text).toContain('refs/heads/main');
+      expect(text).toContain('rig fetch');
     });
 
     it('--force publishes despite divergence', async () => {

@@ -595,20 +595,21 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
     // A declared maintainer pushes into the OWNER's repo (ADR-0005): the
     // honored state is read under toon.owner, and the new kind:30618 is signed
     // by the maintainer. Anyone else keeps publishing under their own namespace.
-    let maintainerRemote: RemoteState | undefined;
-    if (
-      session.path === 'standalone' &&
+    const foreignOwner =
       toonConfig.owner &&
-      toonConfig.owner !== identity.pubkey
-    ) {
+      toonConfig.owner.toLowerCase() !== identity.pubkey.toLowerCase()
+        ? toonConfig.owner
+        : undefined;
+    let maintainerRemote: RemoteState | undefined;
+    if (session.path === 'standalone' && foreignOwner) {
       const ownerState = await session.ctx.fetchRemote({
-        ownerPubkey: toonConfig.owner,
+        ownerPubkey: foreignOwner,
         repoId,
         relayUrls: relaysUsed,
       });
       if (
         ownerState.announced &&
-        authorizedAuthors(toonConfig.owner, ownerState.announceEvent?.tags).has(
+        authorizedAuthors(foreignOwner, ownerState.announceEvent?.tags).has(
           identity.pubkey.toLowerCase()
         )
       ) {
@@ -616,13 +617,9 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
       }
     }
 
-    if (
-      !maintainerRemote &&
-      toonConfig.owner &&
-      toonConfig.owner !== identity.pubkey
-    ) {
+    if (!maintainerRemote && foreignOwner) {
       io.err(
-        `warning: git config toon.owner (${toonConfig.owner.slice(0, 8)}…) differs from ` +
+        `warning: git config toon.owner (${foreignOwner.slice(0, 8)}…) differs from ` +
           `the active identity (${identity.pubkey.slice(0, 8)}…) — this push publishes ` +
           "under the ACTIVE identity's repo namespace, not the configured owner's. " +
           'Re-run `rig init` to adopt the active identity.'
