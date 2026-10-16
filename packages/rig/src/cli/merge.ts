@@ -71,6 +71,7 @@ import { resolveRelays, singleRelayRefusal } from './remote.js';
 import { renderIdentityLine, renderPlan, renderResult } from './render.js';
 import { queryAll } from './tracker.js';
 import type { EventCommandDeps } from './events.js';
+import type { NostrEvent } from '../remote-state.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -232,6 +233,53 @@ class OverlayReader extends GitRepoReader {
     });
     return { ...base, refs };
   }
+}
+
+/**
+ * The follow-on patches of `head` (NIP-34 / ngit multi-commit series): 1617s
+ * that `e`-reply to it, directly or through earlier follow-ons, are not
+ * revisions, and are signed by the head's author or an authorized author.
+ * Ordered by reply depth, then `created_at`, then lowest id — the order ngit
+ * sends them in. `head` itself is not included.
+ */
+async function fetchSeriesFollowOns(
+  relays: string[],
+  head: NostrEvent,
+  authorized: ReadonlySet<string>,
+  webSocketFactory: Parameters<typeof queryAll>[2]
+): Promise<NostrEvent[]> {
+  const allowed = new Set([...authorized, head.pubkey.toLowerCase()]);
+  const found = new Map<string, { event: NostrEvent; depth: number }>();
+  let frontier = [head.id];
+  for (let depth = 1; frontier.length > 0 && depth <= 256; depth++) {
+    const replies = await queryAll(
+      relays,
+      [{ kinds: [PATCH_KIND], '#e': frontier }],
+      webSocketFactory
+    );
+    frontier = [];
+    for (const e of replies.values()) {
+      if (
+        e.kind !== PATCH_KIND ||
+        e.id === head.id ||
+        found.has(e.id) ||
+        isPatchRevision(e) ||
+        !allowed.has(e.pubkey.toLowerCase())
+      ) {
+        continue;
+      }
+      found.set(e.id, { event: e, depth });
+      frontier.push(e.id);
+    }
+  }
+  return [...found.values()]
+    .sort(
+      (a, b) =>
+        a.depth - b.depth ||
+        a.event.created_at - b.event.created_at ||
+        (a.event.id < b.event.id ? -1 : 1)
+    )
+    .map((f) => f.event);
 }
 
 interface AppliedPatch {
@@ -398,6 +446,17 @@ export async function runPrMerge(
       authorized
     );
 
+    const followOns = await fetchSeriesFollowOns(
+      relays,
+      latest,
+      authorized,
+      webSocketFactory
+    );
+    const series = [latest, ...followOns];
+    const seriesText = series
+      .map((e) => (e.content.endsWith('\n') ? e.content : `${e.content}\n`))
+      .join('');
+
     // ── 2. Refuse a caller who cannot move refs, before anything is spent ───
     if (!authorized.has(identity.pubkey.toLowerCase())) {
       throw new PrMergeError(
@@ -466,7 +525,7 @@ export async function runPrMerge(
     const applied = await applyInIsolation(
       repoRoot,
       tip,
-      latest.content,
+      seriesText,
       hasCommitter
         ? undefined
         : {
@@ -481,8 +540,10 @@ export async function runPrMerge(
       // no commit tags we fall back to the locally rebuilt head, which no CI
       // run can have seen, so the gate then refuses.
       const headCommit = (
-        latest.tags.filter((t) => t[0] === 'commit').at(-1)?.[1] ??
-        applied.newHead
+        series
+          .at(-1)
+          ?.tags.filter((t) => t[0] === 'commit')
+          .at(-1)?.[1] ?? applied.newHead
       ).toLowerCase();
       const gate = await evaluateCiGate({
         relays,
