@@ -553,7 +553,10 @@ describe('rig comment (NIP-22 kind:1111, #159)', () => {
         }),
       ],
     });
-    const code = await runComment([PATCH_ID, '--body', 'lgtm', '--yes'], h.deps);
+    const code = await runComment(
+      [PATCH_ID, '--body', 'lgtm', '--yes'],
+      h.deps
+    );
     expect(code).toBe(0);
     const { event } = fake.published[0] as FakeStandalone['published'][0];
     expect(event.tags).toContainEqual(['K', '1617']);
@@ -625,6 +628,118 @@ describe('rig comment (NIP-22 kind:1111, #159)', () => {
     ).toBe(2);
     expect(await runComment([ROOT_EVENT], deps().deps)).toBe(2);
     expect(await runComment([], deps().deps)).toBe(2);
+    expect(fake.published).toHaveLength(0);
+  });
+});
+
+describe('rig pr create --revises', () => {
+  const ROOT_PATCH_ID = '5e'.repeat(32);
+  const rootPatch = (pubkey: string): NostrEvent =>
+    wireEvent({
+      id: ROOT_PATCH_ID,
+      kind: 1617,
+      pubkey,
+      tags: [
+        ['a', `30617:${CONFIG_OWNER}:demo`],
+        ['subject', 'Original'],
+      ],
+      content: 'orig',
+    });
+
+  function expectRevisionShape(rootAuthor: string): void {
+    const { event } = fake.published[0] as FakeStandalone['published'][0];
+    expect(event.kind).toBe(1617);
+    expect(event.tags).toContainEqual(['t', 'root-revision']);
+    expect(event.tags).toContainEqual(['e', ROOT_PATCH_ID, '', 'reply']);
+    expect(event.tags).toContainEqual(['a', `30617:${CONFIG_OWNER}:demo`]);
+    expect(event.tags).toContainEqual(['p', rootAuthor]);
+  }
+
+  it('publishes the NIP-34 revision shape with --range', async () => {
+    const [first, second] = addSecondCommit(repoDir);
+    const h = deps({ remoteEvents: [rootPatch(OWNER)] });
+    const code = await runPr(
+      [
+        'create',
+        '--title',
+        'v2',
+        '--range',
+        `${first}..${second}`,
+        '--revises',
+        ROOT_PATCH_ID,
+        '--yes',
+      ],
+      h.deps
+    );
+    expect(code).toBe(0);
+    expectRevisionShape(OWNER);
+    const { event } = fake.published[0] as FakeStandalone['published'][0];
+    expect(event.tags).toContainEqual(['commit', second]);
+    expect(h.err.join('\n')).not.toContain('IGNORE');
+  });
+
+  it('publishes the NIP-34 revision shape with --patch-file', async () => {
+    const patchPath = join(homeDir, 'rev.patch');
+    writeFileSync(patchPath, 'From 0000 fake\nSubject: [PATCH] v2\n');
+    const h = deps({ remoteEvents: [rootPatch(OWNER)] });
+    const code = await runPr(
+      [
+        'create',
+        '--title',
+        'v2',
+        '--patch-file',
+        patchPath,
+        '--revises',
+        ROOT_PATCH_ID,
+        '--yes',
+      ],
+      h.deps
+    );
+    expect(code).toBe(0);
+    expectRevisionShape(OWNER);
+  });
+
+  it('WARNS but still publishes when the caller is not the root author or a maintainer', async () => {
+    const patchPath = join(homeDir, 'rev.patch');
+    writeFileSync(patchPath, 'From 0000 fake\nSubject: [PATCH] v2\n');
+    const h = deps({ remoteEvents: [rootPatch(ISSUE_AUTHOR)] });
+    const code = await runPr(
+      [
+        'create',
+        '--title',
+        'v2',
+        '--patch-file',
+        patchPath,
+        '--revises',
+        ROOT_PATCH_ID,
+        '--yes',
+      ],
+      h.deps
+    );
+    expect(code).toBe(0);
+    expect(h.err.join('\n')).toContain('IGNORE this revision');
+    expect(fake.published).toHaveLength(1);
+    expectRevisionShape(ISSUE_AUTHOR);
+  });
+
+  it('refuses before paying when the root patch is not on the relay', async () => {
+    const patchPath = join(homeDir, 'rev.patch');
+    writeFileSync(patchPath, 'x\n');
+    const h = deps();
+    const code = await runPr(
+      [
+        'create',
+        '--title',
+        'v2',
+        '--patch-file',
+        patchPath,
+        '--revises',
+        ROOT_PATCH_ID,
+        '--yes',
+      ],
+      h.deps
+    );
+    expect(code).not.toBe(0);
     expect(fake.published).toHaveLength(0);
   });
 });
@@ -1071,6 +1186,56 @@ describe('error mapping', () => {
   });
 });
 
+describe('rig issue status / close / reopen', () => {
+  it('status closed and close publish kind:1632 with the repo a-tag', async () => {
+    for (const args of [
+      ['status', ROOT_EVENT, 'closed', '--yes'],
+      ['close', ROOT_EVENT, '--yes'],
+    ]) {
+      fake.published.length = 0;
+      expect(await runIssue(args, deps().deps)).toBe(0);
+      const { event } = fake.published[0] as FakeStandalone['published'][0];
+      expect(event.kind).toBe(1632);
+      expect(event.tags).toContainEqual(['a', `30617:${CONFIG_OWNER}:demo`]);
+    }
+  });
+
+  it('status open and reopen publish kind:1630', async () => {
+    for (const args of [
+      ['status', ROOT_EVENT, 'open', '--yes'],
+      ['reopen', ROOT_EVENT, '--yes'],
+    ]) {
+      fake.published.length = 0;
+      expect(await runIssue(args, deps().deps)).toBe(0);
+      expect(fake.published[0]?.event.kind).toBe(1630);
+    }
+  });
+
+  it('rejects applied/draft with a usage error before paying (exit 2)', async () => {
+    for (const word of ['applied', 'draft']) {
+      const h = deps();
+      expect(
+        await runIssue(['status', ROOT_EVENT, word, '--yes'], h.deps)
+      ).toBe(2);
+      expect(h.err.join('\n')).toContain('Usage: rig issue status');
+    }
+    expect(await runIssue(['close'], deps().deps)).toBe(2);
+    expect(await runIssue(['close', ROOT_EVENT, 'extra'], deps().deps)).toBe(2);
+    expect(fake.published).toHaveLength(0);
+  });
+
+  it('--json names the command like pr status', async () => {
+    const h = deps();
+    expect(
+      await runIssue(['close', ROOT_EVENT, '--json', '--yes'], h.deps)
+    ).toBe(0);
+    expect(JSON.parse(h.out.join('\n'))).toMatchObject({
+      command: 'issue status',
+      kind: 1632,
+    });
+  });
+});
+
 describe('usage', () => {
   it('per-command --help prints usage and exits 0 without publishing', async () => {
     for (const [run, args, needle] of [
@@ -1081,6 +1246,10 @@ describe('usage', () => {
       [runPr, ['--help'], 'cover-letter'],
       [runPr, ['--help'], 'Usage: rig pr status'],
       [runPr, ['status', '--help'], 'open|applied|closed|draft'],
+      [runIssue, ['--help'], 'Usage: rig issue status'],
+      [runIssue, ['status', '--help'], '<open|closed>'],
+      [runIssue, ['close', '--help'], 'rig issue close'],
+      [runIssue, ['reopen', '--help'], 'rig issue reopen'],
     ] as const) {
       const h = deps();
       expect(await run(args as unknown as string[], h.deps)).toBe(0);

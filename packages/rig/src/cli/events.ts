@@ -38,6 +38,8 @@
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import {
+  PATCH_KIND,
+  REPOSITORY_ANNOUNCEMENT_KIND,
   STATUS_APPLIED_KIND,
   STATUS_CLOSED_KIND,
   STATUS_DRAFT_KIND,
@@ -56,7 +58,7 @@ import {
   type StatusKind,
   type UnsignedEvent,
 } from '../nip34-events.js';
-import { authorizedAuthors } from '../repo-authority.js';
+import { authorizedAuthors, isPatchRevision } from '../repo-authority.js';
 import {
   defaultWebSocketFactory,
   fetchRemoteState,
@@ -167,7 +169,11 @@ ${COMMON_FLAGS_USAGE}
 
 Related (FREE reads — no payment):
   rig issue list [--state open|closed|all]   list the repo's issues
-  rig issue show <event-id>                  one issue + its comments`;
+  rig issue show <event-id>                  one issue + its comments
+
+Related (paid status — see \`rig issue status --help\`):
+  rig issue status <event-id> <open|closed>  set an issue's status
+  rig issue close | reopen <event-id>        shortcuts for closed / open`;
 
 export const COMMENT_USAGE = `Usage: rig comment <target-event-id> --body <text> [options]
 
@@ -192,7 +198,7 @@ Options:
   --body <text>            comment body (Markdown) [required]
 ${COMMON_FLAGS_USAGE}`;
 
-export const PR_CREATE_USAGE = `Usage: rig pr create --title <title> (--range <range> | --patch-file <path>) [options]
+export const PR_CREATE_USAGE = `Usage: rig pr create --title <title> (--range <range> | --patch-file <path>) [--revises <patch-id>] [options]
 
 Publish a patch (kind:1617) whose content is REAL \`git format-patch\` output —
 a paid publish; writes are permanent and non-refundable. --range runs
@@ -206,6 +212,12 @@ The PR body (--body/--body-file) is carried in a dedicated \`description\`
 tag, not in the event content — the content stays pure format-patch output so
 \`rig pr show … | git am\` keeps working.
 
+--revises publishes the patch as a NIP-34 revision of an existing root patch
+(\`t root-revision\` plus a NIP-10 reply to it), keeping the original thread,
+comments and status. Readers honor a revision only from the root's author or a
+declared maintainer; otherwise rig warns and still publishes. A revision is
+always published through the embedded (standalone) path.
+
 Options:
   --title <title>      patch/PR title (subject tag) [required]
   --range <range>      revision range for format-patch: <rev>, <rev>..<rev>,
@@ -214,6 +226,7 @@ Options:
   --body <text>        PR description (Markdown; description tag)
   --body-file <path>   read the PR description from a file
   --branch <name>      branch name (branch-name tag)
+  --revises <patch-id> publish as a revision of this root patch (64-hex id)
 ${COMMON_FLAGS_USAGE}`;
 
 export const PR_STATUS_USAGE = `Usage: rig pr status <target-event-id> <open|applied|closed|draft> [options]
@@ -224,6 +237,19 @@ and non-refundable. Publishes kind:1630 (open), 1631 (applied), 1632
 with the repo a-tag attached so readers can scope a status stream to the
 repository. (This command was \`rig status\` before v2 — bare \`rig status\`
 now passes through to \`git status\`.)
+
+Options:
+${COMMON_FLAGS_USAGE}`;
+
+export const ISSUE_STATUS_USAGE = `Usage: rig issue status <issue-event-id> <open|closed> [options]
+       rig issue close <issue-event-id> [options]
+       rig issue reopen <issue-event-id> [options]
+
+Set the status of an issue — a paid publish; writes are permanent and
+non-refundable. Aliases over \`rig pr status\`: \`closed\` / \`close\` publish
+kind:1632, \`open\` / \`reopen\` publish kind:1630, against the 64-char hex id
+of the issue, with the repo a-tag attached. \`applied\` and \`draft\` apply to
+patches only and are rejected for issues (use \`rig pr status\`).
 
 Options:
 ${COMMON_FLAGS_USAGE}`;
@@ -299,7 +325,7 @@ function pickCommon(values: Record<string, unknown>): CommonFlags {
 // Shared publish pipeline
 // ---------------------------------------------------------------------------
 
-type EventCommand = 'issue' | 'comment' | 'pr' | 'pr status';
+type EventCommand = 'issue' | 'comment' | 'pr' | 'pr status' | 'issue status';
 
 interface RunEventOptions {
   command: EventCommand;
@@ -548,7 +574,17 @@ export async function runIssue(
     io.out(ISSUE_LIST_USAGE);
     io.out('');
     io.out(ISSUE_SHOW_USAGE);
+    io.out('');
+    io.out(ISSUE_STATUS_USAGE);
     return 0;
+  }
+  // Paid status aliases over the kind:1630/1632 publish.
+  if (sub === 'status') return runStatusCommand(rest, deps, ISSUE_STATUS_SPEC);
+  if (sub === 'close') {
+    return runStatusCommand(rest, deps, ISSUE_STATUS_SPEC, 'closed');
+  }
+  if (sub === 'reopen') {
+    return runStatusCommand(rest, deps, ISSUE_STATUS_SPEC, 'open');
   }
   // FREE read subcommands (#278): relay queries only, no payment path.
   if (sub === 'list') return runIssueList(rest, deps);
@@ -556,7 +592,7 @@ export async function runIssue(
   if (sub !== 'create') {
     io.err(
       sub === undefined
-        ? 'missing subcommand: rig issue <create|list|show>'
+        ? 'missing subcommand: rig issue <create|list|show|status|close|reopen>'
         : `unknown rig issue subcommand: ${sub}`
     );
     io.err(ISSUE_USAGE);
@@ -841,7 +877,7 @@ export async function runPr(
     case 'create':
       return runPrCreate(rest, deps);
     case 'status':
-      return runPrStatus(rest, deps);
+      return runStatusCommand(rest, deps, PR_STATUS_SPEC);
     // FREE read subcommands (#278): relay queries only, no payment path.
     case 'list':
       return runPrList(rest, deps);
@@ -863,6 +899,100 @@ export async function runPr(
   }
 }
 
+/**
+ * Fetch the root patch a `--revises` publish targets, before anything is paid.
+ * Refuses a missing event, a non-patch, a patch of another repo, and a
+ * revision (revise the root, not an earlier revision).
+ */
+async function resolveRevisedRoot(
+  deps: EventCommandDeps,
+  rootId: string,
+  relayUrl: string | undefined,
+  addr: GitRepoAddr
+): Promise<{ pubkey: string }> {
+  if (relayUrl === undefined) {
+    throw new Error(
+      '--revises needs the root patch from a relay; pass --relay <url> or configure a remote'
+    );
+  }
+  const found = await queryRelay(
+    relayUrl,
+    { ids: [rootId] },
+    TARGET_LOOKUP_TIMEOUT_MS,
+    deps.webSocketFactory ?? defaultWebSocketFactory
+  );
+  const root = found.find((e) => e.id === rootId);
+  if (!root) {
+    throw new Error(
+      `patch ${rootId} not found on ${relayUrl} — nothing was published or paid`
+    );
+  }
+  if (root.kind !== PATCH_KIND) {
+    throw new Error(
+      `event ${rootId} has kind ${root.kind}, not a kind:1617 patch — nothing was published or paid`
+    );
+  }
+  const aTag = `${REPOSITORY_ANNOUNCEMENT_KIND}:${addr.ownerPubkey}:${addr.repoId}`;
+  if (!root.tags.some((t) => t[0] === 'a' && t[1] === aTag)) {
+    throw new Error(
+      `patch ${rootId} belongs to a different repository than ${aTag} — nothing was published or paid`
+    );
+  }
+  if (isPatchRevision(root)) {
+    throw new Error(
+      `patch ${rootId} is itself a revision — pass the ROOT patch id to --revises; nothing was published or paid`
+    );
+  }
+  return { pubkey: root.pubkey };
+}
+
+/** Warn (never refuse) when readers will ignore the caller's revision. */
+async function warnIfRevisionIgnored(
+  deps: EventCommandDeps,
+  args: {
+    identity: IdentityReport;
+    addr: GitRepoAddr;
+    relayUrl: string | undefined;
+  },
+  rootAuthor: string | undefined
+): Promise<void> {
+  const { io } = deps;
+  const { identity, addr, relayUrl } = args;
+  const me = identity.pubkey.toLowerCase();
+  if (me === rootAuthor?.toLowerCase()) return;
+  if (me === addr.ownerPubkey.toLowerCase()) return;
+  let authorized: Set<string> | undefined;
+  if (relayUrl !== undefined) {
+    try {
+      const remote = await fetchRemoteState({
+        relayUrls: [relayUrl],
+        ownerPubkey: addr.ownerPubkey,
+        repoId: addr.repoId,
+        ...(deps.webSocketFactory
+          ? { webSocketFactory: deps.webSocketFactory }
+          : {}),
+      });
+      authorized = authorizedAuthors(
+        addr.ownerPubkey,
+        remote.announceEvent?.tags ?? []
+      );
+    } catch {
+      // Fall through to the "could not verify" note.
+    }
+  }
+  if (authorized?.has(me)) return;
+  io.err(
+    authorized === undefined
+      ? 'warning: could not read the repo announcement to verify your maintainer ' +
+          "status — unless you are the root patch's author or a declared " +
+          'maintainer, readers will IGNORE this revision.'
+      : `warning: you (${identity.pubkey.slice(0, 8)}…) are neither the root ` +
+          "patch's author nor a maintainer of " +
+          `30617:${addr.ownerPubkey.slice(0, 8)}…:${addr.repoId} — readers ` +
+          'will IGNORE this revision. Publishing anyway (the relay is permissionless).'
+  );
+}
+
 /** `rig pr create` — kind:1617 patch publish. */
 async function runPrCreate(
   rest: string[],
@@ -877,6 +1007,7 @@ async function runPrCreate(
   let branch: string | undefined;
   let bodyFlag: string | undefined;
   let bodyFile: string | undefined;
+  let revises: string | undefined;
   try {
     const { values } = parseArgs({
       args: rest,
@@ -888,6 +1019,7 @@ async function runPrCreate(
         body: { type: 'string' },
         'body-file': { type: 'string' },
         branch: { type: 'string' },
+        revises: { type: 'string' },
       },
       allowPositionals: false,
     });
@@ -911,6 +1043,13 @@ async function runPrCreate(
     branch = values.branch;
     bodyFlag = values.body;
     bodyFile = values['body-file'];
+    if (values.revises !== undefined) {
+      assertHex64(values.revises, '--revises');
+      revises = values.revises;
+      // The daemon's /git/patch route has no revision shape; publish through
+      // the embedded path, which builds the event locally.
+      flags = { ...flags, standalone: true };
+    }
   } catch (err) {
     io.err(err instanceof Error ? err.message : String(err));
     io.err(PR_CREATE_USAGE);
@@ -944,13 +1083,18 @@ async function runPrCreate(
   // publishes — the daemon never re-derives the series.
   let builtPatchText: string | undefined;
   let builtCommits: { sha: string; parentSha: string }[] = [];
+  let rootAuthor: string | undefined;
 
   return runEvent({
     command: 'pr',
     flags,
     deps,
     actionLabel: `patch ${JSON.stringify(title)}`,
-    buildEvent: async (addr) => {
+    buildEvent: async (addr, relayUrl) => {
+      if (revises !== undefined) {
+        rootAuthor = (await resolveRevisedRoot(deps, revises, relayUrl, addr))
+          .pubkey;
+      }
       let patchText: string;
       let commits: { sha: string; parentSha: string }[];
       if (range !== undefined) {
@@ -991,9 +1135,23 @@ async function runPrCreate(
         commits,
         branch,
         patchText,
-        body
+        body,
+        revises !== undefined
+          ? {
+              rootEventId: revises,
+              ...(rootAuthor !== undefined
+                ? { rootAuthorPubkey: rootAuthor }
+                : {}),
+            }
+          : undefined
       );
     },
+    // A revision from anyone but the root's author or a maintainer is ignored
+    // by readers: warn, but publish (the relay is permissionless).
+    preConfirm:
+      revises === undefined
+        ? undefined
+        : (args) => warnIfRevisionIgnored(deps, args, rootAuthor),
     sendDaemon: (client, addr) => {
       if (builtPatchText === undefined) {
         throw new Error('internal: patch text not built before delegation');
@@ -1011,7 +1169,8 @@ async function runPrCreate(
 }
 
 // ---------------------------------------------------------------------------
-// rig pr status (top-level `rig status` before #250 — now git's)
+// rig pr status (top-level `rig status` before #250 — now git's) and the
+// rig issue status|close|reopen aliases (#231)
 // ---------------------------------------------------------------------------
 
 /** NIP-34 status kinds by wire value (mirrors the daemon's mapping). */
@@ -1026,10 +1185,42 @@ function isStatusValue(value: string): value is GitStatusValue {
   return Object.hasOwn(STATUS_KIND_BY_VALUE, value);
 }
 
-/** `rig pr status` — kind:1630-1633 status publish. */
-async function runPrStatus(
+interface StatusSpec {
+  command: 'pr status' | 'issue status';
+  usage: string;
+  allowed: readonly GitStatusValue[];
+  /** Positional shape shown in the arity error. */
+  shape: string;
+  /** Label for the target id in errors. */
+  targetLabel: string;
+}
+
+const PR_STATUS_SPEC: StatusSpec = {
+  command: 'pr status',
+  usage: PR_STATUS_USAGE,
+  allowed: ['open', 'applied', 'closed', 'draft'],
+  shape: '<target-event-id> <open|applied|closed|draft>',
+  targetLabel: '<target-event-id>',
+};
+
+const ISSUE_STATUS_SPEC: StatusSpec = {
+  command: 'issue status',
+  usage: ISSUE_STATUS_USAGE,
+  allowed: ['open', 'closed'],
+  shape: '<issue-event-id> <open|closed>',
+  targetLabel: '<issue-event-id>',
+};
+
+/**
+ * Status publish (kind:1630-1633) behind `rig pr status` and the `rig issue
+ * status|close|reopen` aliases. `fixedStatus` is set by the shortcuts, which
+ * take only the target id. Validation happens before anything is paid.
+ */
+async function runStatusCommand(
   args: string[],
-  deps: EventCommandDeps
+  deps: EventCommandDeps,
+  spec: StatusSpec,
+  fixedStatus?: GitStatusValue
 ): Promise<number> {
   const { io } = deps;
 
@@ -1044,31 +1235,34 @@ async function runPrStatus(
     });
     flags = pickCommon(values);
     if (flags.help) {
-      io.out(PR_STATUS_USAGE);
+      io.out(spec.usage);
       return 0;
     }
-    if (positionals.length !== 2) {
+    const want = fixedStatus === undefined ? 2 : 1;
+    if (positionals.length !== want) {
       throw new Error(
-        'expected exactly two arguments: <target-event-id> <open|applied|closed|draft>'
+        fixedStatus === undefined
+          ? `expected exactly two arguments: ${spec.shape}`
+          : `expected exactly one argument: ${spec.targetLabel}`
       );
     }
     targetEventId = positionals[0] as string;
-    assertHex64(targetEventId, '<target-event-id>');
-    const rawStatus = positionals[1] as string;
-    if (!isStatusValue(rawStatus)) {
+    assertHex64(targetEventId, spec.targetLabel);
+    const rawStatus = fixedStatus ?? (positionals[1] as string);
+    if (!isStatusValue(rawStatus) || !spec.allowed.includes(rawStatus)) {
       throw new Error(
-        `status must be one of open | applied | closed | draft (got ${JSON.stringify(rawStatus)})`
+        `status must be one of ${spec.allowed.join(' | ')} (got ${JSON.stringify(rawStatus)})`
       );
     }
     status = rawStatus;
   } catch (err) {
     io.err(err instanceof Error ? err.message : String(err));
-    io.err(PR_STATUS_USAGE);
+    io.err(spec.usage);
     return 2;
   }
 
   return runEvent({
-    command: 'pr status',
+    command: spec.command,
     flags,
     deps,
     actionLabel: `status ${status} on ${targetEventId.slice(0, 8)}…`,

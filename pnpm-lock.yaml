@@ -57,7 +57,7 @@ importers:
         specifier: ^1.0.0
         version: 1.4.0
       '@toon-protocol/client':
-        specifier: ^4.1.2
+        specifier: 4.1.2
         version: 4.1.2(typescript@5.9.3)(zod@3.25.76)
       '@toon-protocol/core':
         specifier: ^3.5.0

@@ -30,7 +30,12 @@ import {
   commentBelongsToThread,
   firstTagValue,
 } from '../nip34-events.js';
-import { authorizedAuthors } from '../repo-authority.js';
+import {
+  authorizedAuthors,
+  isPatchRevision,
+  revisionRootId,
+  selectRevision,
+} from '../repo-authority.js';
 import { ownerToHex } from '../npub.js';
 import {
   queryRelay,
@@ -206,7 +211,7 @@ function defaultWebSocketFactory(url: string): WebSocketLike {
  * Query every relay with every filter and merge events by id. Resolves as
  * long as at least one relay answered; throws when all fail.
  */
-async function queryAll(
+export async function queryAll(
   relays: string[],
   filters: NostrFilter[],
   webSocketFactory: WebSocketFactory
@@ -484,8 +489,13 @@ async function fetchItems(
   ]);
 
   // Defense against over-returning relays: keep only the right kind + repo.
+  // A revision (`t root-revision`) is a version of its root, not an item of
+  // its own: `pr list` shows a revised patch once, under its root.
   const items = [...itemEvents.values()].filter(
-    (e) => e.kind === kind && e.tags.some((t) => t[0] === 'a' && t[1] === aTag)
+    (e) =>
+      e.kind === kind &&
+      e.tags.some((t) => t[0] === 'a' && t[1] === aTag) &&
+      !(kind === PATCH_KIND && isPatchRevision(e))
   );
 
   // Statuses may lack the repo `a` tag (other clients) — also query by `#e`.
@@ -531,8 +541,21 @@ interface ShownComment {
   replyToEventId: string | null;
 }
 
+/** One version of a patch: the root, or a revision of it. */
+interface ShownRevision {
+  eventId: string;
+  authorPubkey: string;
+  createdAt: number;
+}
+
 interface ShownItem {
   item: TrackerItem;
+  /**
+   * Patches only: the version `item` shows (the latest revision by the root's
+   * author or an authorized author — the root itself when there is none) and
+   * the earlier versions, oldest first, root first.
+   */
+  revisions?: { latest: ShownRevision; earlier: ShownRevision[] };
   comments: ShownComment[];
   repoATag: string | null;
 }
@@ -551,6 +574,13 @@ async function fetchItem(
   const event = found.get(eventId);
   if (!event) {
     throw new Error(`event ${eventId} not found on ${ctx.relays.join(', ')}`);
+  }
+  // Showing a revision shows its thread: hop to the root it replies to.
+  if (event.kind === PATCH_KIND && isPatchRevision(event)) {
+    const rootId = revisionRootId(event);
+    if (rootId !== undefined && rootId !== eventId) {
+      return fetchItem(ctx, rootId, expectedKind);
+    }
   }
   if (event.kind !== expectedKind) {
     const hint =
@@ -612,15 +642,52 @@ async function fetchItem(
       )
     : new Set<string>();
 
-  return {
-    item: parseTrackerItem(
+  const item = parseTrackerItem(
+    event,
+    deriveStatus(
+      eventId,
+      statusEvents.values(),
+      withTargetAuthor(authorized, event.pubkey)
+    )
+  );
+
+  let revisions: ShownItem['revisions'];
+  if (event.kind === PATCH_KIND) {
+    const revisionEvents = await queryAll(
+      ctx.relays,
+      [{ kinds: [PATCH_KIND], '#e': [eventId] }],
+      ctx.webSocketFactory
+    );
+    const { latest, earlier } = selectRevision(
       event,
-      deriveStatus(
-        eventId,
-        statusEvents.values(),
-        withTargetAuthor(authorized, event.pubkey)
-      )
-    ),
+      [...revisionEvents.values()].filter((e) => e.kind === PATCH_KIND),
+      authorized
+    );
+    const describe = (e: NostrEvent): ShownRevision => ({
+      eventId: e.id,
+      authorPubkey: e.pubkey,
+      createdAt: e.created_at,
+    });
+    revisions = { latest: describe(latest), earlier: earlier.map(describe) };
+    if (latest.id !== event.id) {
+      // The thread (id, author, status, comments) stays the root's; the patch
+      // itself is the latest authorized revision's.
+      const shown = parseTrackerItem(latest, item.status);
+      item.content = shown.content;
+      item.title = shown.title;
+      item.commitShas = shown.commitShas ?? [];
+      delete item.branch;
+      delete item.description;
+      if (shown.branch !== undefined) item.branch = shown.branch;
+      if (shown.description !== undefined) {
+        item.description = shown.description;
+      }
+    }
+  }
+
+  return {
+    item,
+    ...(revisions ? { revisions } : {}),
     comments,
     repoATag,
   };
@@ -792,6 +859,12 @@ async function runShow(
         relays: ctx.relays,
         repoATag: shown.repoATag,
         [spec.jsonKey]: shown.item,
+        ...(shown.revisions
+          ? {
+              latestRevision: shown.revisions.latest,
+              earlierRevisions: shown.revisions.earlier,
+            }
+          : {}),
         comments: shown.comments,
       });
       return 0;
@@ -809,6 +882,20 @@ async function runShow(
       io.out(`Commits: ${item.commitShas.join(', ')}`);
     }
     if (shown.repoATag !== null) io.out(`Repo:    ${shown.repoATag}`);
+    if (shown.revisions) {
+      const { latest, earlier } = shown.revisions;
+      if (earlier.length > 0) {
+        io.out(
+          `Showing: ${latest.eventId} (latest revision, by ${latest.authorPubkey.slice(0, 8)}, ${isoDate(latest.createdAt)})`
+        );
+        io.out('Earlier revisions (oldest first):');
+        for (const r of shown.revisions.earlier) {
+          io.out(
+            `  ${r.eventId}  (${r.authorPubkey.slice(0, 8)}, ${isoDate(r.createdAt)})`
+          );
+        }
+      }
+    }
     if (item.description !== undefined) {
       // The `description` tag (`rig pr create --body`): shown as its own
       // section so the patch text below stays pipeable into `git am`.
