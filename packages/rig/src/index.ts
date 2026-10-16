@@ -30,7 +30,6 @@ export {
   MAX_ARWEAVE_TAGS_PER_EVENT,
   PAYOUT_TAG,
   REPOSITORY_STATE_KIND,
-  authorizedStatusAuthors,
   buildComment,
   buildIssue,
   buildPatch,
@@ -47,6 +46,12 @@ export {
   type StatusKind,
   type UnsignedEvent,
 } from './nip34-events.js';
+
+export {
+  authorizedAuthors,
+  honoredRepoState,
+  type AuthorityEvent,
+} from './repo-authority.js';
 
 export {
   amendRepoAnnouncement,

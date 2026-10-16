@@ -63,10 +63,8 @@ import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { REPOSITORY_ANNOUNCEMENT_KIND } from '@toon-protocol/core/nip34';
 import { contentTypeForPath } from '../mime.js';
-import {
-  REPOSITORY_STATE_KIND,
-  authorizedStatusAuthors,
-} from '../nip34-events.js';
+import { REPOSITORY_STATE_KIND } from '../nip34-events.js';
+import { authorizedAuthors } from '../repo-authority.js';
 import type { UnsignedEvent } from '../nip34-events.js';
 import { parseStateRefTags } from '../nip34-refs.js';
 import type { FetchLike } from '../object-fetch.js';
@@ -328,8 +326,7 @@ const LOG_UPLOAD_HEAD_BYTES = 512 * 1024;
  */
 const LOG_UPLOAD_MARKER_BUDGET_BYTES = 256;
 /** Kept from the end of an over-cap log. */
-const LOG_UPLOAD_TAIL_BYTES =
-  512 * 1024 - LOG_UPLOAD_MARKER_BUDGET_BYTES;
+const LOG_UPLOAD_TAIL_BYTES = 512 * 1024 - LOG_UPLOAD_MARKER_BUDGET_BYTES;
 /** Rotate the secrets key at least this often (NIP-C1: no later than 86,400 s). */
 const SECRETS_KEY_MAX_AGE = 86_400;
 
@@ -490,7 +487,7 @@ export async function startCoordinator(
       ...(opts.resolveSha ? { resolveSha: opts.resolveSha } : {}),
     });
     if (remote.announceEvent) {
-      repo.authorized = authorizedStatusAuthors(
+      repo.authorized = authorizedAuthors(
         repo.ownerPubkey,
         remote.announceEvent.tags
       );
@@ -1582,7 +1579,7 @@ export async function startCoordinator(
           ? repos.get(repoAddress(ev.pubkey, repoId))
           : undefined;
         if (repo && ev.pubkey.toLowerCase() === repo.ownerPubkey) {
-          repo.authorized = authorizedStatusAuthors(repo.ownerPubkey, ev.tags);
+          repo.authorized = authorizedAuthors(repo.ownerPubkey, ev.tags);
         }
         return;
       }

@@ -38,6 +38,7 @@ import {
   parsePayout,
   type PayoutPointer,
 } from './nip34-events.js';
+import { authorizedAuthors, honoredRepoState } from './repo-authority.js';
 import { parseStateRefTags, type ParsedStateRefs } from './nip34-refs.js';
 
 // ---------------------------------------------------------------------------
@@ -330,17 +331,7 @@ export function queryRelay(
  * lowest id (NIP-01 replaceable-event convention).
  */
 function latestReplaceable(events: NostrEvent[]): NostrEvent | null {
-  let winner: NostrEvent | null = null;
-  for (const event of events) {
-    if (
-      winner === null ||
-      event.created_at > winner.created_at ||
-      (event.created_at === winner.created_at && event.id < winner.id)
-    ) {
-      winner = event;
-    }
-  }
-  return winner;
+  return honoredRepoState(new Set(events.map((e) => e.pubkey)), events);
 }
 
 /** Get the first value for a tag name. */
@@ -426,40 +417,68 @@ export async function fetchRemoteState(
     '#d': [repoId],
   };
 
-  const results = await Promise.allSettled(
-    relayUrls.map((url) => queryRelay(url, filter, timeoutMs, webSocketFactory))
-  );
-
   const failures: string[] = [];
+  let answered = 0;
   const byId = new Map<string, NostrEvent>();
-  for (const result of results) {
-    if (result.status === 'rejected') {
-      failures.push(String((result.reason as Error)?.message ?? result.reason));
-      continue;
-    }
-    for (const event of result.value) {
-      // Only trust events from the repo owner for this repo — relays are
-      // untrusted and may over-return.
-      if (event.pubkey !== ownerPubkey) continue;
-      if (getTagValue(event.tags, 'd') !== repoId) continue;
-      if (typeof event.id === 'string' && !byId.has(event.id)) {
-        byId.set(event.id, event);
+  // Collect one query's events; relays are untrusted and may over-return, so
+  // keep only this repo's events from `allowed` authors.
+  const collect = async (
+    queryFilter: NostrFilter,
+    allowed: ReadonlySet<string>
+  ): Promise<void> => {
+    const results = await Promise.allSettled(
+      relayUrls.map((url) =>
+        queryRelay(url, queryFilter, timeoutMs, webSocketFactory)
+      )
+    );
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        failures.push(
+          String((result.reason as Error)?.message ?? result.reason)
+        );
+        continue;
+      }
+      answered++;
+      for (const event of result.value) {
+        if (!allowed.has(event.pubkey)) continue;
+        if (getTagValue(event.tags, 'd') !== repoId) continue;
+        if (typeof event.id === 'string' && !byId.has(event.id)) {
+          byId.set(event.id, event);
+        }
       }
     }
-  }
+  };
 
-  if (failures.length === relayUrls.length) {
+  const owner = new Set([ownerPubkey]);
+  await collect(filter, owner);
+  if (answered === 0) {
     throw new Error(
       `fetchRemoteState: all ${relayUrls.length} relay(s) failed: ${failures.join('; ')}`
     );
   }
 
-  const events = [...byId.values()];
-  const refsEvent = latestReplaceable(
-    events.filter((e) => e.kind === REPOSITORY_STATE_KIND)
-  );
   const announceEvent = latestReplaceable(
-    events.filter((e) => e.kind === REPOSITORY_ANNOUNCEMENT_KIND)
+    [...byId.values()].filter((e) => e.kind === REPOSITORY_ANNOUNCEMENT_KIND)
+  );
+
+  // Honored repo state (ADR-0005): the newest kind:30618 from the owner or a
+  // maintainer in the OWNER's own announcement. Ask for the maintainers' state
+  // in a second query now that the announcement names them.
+  const authorized = authorizedAuthors(ownerPubkey, announceEvent?.tags ?? []);
+  const maintainerKeys = [...authorized].filter((k) => k !== ownerPubkey);
+  if (maintainerKeys.length > 0) {
+    await collect(
+      {
+        kinds: [REPOSITORY_STATE_KIND],
+        authors: maintainerKeys,
+        '#d': [repoId],
+      },
+      new Set(maintainerKeys)
+    );
+  }
+  const refsEvent = honoredRepoState(
+    authorized,
+    [...byId.values()].filter((e) => e.kind === REPOSITORY_STATE_KIND)
   );
 
   const { refs, headSymref, shaToTxId } = refsEvent
