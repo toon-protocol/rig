@@ -101,8 +101,8 @@ export interface MockRelay {
   push(event: NostrEvent, url?: string): void;
   /** Drop every open connection (all relays, or just `url`): a `close` event. */
   drop(url?: string): void;
-  /** Every connection ever opened, in order. */
-  readonly connections: { url: string; open: boolean }[];
+  /** Every connection ever opened, in order; `subscribed` = has an open REQ. */
+  readonly connections: { url: string; open: boolean; subscribed: boolean }[];
 }
 
 /** Like {@link makeMockRelayFactory}, plus post-EOSE push and connection drop. */
@@ -124,7 +124,11 @@ export function makeMockRelay(
       for (const s of sockets) if (!url || s.url === url) s.close();
     },
     get connections() {
-      return sockets.map((s) => ({ url: s.url, open: s.readyState === 1 }));
+      return sockets.map((s) => ({
+        url: s.url,
+        open: s.readyState === 1,
+        subscribed: s.readyState === 1 && s.subs.size > 0,
+      }));
     },
   };
 }

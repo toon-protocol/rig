@@ -3,8 +3,10 @@
  * `rig inbox --follow`. One call follows one relay — it opens a REQ per filter,
  * hands every EVENT to `onEvent`, and when the connection errors or closes it
  * reports to `onError`, waits a backoff, and reconnects, until `signal` aborts.
- * Filters are rebuilt per connection so a reconnect can resume from a newer
- * `since` than the first attempt used.
+ * The backoff resets only once a relay has answered with EOSE, so a relay that
+ * accepts and then drops at once still backs off. Filters are rebuilt per
+ * connection so a reconnect can resume from a newer `since` than the first
+ * attempt used.
  */
 
 import type {
@@ -16,6 +18,8 @@ import type {
 import { decodeEventPayload } from '../remote-state.js';
 
 const WS_OPEN = 1;
+/** A socket that has not opened by then counts as a failed connection. */
+const CONNECT_TIMEOUT_MS = 10_000;
 
 export interface FollowRelayOptions {
   url: string;
@@ -35,18 +39,25 @@ export function defaultBackoffMs(attempt: number): number {
   return Math.min(30_000, 1000 * 2 ** Math.max(0, attempt - 1));
 }
 
-/** Resolves when the connection ends (error, close, or abort). */
+/**
+ * Resolves when the connection ends (error, close, or abort). `onSubscribed`
+ * fires once the relay has answered a REQ with EOSE.
+ */
 function connectOnce(
   opts: FollowRelayOptions,
-  onOpen: () => void
+  onSubscribed: () => void
 ): Promise<string | null> {
   return new Promise((resolve) => {
     let ws: WebSocketLike;
     let done = false;
+    let subscribed = false;
     const subIds: string[] = [];
+    // eslint-disable-next-line prefer-const -- assigned after `finish` is defined
+    let connectTimer: ReturnType<typeof setTimeout> | undefined;
     const finish = (reason: string | null): void => {
       if (done) return;
       done = true;
+      clearTimeout(connectTimer);
       opts.signal.removeEventListener('abort', onAbort);
       try {
         if (ws.readyState === WS_OPEN) {
@@ -67,11 +78,15 @@ function connectOnce(
       return;
     }
     opts.signal.addEventListener('abort', onAbort);
+    connectTimer = setTimeout(
+      () => finish(`timed out connecting to ${opts.url}`),
+      CONNECT_TIMEOUT_MS
+    );
 
     ws.addEventListener('open', () => {
-      onOpen();
+      clearTimeout(connectTimer);
       opts.filters().forEach((filter, i) => {
-        const subId = `inbox-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
+        const subId = `follow-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
         subIds.push(subId);
         ws.send(JSON.stringify(['REQ', subId, filter]));
       });
@@ -82,6 +97,13 @@ function connectOnce(
         if (msg[0] === 'EVENT' && msg[2] !== undefined) {
           const event = decodeEventPayload(msg[2]);
           if (event) opts.onEvent(event, opts.url);
+        } else if (
+          msg[0] === 'EOSE' &&
+          !subscribed &&
+          subIds.includes(msg[1] as string)
+        ) {
+          subscribed = true;
+          onSubscribed();
         }
       } catch {
         // Ignore unparseable frames

@@ -616,10 +616,13 @@ export async function runInbox(
           if (emittedIds.has(event.id)) return;
           try {
             const [entry] = await toEntries(new Map([[event.id, event]]));
+            // emittedIds dedups within this run; isFresh (the cursor as of
+            // startup) keeps a restart from re-emitting. A late event older
+            // than one already emitted this run still goes out.
             if (
               entry === undefined ||
               emittedIds.has(entry.id) ||
-              (moveCursor && !isLive(entry))
+              !isFresh(entry)
             ) {
               return;
             }
@@ -633,12 +636,6 @@ export async function runInbox(
           }
         });
       };
-      // After the backlog, a cursor-tracked event must be newer than the
-      // cursor (or at it and unseen) — a restart never re-emits.
-      const isLive = (e: InboxEntry): boolean =>
-        position === undefined ||
-        e.created_at > position.at ||
-        (e.created_at === position.at && !position.seen.includes(e.id));
       const targets: { url: string; filter: NostrFilter }[] = [];
       for (const url of configured) {
         targets.push({ url, filter: { kinds: INBOX_KINDS, '#p': [me] } });

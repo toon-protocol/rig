@@ -358,7 +358,7 @@ describe('rig inbox --follow', () => {
     const f = followIo();
     const { ctl, run } = start(w, relay, f);
     await until(
-      () => f.lines.length === 1 && relay.connections.some((c) => c.open)
+      () => f.lines.length === 1 && relay.connections.some((c) => c.subscribed)
     );
     relay.push(LIVE);
     await until(() => f.lines.length === 2);
@@ -383,7 +383,7 @@ describe('rig inbox --follow', () => {
     const f = followIo();
     const { ctl, run } = start(w, relay, f);
     await until(
-      () => f.lines.length === 1 && relay.connections.some((c) => c.open)
+      () => f.lines.length === 1 && relay.connections.some((c) => c.subscribed)
     );
     relay.push(PATCH);
     relay.push(LIVE);
@@ -395,17 +395,37 @@ describe('rig inbox --follow', () => {
     expect(f.lines).toHaveLength(2);
   });
 
+  it('still emits a late live event older than one already streamed', async () => {
+    const w = world({});
+    const relay = makeMockRelay(handler);
+    const f = followIo();
+    const { ctl, run } = start(w, relay, f);
+    await until(
+      () => f.lines.length === 1 && relay.connections.some((c) => c.subscribed)
+    );
+    relay.push(LIVE2);
+    relay.push(LIVE);
+    await until(() => f.lines.length === 3);
+    ctl.abort();
+    await run;
+    expect(f.lines.map((l) => (JSON.parse(l) as InboxEntry).id)).toEqual([
+      PATCH.id,
+      LIVE2.id,
+      LIVE.id,
+    ]);
+  });
+
   it('reconnects after a dropped connection, reports it on stderr, and keeps streaming', async () => {
     const w = world({});
     const relay = makeMockRelay(handler);
     const f = followIo();
     const { ctl, run } = start(w, relay, f);
     await until(
-      () => f.lines.length === 1 && relay.connections.some((c) => c.open)
+      () => f.lines.length === 1 && relay.connections.some((c) => c.subscribed)
     );
     relay.drop();
     await until(() => f.errs.some((e) => /closed/.test(e)));
-    await until(() => relay.connections.some((c, i) => i > 0 && c.open));
+    await until(() => relay.connections.some((c, i) => i > 0 && c.subscribed));
     relay.push(LIVE2);
     await until(() => f.lines.length === 2);
     ctl.abort();
@@ -419,7 +439,7 @@ describe('rig inbox --follow', () => {
     const f1 = followIo();
     const first = start(w, relay, f1);
     await until(
-      () => f1.lines.length === 1 && relay.connections.some((c) => c.open)
+      () => f1.lines.length === 1 && relay.connections.some((c) => c.subscribed)
     );
     relay.push(LIVE);
     await until(() => f1.lines.length === 2);
@@ -429,8 +449,11 @@ describe('rig inbox --follow', () => {
     store.push(LIVE);
     try {
       const f2 = followIo();
+      const before = relay.connections.length;
       const second = start(w, relay, f2);
-      await new Promise((r) => setTimeout(r, 40));
+      await until(() =>
+        relay.connections.some((c, i) => i >= before && c.subscribed)
+      );
       relay.push(LIVE);
       relay.push(LIVE2);
       await until(() => f2.lines.length === 1);
