@@ -46,7 +46,6 @@ import {
 import {
   COMMENT_KIND,
   LEGACY_COMMENT_KIND,
-  authorizedStatusAuthors,
   buildComment,
   buildIssue,
   buildPatch,
@@ -57,6 +56,7 @@ import {
   type StatusKind,
   type UnsignedEvent,
 } from '../nip34-events.js';
+import { authorizedAuthors } from '../repo-authority.js';
 import {
   defaultWebSocketFactory,
   fetchRemoteState,
@@ -69,12 +69,13 @@ import {
   type GitRepoAddr,
   type GitStatusValue,
 } from '../routes.js';
-import {
-  type DaemonGitClient,
-  type SessionPath,
-} from './daemon-session.js';
+import { type DaemonGitClient, type SessionPath } from './daemon-session.js';
 import { emitCliError, UnconfiguredRepoAddressError } from './errors.js';
-import { readToonConfig, resolveRepoRoot, type ToonRepoConfig } from './git-config.js';
+import {
+  readToonConfig,
+  resolveRepoRoot,
+  type ToonRepoConfig,
+} from './git-config.js';
 import {
   identityReport,
   loadPaidSession,
@@ -387,9 +388,7 @@ async function runEvent(opts: RunEventOptions): Promise<number> {
   const { command, flags, actionLabel } = opts;
   // --standalone/--no-daemon: force embedded for this invocation (same as
   // RIG_STANDALONE=1). Every paid path reads the override from `env`.
-  const deps = flags.standalone
-    ? withForcedStandalone(opts.deps)
-    : opts.deps;
+  const deps = flags.standalone ? withForcedStandalone(opts.deps) : opts.deps;
   const { io } = deps;
 
   let standaloneCtx: StandaloneContext | undefined;
@@ -1004,7 +1003,9 @@ async function runPrCreate(
       } else {
         patchText = await readFile(patchFile as string, 'utf-8');
         if (patchText.trim() === '') {
-          throw new Error(`--patch-file ${patchFile} is empty — nothing to publish`);
+          throw new Error(
+            `--patch-file ${patchFile} is empty — nothing to publish`
+          );
         }
         commits = [];
       }
@@ -1184,7 +1185,7 @@ async function warnIfNotMaintainer(
         ? { webSocketFactory: deps.webSocketFactory }
         : {}),
     });
-    const authorized = authorizedStatusAuthors(
+    const authorized = authorizedAuthors(
       addr.ownerPubkey,
       remote.announceEvent?.tags ?? []
     );

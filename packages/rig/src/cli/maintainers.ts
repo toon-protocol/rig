@@ -31,10 +31,7 @@ import {
 } from '../repo-announcement.js';
 import { ownerToHex } from '../npub.js';
 import { fetchRemoteState } from '../remote-state.js';
-import {
-  serializeEventReceipt,
-  type GitEventResponse,
-} from '../routes.js';
+import { serializeEventReceipt, type GitEventResponse } from '../routes.js';
 import type { EventCommandDeps } from './events.js';
 import { emitCliError, InvalidRelayUrlError } from './errors.js';
 import type { IdentityReport } from './push.js';
@@ -50,6 +47,10 @@ import {
 import type { StandaloneContext } from './standalone-context.js';
 
 const HEX64_RE = /^[0-9a-f]{64}$/;
+
+/** Printed by add/remove: a maintainer's repo state is honored (ADR-0005). */
+export const REF_AUTHORITY_NOTICE =
+  'Note: maintainers can move refs (publish honored repo state), not only set status.';
 
 export const MAINTAINERS_USAGE = `Usage: rig maintainers <list|add|remove> [<pubkey>] [options]
 
@@ -210,8 +211,7 @@ async function runMutate(
 ): Promise<number> {
   const { io } = deps;
   const command = `maintainers ${op}` as
-    | 'maintainers add'
-    | 'maintainers remove';
+    'maintainers add' | 'maintainers remove';
 
   let flags: RepoCommandFlags;
   let pubkey: string;
@@ -231,7 +231,9 @@ async function runMutate(
     }
     pubkey = ownerToHex(positionals[0] as string).toLowerCase();
     if (!HEX64_RE.test(pubkey)) {
-      throw new Error(`<pubkey> must resolve to 64-char hex (got ${JSON.stringify(positionals[0])})`);
+      throw new Error(
+        `<pubkey> must resolve to 64-char hex (got ${JSON.stringify(positionals[0])})`
+      );
     }
   } catch (err) {
     io.err(err instanceof Error ? err.message : String(err));
@@ -271,9 +273,7 @@ async function runMutate(
       return 0;
     }
     const next =
-      op === 'add'
-        ? [...current, pubkey]
-        : current.filter((m) => m !== pubkey);
+      op === 'add' ? [...current, pubkey] : current.filter((m) => m !== pubkey);
 
     // Amend rather than rebuild (#154): `maintainers` is the ONLY field this
     // command edits, so name, description, the payout pointer (rig#92) and
@@ -299,11 +299,14 @@ async function runMutate(
     if (!flags.json) {
       io.out(`Republish ${action}`);
       io.out(`Repo: 30617:${ctx.owner}:${ctx.repoId}`);
-      io.out(`Maintainers after: ${next.length === 0 ? '(none)' : next.join(', ')}`);
+      io.out(
+        `Maintainers after: ${next.length === 0 ? '(none)' : next.join(', ')}`
+      );
       if (!diff.unchanged) {
         io.out('Tags changed:');
         for (const line of describeAnnouncementDiff(diff)) io.out(line);
       }
+      io.out(REF_AUTHORITY_NOTICE);
       io.out(`Fee: ${feeLabel(fee)}. Writes are permanent and non-refundable.`);
     }
     if (!flags.yes) {
@@ -357,6 +360,7 @@ async function runMutate(
       io.out(
         `Published ${action}: ${result.eventId}  paid ${result.feePaid} base units`
       );
+      io.out(REF_AUTHORITY_NOTICE);
     }
     return 0;
   } catch (err) {

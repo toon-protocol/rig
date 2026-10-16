@@ -63,10 +63,8 @@ import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { REPOSITORY_ANNOUNCEMENT_KIND } from '@toon-protocol/core/nip34';
 import { contentTypeForPath } from '../mime.js';
-import {
-  REPOSITORY_STATE_KIND,
-  authorizedStatusAuthors,
-} from '../nip34-events.js';
+import { REPOSITORY_STATE_KIND } from '../nip34-events.js';
+import { authorizedAuthors } from '../repo-authority.js';
 import type { UnsignedEvent } from '../nip34-events.js';
 import { parseStateRefTags } from '../nip34-refs.js';
 import type { FetchLike } from '../object-fetch.js';
@@ -328,8 +326,7 @@ const LOG_UPLOAD_HEAD_BYTES = 512 * 1024;
  */
 const LOG_UPLOAD_MARKER_BUDGET_BYTES = 256;
 /** Kept from the end of an over-cap log. */
-const LOG_UPLOAD_TAIL_BYTES =
-  512 * 1024 - LOG_UPLOAD_MARKER_BUDGET_BYTES;
+const LOG_UPLOAD_TAIL_BYTES = 512 * 1024 - LOG_UPLOAD_MARKER_BUDGET_BYTES;
 /** Rotate the secrets key at least this often (NIP-C1: no later than 86,400 s). */
 const SECRETS_KEY_MAX_AGE = 86_400;
 
@@ -490,7 +487,7 @@ export async function startCoordinator(
       ...(opts.resolveSha ? { resolveSha: opts.resolveSha } : {}),
     });
     if (remote.announceEvent) {
-      repo.authorized = authorizedStatusAuthors(
+      repo.authorized = authorizedAuthors(
         repo.ownerPubkey,
         remote.announceEvent.tags
       );
@@ -1582,17 +1579,19 @@ export async function startCoordinator(
           ? repos.get(repoAddress(ev.pubkey, repoId))
           : undefined;
         if (repo && ev.pubkey.toLowerCase() === repo.ownerPubkey) {
-          repo.authorized = authorizedStatusAuthors(repo.ownerPubkey, ev.tags);
+          repo.authorized = authorizedAuthors(repo.ownerPubkey, ev.tags);
         }
         return;
       }
       case REPOSITORY_STATE_KIND: {
+        // Honored repo state (ADR-0005): the owner's or a declared
+        // maintainer's 30618 moves refs; a stranger's is ignored.
         const repoId = tagValues(ev.tags, 'd')[0];
-        const repo = repoId
-          ? repos.get(repoAddress(ev.pubkey, repoId))
-          : undefined;
-        if (repo && ev.pubkey.toLowerCase() === repo.ownerPubkey)
-          await handleRepoState(repo, ev);
+        const author = ev.pubkey.toLowerCase();
+        for (const repo of repos.values()) {
+          if (repo.repoId === repoId && repo.authorized.has(author))
+            await handleRepoState(repo, ev);
+        }
         return;
       }
       case 1617:
@@ -1647,10 +1646,14 @@ export async function startCoordinator(
   const sinceFor: ((() => number | undefined) | null)[] = [null];
   for (const repo of repos.values()) {
     filters.push({
-      kinds: [REPOSITORY_ANNOUNCEMENT_KIND, REPOSITORY_STATE_KIND],
+      kinds: [REPOSITORY_ANNOUNCEMENT_KIND],
       authors: [repo.ownerPubkey],
       '#d': [repo.repoId],
     });
+    sinceFor.push(null);
+    // No `authors`: the maintainer set can change while serving, so repo
+    // state is filtered against `repo.authorized` in `handleEvent`.
+    filters.push({ kinds: [REPOSITORY_STATE_KIND], '#d': [repo.repoId] });
     sinceFor.push(null);
     filters.push({ kinds: [1617, 1618, 1619], '#a': [repo.addr] });
     sinceFor.push(() => repo.cursor?.lastCreatedAt);
