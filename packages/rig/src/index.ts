@@ -50,7 +50,12 @@ export {
 export {
   authorizedAuthors,
   honoredRepoState,
+  isPatchRevision,
+  REVISION_ROOT_MARKER,
+  revisionRootId,
+  selectRevision,
   type AuthorityEvent,
+  type RevisionSelection,
 } from './repo-authority.js';
 /** @deprecated Renamed to {@link authorizedAuthors} (ADR-0005). */
 export { authorizedAuthors as authorizedStatusAuthors } from './repo-authority.js';

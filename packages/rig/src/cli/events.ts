@@ -38,6 +38,7 @@
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import {
+  PATCH_KIND,
   STATUS_APPLIED_KIND,
   STATUS_CLOSED_KIND,
   STATUS_DRAFT_KIND,
@@ -56,7 +57,7 @@ import {
   type StatusKind,
   type UnsignedEvent,
 } from '../nip34-events.js';
-import { authorizedAuthors } from '../repo-authority.js';
+import { authorizedAuthors, isPatchRevision } from '../repo-authority.js';
 import {
   defaultWebSocketFactory,
   fetchRemoteState,
@@ -192,7 +193,7 @@ Options:
   --body <text>            comment body (Markdown) [required]
 ${COMMON_FLAGS_USAGE}`;
 
-export const PR_CREATE_USAGE = `Usage: rig pr create --title <title> (--range <range> | --patch-file <path>) [options]
+export const PR_CREATE_USAGE = `Usage: rig pr create --title <title> (--range <range> | --patch-file <path>) [--revises <patch-id>] [options]
 
 Publish a patch (kind:1617) whose content is REAL \`git format-patch\` output —
 a paid publish; writes are permanent and non-refundable. --range runs
@@ -206,6 +207,12 @@ The PR body (--body/--body-file) is carried in a dedicated \`description\`
 tag, not in the event content — the content stays pure format-patch output so
 \`rig pr show … | git am\` keeps working.
 
+--revises publishes the patch as a NIP-34 revision of an existing root patch
+(\`t root-revision\` plus a NIP-10 reply to it), keeping the original thread,
+comments and status. Readers honor a revision only from the root's author or a
+declared maintainer; otherwise rig warns and still publishes. A revision is
+always published through the embedded (standalone) path.
+
 Options:
   --title <title>      patch/PR title (subject tag) [required]
   --range <range>      revision range for format-patch: <rev>, <rev>..<rev>,
@@ -214,6 +221,7 @@ Options:
   --body <text>        PR description (Markdown; description tag)
   --body-file <path>   read the PR description from a file
   --branch <name>      branch name (branch-name tag)
+  --revises <patch-id> publish as a revision of this root patch (64-hex id)
 ${COMMON_FLAGS_USAGE}`;
 
 export const PR_STATUS_USAGE = `Usage: rig pr status <target-event-id> <open|applied|closed|draft> [options]
@@ -863,6 +871,100 @@ export async function runPr(
   }
 }
 
+/**
+ * Fetch the root patch a `--revises` publish targets, before anything is paid.
+ * Refuses a missing event, a non-patch, a patch of another repo, and a
+ * revision (revise the root, not an earlier revision).
+ */
+async function resolveRevisedRoot(
+  deps: EventCommandDeps,
+  rootId: string,
+  relayUrl: string | undefined,
+  addr: GitRepoAddr
+): Promise<{ pubkey: string }> {
+  if (relayUrl === undefined) {
+    throw new Error(
+      '--revises needs the root patch from a relay; pass --relay <url> or configure a remote'
+    );
+  }
+  const found = await queryRelay(
+    relayUrl,
+    { ids: [rootId] },
+    TARGET_LOOKUP_TIMEOUT_MS,
+    deps.webSocketFactory ?? defaultWebSocketFactory
+  );
+  const root = found.find((e) => e.id === rootId);
+  if (!root) {
+    throw new Error(
+      `patch ${rootId} not found on ${relayUrl} — nothing was published or paid`
+    );
+  }
+  if (root.kind !== PATCH_KIND) {
+    throw new Error(
+      `event ${rootId} has kind ${root.kind}, not a kind:1617 patch — nothing was published or paid`
+    );
+  }
+  const aTag = `30617:${addr.ownerPubkey}:${addr.repoId}`;
+  if (!root.tags.some((t) => t[0] === 'a' && t[1] === aTag)) {
+    throw new Error(
+      `patch ${rootId} belongs to a different repository than ${aTag} — nothing was published or paid`
+    );
+  }
+  if (isPatchRevision(root)) {
+    throw new Error(
+      `patch ${rootId} is itself a revision — pass the ROOT patch id to --revises`
+    );
+  }
+  return { pubkey: root.pubkey };
+}
+
+/** Warn (never refuse) when readers will ignore the caller's revision. */
+async function warnIfRevisionIgnored(
+  deps: EventCommandDeps,
+  args: {
+    identity: IdentityReport;
+    addr: GitRepoAddr;
+    relayUrl: string | undefined;
+  },
+  rootAuthor: string | undefined
+): Promise<void> {
+  const { io } = deps;
+  const { identity, addr, relayUrl } = args;
+  const me = identity.pubkey.toLowerCase();
+  if (me === rootAuthor?.toLowerCase()) return;
+  if (me === addr.ownerPubkey.toLowerCase()) return;
+  let authorized: Set<string> | undefined;
+  if (relayUrl !== undefined) {
+    try {
+      const remote = await fetchRemoteState({
+        relayUrls: [relayUrl],
+        ownerPubkey: addr.ownerPubkey,
+        repoId: addr.repoId,
+        ...(deps.webSocketFactory
+          ? { webSocketFactory: deps.webSocketFactory }
+          : {}),
+      });
+      authorized = authorizedAuthors(
+        addr.ownerPubkey,
+        remote.announceEvent?.tags ?? []
+      );
+    } catch {
+      // Fall through to the "could not verify" note.
+    }
+  }
+  if (authorized?.has(me)) return;
+  io.err(
+    authorized === undefined
+      ? 'warning: could not read the repo announcement to verify your maintainer ' +
+          "status — unless you are the root patch's author or a declared " +
+          'maintainer, readers will IGNORE this revision.'
+      : `warning: you (${identity.pubkey.slice(0, 8)}…) are neither the root ` +
+          "patch's author nor a maintainer of " +
+          `30617:${addr.ownerPubkey.slice(0, 8)}…:${addr.repoId} — readers ` +
+          'will IGNORE this revision. Publishing anyway (the relay is permissionless).'
+  );
+}
+
 /** `rig pr create` — kind:1617 patch publish. */
 async function runPrCreate(
   rest: string[],
@@ -877,6 +979,7 @@ async function runPrCreate(
   let branch: string | undefined;
   let bodyFlag: string | undefined;
   let bodyFile: string | undefined;
+  let revises: string | undefined;
   try {
     const { values } = parseArgs({
       args: rest,
@@ -888,6 +991,7 @@ async function runPrCreate(
         body: { type: 'string' },
         'body-file': { type: 'string' },
         branch: { type: 'string' },
+        revises: { type: 'string' },
       },
       allowPositionals: false,
     });
@@ -911,6 +1015,13 @@ async function runPrCreate(
     branch = values.branch;
     bodyFlag = values.body;
     bodyFile = values['body-file'];
+    if (values.revises !== undefined) {
+      assertHex64(values.revises, '--revises');
+      revises = values.revises;
+      // The daemon's /git/patch route has no revision shape; publish through
+      // the embedded path, which builds the event locally.
+      flags = { ...flags, standalone: true };
+    }
   } catch (err) {
     io.err(err instanceof Error ? err.message : String(err));
     io.err(PR_CREATE_USAGE);
@@ -944,13 +1055,18 @@ async function runPrCreate(
   // publishes — the daemon never re-derives the series.
   let builtPatchText: string | undefined;
   let builtCommits: { sha: string; parentSha: string }[] = [];
+  let rootAuthor: string | undefined;
 
   return runEvent({
     command: 'pr',
     flags,
     deps,
     actionLabel: `patch ${JSON.stringify(title)}`,
-    buildEvent: async (addr) => {
+    buildEvent: async (addr, relayUrl) => {
+      if (revises !== undefined) {
+        rootAuthor = (await resolveRevisedRoot(deps, revises, relayUrl, addr))
+          .pubkey;
+      }
       let patchText: string;
       let commits: { sha: string; parentSha: string }[];
       if (range !== undefined) {
@@ -991,9 +1107,23 @@ async function runPrCreate(
         commits,
         branch,
         patchText,
-        body
+        body,
+        revises !== undefined
+          ? {
+              rootEventId: revises,
+              ...(rootAuthor !== undefined
+                ? { rootAuthorPubkey: rootAuthor }
+                : {}),
+            }
+          : undefined
       );
     },
+    // A revision from anyone but the root's author or a maintainer is ignored
+    // by readers: warn, but publish (the relay is permissionless).
+    preConfirm:
+      revises === undefined
+        ? undefined
+        : (args) => warnIfRevisionIgnored(deps, args, rootAuthor),
     sendDaemon: (client, addr) => {
       if (builtPatchText === undefined) {
         throw new Error('internal: patch text not built before delegation');

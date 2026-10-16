@@ -90,7 +90,8 @@ Commands rig owns:
   comment <target-event-id>  comment (NIP-22 kind:1111) on an issue or patch,
                              or reply to an existing kind:1111 comment
   pr create                  publish a patch (kind:1617) with real
-                             \`git format-patch\` content
+                             \`git format-patch\` content (--revises <patch-id>
+                             publishes a revision of an existing patch)
   pr status <event-id> <state>  set an issue/patch status (kind:1630-1633):
                              open | applied | closed | draft
   maintainers list           show the repo's declared maintainers (free); add/
