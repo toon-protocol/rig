@@ -35,7 +35,13 @@ import {
   PATCH_KIND,
   REPOSITORY_ANNOUNCEMENT_KIND,
   STATUS_APPLIED_KIND,
+  STATUS_CLOSED_KIND,
 } from '@toon-protocol/core/nip34';
+import {
+  isCiTrustLevel,
+  CI_TRUST_ORDER,
+  type CiTrustLevel,
+} from '../ci/trust.js';
 import { buildStatus, firstTagValue } from '../nip34-events.js';
 import { hexToNpub } from '../npub.js';
 import { executePush, planPush } from '../push.js';
@@ -53,6 +59,7 @@ import {
   PrMergeError,
   UnconfiguredRepoAddressError,
 } from './errors.js';
+import { evaluateCiGate } from './ci-status.js';
 import { runFetch } from './fetch.js';
 import { readToonConfig, resolveRepoRoot } from './git-config.js';
 import {
@@ -84,6 +91,12 @@ reported as a partial success; retry with \`rig pr status <patch-id> applied\`.
 Options:
   --target <branch>    branch to merge onto (default: the patch's branch-name
                        tag, else the repo's default branch)
+  --require-ci-trust <level>
+                       refuse the merge, before paying, unless the patch
+                       series' head commit has a concluded green CI run at or
+                       above this trust level (same gate as \`rig ci status\`)
+  --closes <issue-id>  after a successful merge, publish closed (kind:1632)
+                       for this issue; repeatable
   --yes                skip the confirmation prompt
   --json               machine-readable output (without --yes: estimate only)
   --relay <url>        ad-hoc relay override (bypasses git remotes)
@@ -100,6 +113,8 @@ interface MergeFlags {
   remote?: string;
   repoId?: string;
   owner?: string;
+  requireTrust?: CiTrustLevel;
+  closes: string[];
 }
 
 function parseMergeArgs(args: string[]): MergeFlags | 'help' {
@@ -113,6 +128,8 @@ function parseMergeArgs(args: string[]): MergeFlags | 'help' {
       remote: { type: 'string' },
       'repo-id': { type: 'string' },
       owner: { type: 'string' },
+      'require-ci-trust': { type: 'string' },
+      closes: { type: 'string', multiple: true },
       standalone: { type: 'boolean', default: false },
       'no-daemon': { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
@@ -135,7 +152,22 @@ function parseMergeArgs(args: string[]): MergeFlags | 'help' {
     yes: values.yes === true,
     json: values.json === true,
     relay: values.relay ?? [],
+    closes: [...new Set(values.closes ?? [])],
   };
+  for (const id of flags.closes) {
+    if (!HEX64_RE.test(id)) {
+      throw new Error('--closes must be a 64-character lowercase hex issue id');
+    }
+  }
+  const level = values['require-ci-trust'];
+  if (level !== undefined) {
+    if (!isCiTrustLevel(level)) {
+      throw new Error(
+        `--require-ci-trust must be one of ${CI_TRUST_ORDER.join(' | ')} (got ${JSON.stringify(level)})`
+      );
+    }
+    flags.requireTrust = level;
+  }
   if (values.target !== undefined) flags.target = values.target;
   if (values.remote !== undefined) flags.remote = values.remote;
   if (values['repo-id'] !== undefined) flags.repoId = values['repo-id'];
@@ -442,6 +474,32 @@ export async function runPrMerge(
             email: `${hexToNpub(identity.pubkey)}@nostr`,
           }
     );
+
+    // ── 5b. CI gate: refuse before any fee is shown or spent ────────────────
+    if (flags.requireTrust !== undefined) {
+      // The series head as the contributor tagged it (what CI ran on); the
+      // applied head when the patch carries no commit tags.
+      const headCommit = (
+        latest.tags.filter((t) => t[0] === 'commit').at(-1)?.[1] ??
+        applied.newHead
+      ).toLowerCase();
+      const gate = await evaluateCiGate({
+        relays,
+        owner,
+        repoId,
+        commit: headCommit,
+        webSocketFactory,
+        requireTrust: flags.requireTrust,
+      });
+      if (!gate.ok) {
+        throw new PrMergeError(
+          'ci_gate_failed',
+          `no qualifying green CI run (trust >= ${flags.requireTrust}) for ` +
+            `${headCommit.slice(0, 12)}: ${gate.reason ?? 'not green'}. ` +
+            'Nothing was pushed, published, or paid.'
+        );
+      }
+    }
     const overlay = new OverlayReader(repoRoot, {
       refname,
       sha: applied.newHead,
@@ -458,7 +516,9 @@ export async function runPrMerge(
       force: false,
     });
     const plan = serializePushPlan(pushPlan);
-    const total = BigInt(plan.estimate.totalFee) + feeRates.eventFee;
+    const total =
+      BigInt(plan.estimate.totalFee) +
+      feeRates.eventFee * BigInt(1 + flags.closes.length);
     if (!flags.json) {
       for (const line of renderPlan(plan)) io.out(line);
       io.out(
@@ -466,6 +526,13 @@ export async function runPrMerge(
           applied.commits.length === 1 ? '' : 's'
         })   ${feeRates.eventFee}`
       );
+      if (flags.closes.length > 0) {
+        io.out(
+          `  closes    kind:1632 closed (${flags.closes.length} issue${
+            flags.closes.length === 1 ? '' : 's'
+          })   ${feeRates.eventFee * BigInt(flags.closes.length)}`
+        );
+      }
       io.out(`  total with status       ${total}`);
       io.out(renderIdentityLine(identity));
     }
@@ -538,6 +605,23 @@ export async function runPrMerge(
       statusError = err instanceof Error ? err.message : String(err);
     }
 
+    // ── 9. Closes: only after the push landed, one 1632 per issue ───────────
+    const closed: string[] = [];
+    const closeErrors: string[] = [];
+    for (const issueId of flags.closes) {
+      try {
+        await ctx.publisher.publishEvent(
+          buildStatus(owner, repoId, issueId, STATUS_CLOSED_KIND),
+          relays
+        );
+        closed.push(issueId);
+      } catch (err) {
+        closeErrors.push(
+          `${issueId}: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+
     const retryHint = `rig pr status ${root.id} applied`;
     if (flags.json) {
       io.emitJson({
@@ -549,6 +633,8 @@ export async function runPrMerge(
         revisionId: latest.id,
         target: refname,
         mergedShas: applied.commits,
+        closed,
+        ...(closeErrors.length > 0 ? { closeErrors } : {}),
         result,
         ...(statusEventId !== undefined ? { statusEventId } : {}),
         ...(statusError !== undefined
@@ -568,7 +654,12 @@ export async function runPrMerge(
         );
       }
     }
-    if (statusError !== undefined) {
+    for (const e of closeErrors) io.err(`failed to close issue ${e}`);
+    if (!flags.json && closed.length > 0) {
+      io.out(`Closed ${closed.length} issue(s): ${closed.join(', ')}`);
+    }
+    if (statusError !== undefined || closeErrors.length > 0) {
+      if (statusError === undefined) return 1;
       io.err(
         `partial success: the push succeeded but publishing the applied status failed: ${statusError}`
       );

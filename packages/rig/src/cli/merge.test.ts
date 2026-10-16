@@ -8,6 +8,10 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  buildCiServiceRequest,
+  buildCiWorkflowResult,
+} from '../ci/nip-c1-events.js';
 import type { Publisher } from '../publisher.js';
 import type { NostrEvent, RemoteState } from '../remote-state.js';
 import type { EventCommandDeps } from './events.js';
@@ -113,6 +117,7 @@ interface MergeJson {
   error?: string;
   partial?: boolean;
   hint?: string;
+  closed?: string[];
 }
 
 interface World {
@@ -358,6 +363,147 @@ describe('rig pr merge', () => {
     expect(doc.hint).toContain(`rig pr status ${PATCH_ID} applied`);
     expect(doc.mergedShas).toHaveLength(1);
     expect(w.calls).toContain('publish:30618');
+  });
+
+  describe('--require-ci-trust', () => {
+    const HEAD = '1a'.repeat(20);
+    const ISSUE_A = 'c1'.repeat(32);
+    const ISSUE_B = 'c2'.repeat(32);
+    const ciRun = (conclusion: 'success' | 'failure', trusted = true) => ({
+      id: 'd1'.repeat(32),
+      pubkey: 'cd'.repeat(32),
+      sig: 'f0'.repeat(64),
+      ...buildCiWorkflowResult(
+        {
+          trigger: {
+            repoAddr: A_TAG,
+            commit: HEAD,
+            workflow: {
+              path: '.github/workflows/ci.yml',
+              sha256: '3c'.repeat(32),
+            },
+            reason: 'push',
+            ref: 'refs/heads/main',
+          },
+          runId: 'run-1',
+          conclusion,
+          ...(trusted
+            ? {
+                provenance: {
+                  kind: 'service-request' as const,
+                  eventId: '11'.repeat(32),
+                  relayUrl: RELAY,
+                  pubkey: OWNER,
+                },
+              }
+            : {}),
+          jobs: [],
+        },
+        1_800_000_000
+      ),
+    });
+    const patch = () =>
+      patchEvent(PATCH_ID, CONTRIB, fx.cleanPatch, [['commit', HEAD]]);
+
+    it('blocks the merge, paying nothing, when no green run exists', async () => {
+      const w = makeWorld(fx, { events: [patch()] });
+      expect(
+        await w.run([
+          PATCH_ID,
+          '--yes',
+          '--json',
+          '--require-ci-trust',
+          'maintainer-directed',
+        ])
+      ).toBe(1);
+      expect(w.last().error).toBe('ci_gate_failed');
+      expect(w.calls).toEqual([]);
+    });
+
+    it('blocks on a red run and on a run below the trust level', async () => {
+      for (const run of [ciRun('failure'), ciRun('success', false)]) {
+        const w = makeWorld(fx, { events: [patch(), run] });
+        expect(
+          await w.run([
+            PATCH_ID,
+            '--yes',
+            '--json',
+            '--require-ci-trust',
+            'maintainer-directed',
+          ])
+        ).toBe(1);
+        expect(w.calls).toEqual([]);
+      }
+    });
+
+    it('merges when a qualifying green run exists', async () => {
+      const request: NostrEvent = {
+        id: '11'.repeat(32),
+        pubkey: OWNER,
+        sig: 'f0'.repeat(64),
+        ...buildCiServiceRequest(
+          A_TAG,
+          'cd'.repeat(32),
+          RELAY,
+          1_800_000_000 - 100
+        ),
+      };
+      const w = makeWorld(fx, {
+        events: [patch(), ciRun('success'), request],
+      });
+      const code = await w.run([
+        PATCH_ID,
+        '--yes',
+        '--json',
+        '--require-ci-trust',
+        'maintainer-directed',
+      ]);
+      expect(code).toBe(0);
+      expect(w.calls).toContain('publish:1631');
+    });
+
+    it('rejects an unknown trust level', async () => {
+      const w = makeWorld(fx, { events: [patch()] });
+      expect(await w.run([PATCH_ID, '--require-ci-trust', 'bogus'])).toBe(2);
+    });
+
+    it('--closes publishes a 1632 per issue after the merge and lists them', async () => {
+      const w = makeWorld(fx, { events: [patch()] });
+      expect(
+        await w.run([
+          PATCH_ID,
+          '--yes',
+          '--json',
+          '--closes',
+          ISSUE_A,
+          '--closes',
+          ISSUE_B,
+        ])
+      ).toBe(0);
+      expect(w.last().closed).toEqual([ISSUE_A, ISSUE_B]);
+      const closes = w.published.filter((p) => p.kind === 1632);
+      expect(closes.map((c) => c.tags[0]?.[1])).toEqual([ISSUE_A, ISSUE_B]);
+      expect(w.calls.indexOf('publish:1631')).toBeLessThan(
+        w.calls.indexOf('publish:1632')
+      );
+    });
+
+    it('a failed merge closes no issues', async () => {
+      const conflicted = commitFile(
+        fx.dir,
+        'README.md',
+        'from main\n',
+        'diverge'
+      );
+      const w = makeWorld(fx, {
+        events: [patchEvent(PATCH_ID, CONTRIB, fx.readmePatch)],
+        refs: { 'refs/heads/main': conflicted },
+      });
+      expect(
+        await w.run([PATCH_ID, '--yes', '--json', '--closes', ISSUE_A])
+      ).toBe(1);
+      expect(w.published.filter((p) => p.kind === 1632)).toEqual([]);
+    });
   });
 
   describe('target resolution', () => {

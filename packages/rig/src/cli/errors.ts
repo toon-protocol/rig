@@ -143,7 +143,8 @@ export type PrMergeErrorCode =
   | 'tip_unavailable'
   | 'local_branch_diverged'
   | 'apply_conflict'
-  | 'nothing_to_apply';
+  | 'nothing_to_apply'
+  | 'ci_gate_failed';
 
 /**
  * `rig pr merge` refused or failed BEFORE anything was spent. `code` is the
