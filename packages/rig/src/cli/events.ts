@@ -46,7 +46,6 @@ import {
 import {
   COMMENT_KIND,
   LEGACY_COMMENT_KIND,
-  authorizedStatusAuthors,
   buildComment,
   buildIssue,
   buildPatch,
@@ -57,6 +56,7 @@ import {
   type StatusKind,
   type UnsignedEvent,
 } from '../nip34-events.js';
+import { authorizedAuthors } from '../repo-authority.js';
 import {
   defaultWebSocketFactory,
   fetchRemoteState,
@@ -69,12 +69,13 @@ import {
   type GitRepoAddr,
   type GitStatusValue,
 } from '../routes.js';
-import {
-  type DaemonGitClient,
-  type SessionPath,
-} from './daemon-session.js';
+import { type DaemonGitClient, type SessionPath } from './daemon-session.js';
 import { emitCliError, UnconfiguredRepoAddressError } from './errors.js';
-import { readToonConfig, resolveRepoRoot, type ToonRepoConfig } from './git-config.js';
+import {
+  readToonConfig,
+  resolveRepoRoot,
+  type ToonRepoConfig,
+} from './git-config.js';
 import {
   identityReport,
   loadPaidSession,
@@ -166,7 +167,11 @@ ${COMMON_FLAGS_USAGE}
 
 Related (FREE reads — no payment):
   rig issue list [--state open|closed|all]   list the repo's issues
-  rig issue show <event-id>                  one issue + its comments`;
+  rig issue show <event-id>                  one issue + its comments
+
+Related (paid status — see \`rig issue status --help\`):
+  rig issue status <event-id> <open|closed>  set an issue's status
+  rig issue close | reopen <event-id>        shortcuts for closed / open`;
 
 export const COMMENT_USAGE = `Usage: rig comment <target-event-id> --body <text> [options]
 
@@ -223,6 +228,19 @@ and non-refundable. Publishes kind:1630 (open), 1631 (applied), 1632
 with the repo a-tag attached so readers can scope a status stream to the
 repository. (This command was \`rig status\` before v2 — bare \`rig status\`
 now passes through to \`git status\`.)
+
+Options:
+${COMMON_FLAGS_USAGE}`;
+
+export const ISSUE_STATUS_USAGE = `Usage: rig issue status <issue-event-id> <open|closed> [options]
+       rig issue close <issue-event-id> [options]
+       rig issue reopen <issue-event-id> [options]
+
+Set the status of an issue — a paid publish; writes are permanent and
+non-refundable. Aliases over \`rig pr status\`: \`closed\` / \`close\` publish
+kind:1632, \`open\` / \`reopen\` publish kind:1630, against the 64-char hex id
+of the issue, with the repo a-tag attached. \`applied\` and \`draft\` apply to
+patches only and are rejected for issues (use \`rig pr status\`).
 
 Options:
 ${COMMON_FLAGS_USAGE}`;
@@ -298,7 +316,7 @@ function pickCommon(values: Record<string, unknown>): CommonFlags {
 // Shared publish pipeline
 // ---------------------------------------------------------------------------
 
-type EventCommand = 'issue' | 'comment' | 'pr' | 'pr status';
+type EventCommand = 'issue' | 'comment' | 'pr' | 'pr status' | 'issue status';
 
 interface RunEventOptions {
   command: EventCommand;
@@ -370,9 +388,7 @@ async function runEvent(opts: RunEventOptions): Promise<number> {
   const { command, flags, actionLabel } = opts;
   // --standalone/--no-daemon: force embedded for this invocation (same as
   // RIG_STANDALONE=1). Every paid path reads the override from `env`.
-  const deps = flags.standalone
-    ? withForcedStandalone(opts.deps)
-    : opts.deps;
+  const deps = flags.standalone ? withForcedStandalone(opts.deps) : opts.deps;
   const { io } = deps;
 
   let standaloneCtx: StandaloneContext | undefined;
@@ -549,7 +565,17 @@ export async function runIssue(
     io.out(ISSUE_LIST_USAGE);
     io.out('');
     io.out(ISSUE_SHOW_USAGE);
+    io.out('');
+    io.out(ISSUE_STATUS_USAGE);
     return 0;
+  }
+  // Paid status aliases over the kind:1630/1632 publish.
+  if (sub === 'status') return runStatusCommand(rest, deps, ISSUE_STATUS_SPEC);
+  if (sub === 'close') {
+    return runStatusCommand(rest, deps, ISSUE_STATUS_SPEC, 'closed');
+  }
+  if (sub === 'reopen') {
+    return runStatusCommand(rest, deps, ISSUE_STATUS_SPEC, 'open');
   }
   // FREE read subcommands (#278): relay queries only, no payment path.
   if (sub === 'list') return runIssueList(rest, deps);
@@ -557,7 +583,7 @@ export async function runIssue(
   if (sub !== 'create') {
     io.err(
       sub === undefined
-        ? 'missing subcommand: rig issue <create|list|show>'
+        ? 'missing subcommand: rig issue <create|list|show|status|close|reopen>'
         : `unknown rig issue subcommand: ${sub}`
     );
     io.err(ISSUE_USAGE);
@@ -842,7 +868,7 @@ export async function runPr(
     case 'create':
       return runPrCreate(rest, deps);
     case 'status':
-      return runPrStatus(rest, deps);
+      return runStatusCommand(rest, deps, PR_STATUS_SPEC);
     // FREE read subcommands (#278): relay queries only, no payment path.
     case 'list':
       return runPrList(rest, deps);
@@ -977,7 +1003,9 @@ async function runPrCreate(
       } else {
         patchText = await readFile(patchFile as string, 'utf-8');
         if (patchText.trim() === '') {
-          throw new Error(`--patch-file ${patchFile} is empty — nothing to publish`);
+          throw new Error(
+            `--patch-file ${patchFile} is empty — nothing to publish`
+          );
         }
         commits = [];
       }
@@ -1010,7 +1038,8 @@ async function runPrCreate(
 }
 
 // ---------------------------------------------------------------------------
-// rig pr status (top-level `rig status` before #250 — now git's)
+// rig pr status (top-level `rig status` before #250 — now git's) and the
+// rig issue status|close|reopen aliases (#231)
 // ---------------------------------------------------------------------------
 
 /** NIP-34 status kinds by wire value (mirrors the daemon's mapping). */
@@ -1025,10 +1054,42 @@ function isStatusValue(value: string): value is GitStatusValue {
   return Object.hasOwn(STATUS_KIND_BY_VALUE, value);
 }
 
-/** `rig pr status` — kind:1630-1633 status publish. */
-async function runPrStatus(
+interface StatusSpec {
+  command: 'pr status' | 'issue status';
+  usage: string;
+  allowed: readonly GitStatusValue[];
+  /** Positional shape shown in the arity error. */
+  shape: string;
+  /** Label for the target id in errors. */
+  targetLabel: string;
+}
+
+const PR_STATUS_SPEC: StatusSpec = {
+  command: 'pr status',
+  usage: PR_STATUS_USAGE,
+  allowed: ['open', 'applied', 'closed', 'draft'],
+  shape: '<target-event-id> <open|applied|closed|draft>',
+  targetLabel: '<target-event-id>',
+};
+
+const ISSUE_STATUS_SPEC: StatusSpec = {
+  command: 'issue status',
+  usage: ISSUE_STATUS_USAGE,
+  allowed: ['open', 'closed'],
+  shape: '<issue-event-id> <open|closed>',
+  targetLabel: '<issue-event-id>',
+};
+
+/**
+ * Status publish (kind:1630-1633) behind `rig pr status` and the `rig issue
+ * status|close|reopen` aliases. `fixedStatus` is set by the shortcuts, which
+ * take only the target id. Validation happens before anything is paid.
+ */
+async function runStatusCommand(
   args: string[],
-  deps: EventCommandDeps
+  deps: EventCommandDeps,
+  spec: StatusSpec,
+  fixedStatus?: GitStatusValue
 ): Promise<number> {
   const { io } = deps;
 
@@ -1043,31 +1104,34 @@ async function runPrStatus(
     });
     flags = pickCommon(values);
     if (flags.help) {
-      io.out(PR_STATUS_USAGE);
+      io.out(spec.usage);
       return 0;
     }
-    if (positionals.length !== 2) {
+    const want = fixedStatus === undefined ? 2 : 1;
+    if (positionals.length !== want) {
       throw new Error(
-        'expected exactly two arguments: <target-event-id> <open|applied|closed|draft>'
+        fixedStatus === undefined
+          ? `expected exactly two arguments: ${spec.shape}`
+          : `expected exactly one argument: ${spec.targetLabel}`
       );
     }
     targetEventId = positionals[0] as string;
-    assertHex64(targetEventId, '<target-event-id>');
-    const rawStatus = positionals[1] as string;
-    if (!isStatusValue(rawStatus)) {
+    assertHex64(targetEventId, spec.targetLabel);
+    const rawStatus = fixedStatus ?? (positionals[1] as string);
+    if (!isStatusValue(rawStatus) || !spec.allowed.includes(rawStatus)) {
       throw new Error(
-        `status must be one of open | applied | closed | draft (got ${JSON.stringify(rawStatus)})`
+        `status must be one of ${spec.allowed.join(' | ')} (got ${JSON.stringify(rawStatus)})`
       );
     }
     status = rawStatus;
   } catch (err) {
     io.err(err instanceof Error ? err.message : String(err));
-    io.err(PR_STATUS_USAGE);
+    io.err(spec.usage);
     return 2;
   }
 
   return runEvent({
-    command: 'pr status',
+    command: spec.command,
     flags,
     deps,
     actionLabel: `status ${status} on ${targetEventId.slice(0, 8)}…`,
@@ -1121,7 +1185,7 @@ async function warnIfNotMaintainer(
         ? { webSocketFactory: deps.webSocketFactory }
         : {}),
     });
-    const authorized = authorizedStatusAuthors(
+    const authorized = authorizedAuthors(
       addr.ownerPubkey,
       remote.announceEvent?.tags ?? []
     );

@@ -48,7 +48,7 @@ import {
   type CiTrustLevel,
 } from '../ci/trust.js';
 import { runGit } from '../materialize.js';
-import { authorizedStatusAuthors } from '../nip34-events.js';
+import { authorizedAuthors } from '../repo-authority.js';
 import { hexToNpub, ownerToHex } from '../npub.js';
 import {
   defaultWebSocketFactory,
@@ -591,7 +591,7 @@ export async function runCiStatus(
         announce = ev;
       }
     }
-    const authorized = authorizedStatusAuthors(owner, announce?.tags ?? []);
+    const authorized = authorizedAuthors(owner, announce?.tags ?? []);
 
     const assembled = assembleCiStatus({
       commit,

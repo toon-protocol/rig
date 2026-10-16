@@ -540,6 +540,34 @@ describe('push trigger', () => {
     await handle.stop();
   });
 
+  it("a declared maintainer's live 30618 runs CI; a stranger's is ignored (ADR-0005)", async () => {
+    const world = makeWorld();
+    const { announce, refsEvent } = world.snapshot(1000);
+    world.relay.serve([announce, refsEvent, serviceRequest(MAINT, 1100)]);
+    const handle = await world.start();
+
+    /** A push whose 30618 is signed by `pubkey` instead of the owner. */
+    const pushAs = (pubkey: string, createdAt: number): string => {
+      const sha = world.commit('code.txt', `v${createdAt}\n`, `by ${pubkey}`);
+      const { refsEvent: state } = world.snapshot(createdAt);
+      world.relay.push({ ...state, pubkey, id: eventId() });
+      return sha;
+    };
+
+    pushAs(STRANGER, 2000);
+    await handle.idle();
+    expect(world.runner.requests).toHaveLength(0);
+
+    const sha = pushAs(MAINT, 3000);
+    await handle.idle();
+    expect(world.runner.requests).toHaveLength(1);
+    expect(must(progressEvents(world.publisher)[0]).trigger).toMatchObject({
+      reason: 'push',
+      commit: sha,
+    });
+    await handle.stop();
+  });
+
   it('a maintainer Stop closes service; a stranger Stop does not', async () => {
     const world = makeWorld();
     const { announce, refsEvent } = world.snapshot(1000);

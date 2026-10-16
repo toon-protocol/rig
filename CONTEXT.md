@@ -75,3 +75,11 @@ _Avoid_: landing page, redirect
 **Earliest unique commit**:
 In NIP-34's own wording, the commit that identifies a repo "among forks" and groups it "with other repositories hosted elsewhere that may represent essentially the same project" — usually the repo's root commit. Written as `["r", "<sha>", "euc"]` on the kind:30617 announcement; full NIP-34 text and how rig computes it are in `docs/nip34-wire-shapes.md`.
 _Avoid_: root commit (as a synonym — most repos' earliest unique commit IS their root commit, but the two are not defined identically)
+
+**Authorized authors**:
+The pubkeys allowed to move a repo's refs and set its statuses: the owner, plus the pubkeys in the `maintainers` tag of the owner's own latest kind:30617. A maintainer named only in another maintainer's announcement is not one. See ADR-0005.
+_Avoid_: collaborators, committers, writers
+
+**Honored repo state**:
+The newest kind:30618 signed by an authorized author; a `created_at` tie goes to the lowest event id. Every reader resolves refs from it and ignores repo state from anyone else. See ADR-0005.
+_Avoid_: canonical state, latest state (a stranger's event can be newer without being honored)
