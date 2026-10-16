@@ -409,6 +409,9 @@ Applied/Merged, 1632 Closed, 1633 Draft.
 | `["e", "<targetEventId>", "", "root"]` | `["e", "<issue-or-PR-or-original-root-patch-id-hex>", "", "root"]` | The NIP-10 `root` marker, matching NIP-34's own status example verbatim.                                                                                           |
 | `a`                                    | `30617:<owner>:<repoId>` coordinate                                | NIP-34 lists this as _optional, for improved subscription filter efficiency_; rig always writes it (without a relay-url hint, which the NIP also allows omitting). |
 | `p`                                    | target event's author, when known                                  | NIP-34 allows several `p` tags (owner, root author, revision author); rig writes at most one — the target's author.                                                |
+| `["e", "<revisionId>", "", "reply"]`   | `["e", "<accepted-revision-root-id-hex>", "", "reply"]`            | kind:1631 from `rig pr merge` only, when the merged revision is not the root patch itself.                                                                         |
+| `["applied-as-commits", "<sha>", …]`   | `["applied-as-commits", "<commit-id-in-master-branch>", ...]`      | kind:1631 from `rig pr merge` only: the commits `git am` produced on the target branch, oldest first. rig never writes `merge-commit` (`git am` makes none).       |
+| `["r", "<sha>"]`                       | `["r", "<applied-commit-id>"] // for each`                         | kind:1631 from `rig pr merge` only, one per applied commit. rig does not write the optional `q` tags for the applied patch events.                                 |
 
 ### Legacy: bare `e` tag
 
