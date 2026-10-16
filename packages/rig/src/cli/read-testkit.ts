@@ -104,7 +104,7 @@ export function filterEvents(
     if (filter.authors && !filter.authors.includes(event.pubkey)) return false;
     if (filter.since !== undefined && event.created_at < filter.since)
       return false;
-    for (const tagName of ['a', 'e', 'E', 'd', 'c', 'p'] as const) {
+    for (const tagName of ['a', 'e', 'E', 'd', 'c', 'p', 'maintainers'] as const) {
       const wanted = filter[`#${tagName}`];
       if (
         wanted &&
