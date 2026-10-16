@@ -76,6 +76,8 @@ export interface NostrFilter {
   '#c'?: string[];
   /** Addressee tag filter (#125 CI: a coordinator's inbox — 9843/9844/9840/29846). */
   '#p'?: string[];
+  /** Declared-maintainer tag filter (#234 inbox: repos I maintain; best-effort — relays that don't index it return nothing). */
+  '#maintainers'?: string[];
   /** Only events at or after this unix time (#125 coordinator cursor resume). */
   since?: number;
   limit?: number;

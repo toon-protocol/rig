@@ -802,6 +802,32 @@ describe('strict --json stdout: the #278 read commands', () => {
     });
   });
 
+  it('inbox --json emits one array document (free read, no identity unlock)', async () => {
+    const world = makeReadWorld();
+    const result = await run(
+      ['inbox', '--pubkey', OWNER, '--relay', RELAY, '--json'],
+      { seams: world.seams }
+    );
+    expect(result.code).toBe(0);
+    const doc = JSON.parse(result.stdout) as Record<string, unknown>[];
+    expect(Array.isArray(doc)).toBe(true);
+    expect(doc[0]).toMatchObject({
+      type: 'issue',
+      kind: 1621,
+      repo: `30617:${OWNER}:demo`,
+      author: OWNER,
+    });
+    expect(Object.keys(doc[0] as object).sort()).toEqual([
+      'author',
+      'created_at',
+      'id',
+      'kind',
+      'repo',
+      'target',
+      'type',
+    ]);
+  });
+
   it('issue show / pr list / pr show --json each emit one envelope', async () => {
     const world = makeReadWorld();
     const seams = world.seams;
