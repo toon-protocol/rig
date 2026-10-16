@@ -202,7 +202,7 @@ export function defaultWebSocketFactory(url: string): WebSocketLike {
  * serves the event as a JSON string containing the event JSON), or a
  * TOON-encoded string (rig's `decodeToonMessage` path).
  */
-function decodeEventPayload(payload: unknown): NostrEvent | null {
+export function decodeEventPayload(payload: unknown): NostrEvent | null {
   if (payload !== null && typeof payload === 'object') {
     return payload as NostrEvent;
   }

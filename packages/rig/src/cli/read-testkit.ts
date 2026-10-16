@@ -28,9 +28,11 @@ type Listener = (event: never) => void;
 class FakeRelaySocket implements WebSocketLike {
   readyState = 1;
   private listeners = new Map<string, Listener[]>();
+  /** Open subscriptions (subId → filter): what {@link push} matches against. */
+  readonly subs = new Map<string, NostrFilter>();
 
   constructor(
-    private readonly url: string,
+    readonly url: string,
     private readonly handler: (
       filter: NostrFilter,
       url: string
@@ -52,28 +54,79 @@ class FakeRelaySocket implements WebSocketLike {
     }
   }
 
+  private deliver(subId: string, event: NostrEvent): void {
+    const payload =
+      this.encoding === 'double-json' ? JSON.stringify(event) : event;
+    this.emit('message', {
+      data: JSON.stringify(['EVENT', subId, payload]),
+    });
+  }
+
   send(data: string): void {
     const msg = JSON.parse(data) as unknown[];
+    if (msg[0] === 'CLOSE') {
+      this.subs.delete(msg[1] as string);
+      return;
+    }
     if (msg[0] !== 'REQ') return;
     const subId = msg[1] as string;
     const filter = msg[2] as NostrFilter;
+    this.subs.set(subId, filter);
     const events = this.handler(filter, this.url);
     queueMicrotask(() => {
-      for (const event of events) {
-        const payload =
-          this.encoding === 'double-json' ? JSON.stringify(event) : event;
-        this.emit('message', {
-          data: JSON.stringify(['EVENT', subId, payload]),
-        });
-      }
+      for (const event of events) this.deliver(subId, event);
       this.emit('message', { data: JSON.stringify(['EOSE', subId]) });
     });
   }
 
+  /** Push a live event to every subscription whose filter matches. */
+  push(event: NostrEvent): void {
+    if (this.readyState !== 1) return;
+    for (const [subId, filter] of this.subs) {
+      if (filterEvents([event], filter).length > 0) this.deliver(subId, event);
+    }
+  }
+
   close(): void {
+    if (this.readyState === 3) return;
     this.readyState = 3;
     this.emit('close', {});
   }
+}
+
+/** A mock relay whose sockets can be fed events after EOSE and dropped. */
+export interface MockRelay {
+  factory: WebSocketFactory;
+  /** Push a live event to open subscriptions (all relays, or just `url`). */
+  push(event: NostrEvent, url?: string): void;
+  /** Drop every open connection (all relays, or just `url`): a `close` event. */
+  drop(url?: string): void;
+  /** Every connection ever opened, in order. */
+  readonly connections: { url: string; open: boolean }[];
+}
+
+/** Like {@link makeMockRelayFactory}, plus post-EOSE push and connection drop. */
+export function makeMockRelay(
+  handler: (filter: NostrFilter, url: string) => NostrEvent[],
+  encoding: PayloadEncoding = 'object'
+): MockRelay {
+  const sockets: FakeRelaySocket[] = [];
+  return {
+    factory: (url) => {
+      const socket = new FakeRelaySocket(url, handler, encoding);
+      sockets.push(socket);
+      return socket;
+    },
+    push: (event, url) => {
+      for (const s of sockets) if (!url || s.url === url) s.push(event);
+    },
+    drop: (url) => {
+      for (const s of sockets) if (!url || s.url === url) s.close();
+    },
+    get connections() {
+      return sockets.map((s) => ({ url: s.url, open: s.readyState === 1 }));
+    },
+  };
 }
 
 /**
@@ -85,7 +138,7 @@ export function makeMockRelayFactory(
   handler: (filter: NostrFilter, url: string) => NostrEvent[],
   encoding: PayloadEncoding = 'object'
 ): WebSocketFactory {
-  return (url) => new FakeRelaySocket(url, handler, encoding);
+  return makeMockRelay(handler, encoding).factory;
 }
 
 /**
@@ -104,7 +157,15 @@ export function filterEvents(
     if (filter.authors && !filter.authors.includes(event.pubkey)) return false;
     if (filter.since !== undefined && event.created_at < filter.since)
       return false;
-    for (const tagName of ['a', 'e', 'E', 'd', 'c', 'p', 'maintainers'] as const) {
+    for (const tagName of [
+      'a',
+      'e',
+      'E',
+      'd',
+      'c',
+      'p',
+      'maintainers',
+    ] as const) {
       const wanted = filter[`#${tagName}`];
       if (
         wanted &&

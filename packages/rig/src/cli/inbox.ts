@@ -13,6 +13,10 @@
  * inbox works from any directory. It advances only after events were emitted;
  * `--since` and `--all` override it without moving it.
  *
+ * `--follow` then keeps a subscription open on the same relay union and
+ * streams one JSON object per line (the `--json` entry shape), reconnecting
+ * with backoff; the cursor advances as events are emitted.
+ *
  * No identity unlock, payment or channel: the user's pubkey is all it needs.
  */
 
@@ -43,7 +47,11 @@ import {
 } from '../nip34-events.js';
 import { ownerToHex } from '../npub.js';
 import { authorizedAuthors } from '../repo-authority.js';
-import type { NostrEvent, WebSocketFactory } from '../remote-state.js';
+import type {
+  NostrEvent,
+  NostrFilter,
+  WebSocketFactory,
+} from '../remote-state.js';
 import { defaultWebSocketFactory } from '../remote-state.js';
 import { emitCliError, InvalidRelayUrlError } from './errors.js';
 import { readToonConfig, resolveRepoRoot } from './git-config.js';
@@ -51,6 +59,7 @@ import { clientStateDir, resolveIdentity } from './identity.js';
 import type { ReadCommandDeps } from './read-seams.js';
 import { resolveRelays } from './remote.js';
 import { WS_URL_RE } from './repo-command.js';
+import { defaultBackoffMs, followRelay } from './relay-follow.js';
 import { queryAll, withTargetAuthor } from './tracker.js';
 
 export const INBOX_USAGE = `Usage: rig inbox [options]
@@ -68,6 +77,9 @@ Options:
   --remote <name>      read via this configured git remote (default: origin)
   --relay <url>        ad-hoc relay override; repeatable — reads are merged
   --json               machine-readable array, one object per event
+  --follow             emit the backlog, then stay connected and stream new
+                       events as JSON lines (one object per line) until
+                       interrupted; reconnects when a relay drops
   -h, --help           show this help`;
 
 /** Normalized event type of an inbox entry. */
@@ -304,10 +316,15 @@ export interface InboxDeps extends ReadCommandDeps {
   resolveIdentityImpl?: typeof resolveIdentity;
   /** Clock override (unix ms) for relative `--since` (tests). */
   now?: () => number;
+  /** Ends `--follow` when aborted (default: SIGINT / SIGTERM). */
+  followSignal?: AbortSignal;
+  /** Reconnect delay for `--follow` attempt `n` (default: 1s doubling, 30s cap). */
+  followBackoffMs?: (attempt: number) => number;
 }
 
 const INBOX_OPTIONS = {
   json: { type: 'boolean', default: false },
+  follow: { type: 'boolean', default: false },
   all: { type: 'boolean', default: false },
   since: { type: 'string' },
   pubkey: { type: 'string' },
@@ -336,6 +353,7 @@ export async function runInbox(
   const { io } = deps;
   let json = false;
   let all = false;
+  let follow = false;
   let sinceArg: string | undefined;
   let pubkeyArg: string | undefined;
   let remote: string | undefined;
@@ -355,6 +373,7 @@ export async function runInbox(
     }
     json = values.json === true;
     all = values.all === true;
+    follow = values.follow === true;
     sinceArg = values.since;
     if (values.pubkey !== undefined) pubkeyArg = ownerToHex(values.pubkey);
     remote = values.remote;
@@ -494,55 +513,170 @@ export async function runInbox(
       authCache.set(address, set);
       return set;
     };
-    const targetAuthors = new Map<string, string>();
-    const statusEvents = [...events.values()].filter((e) =>
-      STATUS_KINDS.includes(e.kind)
-    );
-    const unknownTargets = new Set<string>();
-    for (const e of statusEvents) {
-      const target = tagValue(e.tags, 'e');
-      if (!target || !HEX64_RE.test(target)) continue;
-      const known = events.get(target);
-      if (known) targetAuthors.set(target, known.pubkey.toLowerCase());
-      else unknownTargets.add(target);
-    }
-    if (unknownTargets.size > 0) {
-      const found = await queryAll(
-        configured,
-        [{ ids: [...unknownTargets] }],
-        ws
-      ).catch(() => new Map<string, NostrEvent>());
-      for (const [id, e] of found)
-        targetAuthors.set(id, e.pubkey.toLowerCase());
-    }
-    const entries: InboxEntry[] = [];
-    for (const event of events.values()) {
-      const entry = toInboxEntry(event);
-      if (entry === null) continue;
-      if (entry.type === 'status') {
-        if (entry.repo === null) continue;
-        const repoWide = await authorizedFor(entry.repo);
-        const targetAuthor = targetAuthors.get(entry.target);
-        const authors =
-          targetAuthor === undefined
-            ? repoWide
-            : withTargetAuthor(repoWide, targetAuthor);
-        if (!authors.has(event.pubkey.toLowerCase())) continue;
+    const toEntries = async (
+      found: Map<string, NostrEvent>
+    ): Promise<InboxEntry[]> => {
+      const targetAuthors = new Map<string, string>();
+      const statusEvents = [...found.values()].filter((e) =>
+        STATUS_KINDS.includes(e.kind)
+      );
+      const unknownTargets = new Set<string>();
+      for (const e of statusEvents) {
+        const target = tagValue(e.tags, 'e');
+        if (!target || !HEX64_RE.test(target)) continue;
+        const known = found.get(target);
+        if (known) targetAuthors.set(target, known.pubkey.toLowerCase());
+        else unknownTargets.add(target);
       }
-      entries.push(entry);
-    }
+      if (unknownTargets.size > 0) {
+        const lookedUp = await queryAll(
+          configured,
+          [{ ids: [...unknownTargets] }],
+          ws
+        ).catch(() => new Map<string, NostrEvent>());
+        for (const [id, e] of lookedUp)
+          targetAuthors.set(id, e.pubkey.toLowerCase());
+      }
+      const entries: InboxEntry[] = [];
+      for (const event of found.values()) {
+        const entry = toInboxEntry(event);
+        if (entry === null) continue;
+        if (entry.type === 'status') {
+          if (entry.repo === null) continue;
+          const repoWide = await authorizedFor(entry.repo);
+          const targetAuthor = targetAuthors.get(entry.target);
+          const authors =
+            targetAuthor === undefined
+              ? repoWide
+              : withTargetAuthor(repoWide, targetAuthor);
+          if (!authors.has(event.pubkey.toLowerCase())) continue;
+        }
+        entries.push(entry);
+      }
+      return entries;
+    };
+
+    const entriesOf = await toEntries(events);
 
     // ── Cursor window: drop what a previous read already emitted ──────────
-    const fresh = entries
-      .filter(
-        (e) =>
-          all ||
-          override !== null ||
-          cursor === undefined ||
-          e.created_at > cursor.at ||
-          (e.created_at === cursor.at && !cursor.seen.includes(e.id))
-      )
-      .sort((a, b) => a.created_at - b.created_at || (a.id < b.id ? -1 : 1));
+    const isFresh = (e: InboxEntry): boolean =>
+      all ||
+      override !== null ||
+      cursor === undefined ||
+      e.created_at > cursor.at ||
+      (e.created_at === cursor.at && !cursor.seen.includes(e.id));
+    const byAge = (a: InboxEntry, b: InboxEntry): number =>
+      a.created_at - b.created_at || (a.id < b.id ? -1 : 1);
+    const fresh = entriesOf.filter(isFresh).sort(byAge);
+
+    // The cursor moves only after emission, and never for --since / --all.
+    const moveCursor = !all && override === null;
+    let position = cursor;
+    const advance = (emitted: InboxEntry[]): void => {
+      if (!moveCursor || emitted.length === 0) return;
+      const at = Math.max(...emitted.map((e) => e.created_at));
+      const seen = emitted.filter((e) => e.created_at === at).map((e) => e.id);
+      if (position?.at === at) seen.push(...position.seen);
+      else if (position !== undefined && position.at > at) return;
+      position = { at, seen: [...new Set(seen)] };
+      writeCursor(deps.env, me, position);
+    };
+
+    if (follow) {
+      const line = (entry: InboxEntry): void =>
+        io.emitJsonLine
+          ? io.emitJsonLine(entry)
+          : io.out(JSON.stringify(entry));
+      const emittedIds = new Set<string>();
+      let liveSince = position?.at;
+      const emit = (entries: InboxEntry[]): void => {
+        for (const entry of entries) {
+          emittedIds.add(entry.id);
+          liveSince = Math.max(liveSince ?? 0, entry.created_at);
+          line(entry);
+        }
+        advance(entries);
+      };
+      emit(fresh);
+
+      const controller = new AbortController();
+      const stop = (): void => controller.abort();
+      const external = deps.followSignal;
+      if (external?.aborted) return 0;
+      external?.addEventListener('abort', stop);
+      if (!external) {
+        process.once('SIGINT', stop);
+        process.once('SIGTERM', stop);
+      }
+      // Live events are handled one at a time so emission order and the
+      // dedup check stay race-free.
+      let chain: Promise<void> = Promise.resolve();
+      const onEvent = (event: NostrEvent): void => {
+        chain = chain.then(async () => {
+          if (emittedIds.has(event.id)) return;
+          try {
+            const [entry] = await toEntries(new Map([[event.id, event]]));
+            if (
+              entry === undefined ||
+              emittedIds.has(entry.id) ||
+              (moveCursor && !isLive(entry))
+            ) {
+              return;
+            }
+            emit([entry]);
+          } catch (err) {
+            io.err(
+              `rig inbox: could not process live event ${event.id}: ${
+                err instanceof Error ? err.message : String(err)
+              }`
+            );
+          }
+        });
+      };
+      // After the backlog, a cursor-tracked event must be newer than the
+      // cursor (or at it and unseen) — a restart never re-emits.
+      const isLive = (e: InboxEntry): boolean =>
+        position === undefined ||
+        e.created_at > position.at ||
+        (e.created_at === position.at && !position.seen.includes(e.id));
+      const targets: { url: string; filter: NostrFilter }[] = [];
+      for (const url of configured) {
+        targets.push({ url, filter: { kinds: INBOX_KINDS, '#p': [me] } });
+      }
+      for (const repo of watched) {
+        for (const url of new Set([...configured, ...repo.relays])) {
+          targets.push({
+            url,
+            filter: { kinds: INBOX_KINDS, '#a': [repo.address] },
+          });
+        }
+      }
+      const urls = [...new Set(targets.map((t) => t.url))];
+      try {
+        await Promise.all(
+          urls.map((url) =>
+            followRelay({
+              url,
+              filters: () =>
+                targets
+                  .filter((t) => t.url === url)
+                  .map((t) => ({ ...t.filter, since: liveSince ?? nowSec })),
+              webSocketFactory: ws,
+              onEvent,
+              onError: (message) => io.err(`rig inbox: ${message}`),
+              signal: controller.signal,
+              backoffMs: deps.followBackoffMs ?? defaultBackoffMs,
+            })
+          )
+        );
+        await chain;
+      } finally {
+        external?.removeEventListener('abort', stop);
+        process.off('SIGINT', stop);
+        process.off('SIGTERM', stop);
+      }
+      return 0;
+    }
 
     if (json) {
       io.emitJson(fresh);
@@ -551,14 +685,7 @@ export async function runInbox(
     } else {
       for (const entry of fresh) io.out(renderLine(entry));
     }
-
-    // The cursor moves only after emission, and never for --since / --all.
-    if (!all && override === null && fresh.length > 0) {
-      const at = Math.max(...fresh.map((e) => e.created_at));
-      const seen = fresh.filter((e) => e.created_at === at).map((e) => e.id);
-      if (cursor?.at === at) seen.push(...cursor.seen);
-      writeCursor(deps.env, me, { at, seen: [...new Set(seen)] });
-    }
+    advance(fresh);
     return 0;
   } catch (err) {
     return emitCliError(io, json, 'inbox', err);

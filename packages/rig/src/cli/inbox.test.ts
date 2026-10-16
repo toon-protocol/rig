@@ -11,7 +11,11 @@ import { join } from 'node:path';
 import type { NostrEvent } from '../remote-state.js';
 import { runInbox, parseSince, type InboxEntry } from './inbox.js';
 import type { CliIo } from './output.js';
-import { filterEvents, makeMockRelayFactory } from './read-testkit.js';
+import {
+  filterEvents,
+  makeMockRelay,
+  makeMockRelayFactory,
+} from './read-testkit.js';
 
 const ME = '11'.repeat(32);
 const OWNER = 'ab'.repeat(32);
@@ -300,5 +304,143 @@ describe('rig inbox', () => {
     expect(parseSince('2h', 10000)).toBe(10000 - 7200);
     expect(parseSince('1970-01-02T00:00:00Z', 0)).toBe(86400);
     expect(() => parseSince('nope', 0)).toThrow(/--since/);
+  });
+});
+
+describe('rig inbox --follow', () => {
+  const FOLLOW = ['--pubkey', ME, '--relay', RELAY_A, '--follow'];
+  const LIVE = ev('c1'.repeat(32), 1621, STRANGER, 400, [['a', MY_REPO]]);
+  const LIVE2 = ev('c2'.repeat(32), 1621, STRANGER, 410, [['a', MY_REPO]]);
+
+  function followIo() {
+    const lines: string[] = [];
+    const errs: string[] = [];
+    const io: CliIo = {
+      out: () => undefined,
+      err: (l) => errs.push(l),
+      emitJson: () => undefined,
+      emitJsonLine: (p) => lines.push(JSON.stringify(p)),
+      isInteractive: false,
+      confirm: async () => false,
+    };
+    return { io, lines, errs };
+  }
+
+  async function until(cond: () => boolean): Promise<void> {
+    for (let i = 0; i < 400 && !cond(); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(cond()).toBe(true);
+  }
+
+  function start(
+    w: ReturnType<typeof world>,
+    relay: ReturnType<typeof makeMockRelay>,
+    f: ReturnType<typeof followIo>
+  ) {
+    const ctl = new AbortController();
+    const run = runInbox(FOLLOW, {
+      ...w.deps(f.io),
+      webSocketFactory: relay.factory,
+      followSignal: ctl.signal,
+      followBackoffMs: () => 1,
+    });
+    return { ctl, run };
+  }
+
+  const store = [announceMine, PATCH];
+  const handler = (filter: Parameters<typeof filterEvents>[1]) =>
+    filterEvents(store, filter);
+
+  it('emits the backlog, then an event pushed after EOSE as one JSONL line', async () => {
+    const w = world({});
+    const relay = makeMockRelay(handler);
+    const f = followIo();
+    const { ctl, run } = start(w, relay, f);
+    await until(
+      () => f.lines.length === 1 && relay.connections.some((c) => c.open)
+    );
+    relay.push(LIVE);
+    await until(() => f.lines.length === 2);
+    ctl.abort();
+    expect(await run).toBe(0);
+    const parsed = f.lines.map((l) => JSON.parse(l) as InboxEntry);
+    expect(parsed.map((e) => e.id)).toEqual([PATCH.id, LIVE.id]);
+    expect(parsed[1]).toEqual({
+      id: LIVE.id,
+      kind: 1621,
+      type: 'issue',
+      repo: MY_REPO,
+      target: LIVE.id,
+      author: STRANGER,
+      created_at: 400,
+    });
+  });
+
+  it('emits an event seen in both backlog and live stream once', async () => {
+    const w = world({});
+    const relay = makeMockRelay(handler);
+    const f = followIo();
+    const { ctl, run } = start(w, relay, f);
+    await until(
+      () => f.lines.length === 1 && relay.connections.some((c) => c.open)
+    );
+    relay.push(PATCH);
+    relay.push(LIVE);
+    relay.push(LIVE);
+    await until(() => f.lines.length === 2);
+    await new Promise((r) => setTimeout(r, 30));
+    ctl.abort();
+    await run;
+    expect(f.lines).toHaveLength(2);
+  });
+
+  it('reconnects after a dropped connection, reports it on stderr, and keeps streaming', async () => {
+    const w = world({});
+    const relay = makeMockRelay(handler);
+    const f = followIo();
+    const { ctl, run } = start(w, relay, f);
+    await until(
+      () => f.lines.length === 1 && relay.connections.some((c) => c.open)
+    );
+    relay.drop();
+    await until(() => f.errs.some((e) => /closed/.test(e)));
+    await until(() => relay.connections.some((c, i) => i > 0 && c.open));
+    relay.push(LIVE2);
+    await until(() => f.lines.length === 2);
+    ctl.abort();
+    expect(await run).toBe(0);
+    expect((JSON.parse(f.lines[1] as string) as InboxEntry).id).toBe(LIVE2.id);
+  });
+
+  it('resumes from the cursor on restart without re-emitting', async () => {
+    const w = world({});
+    const relay = makeMockRelay(handler);
+    const f1 = followIo();
+    const first = start(w, relay, f1);
+    await until(
+      () => f1.lines.length === 1 && relay.connections.some((c) => c.open)
+    );
+    relay.push(LIVE);
+    await until(() => f1.lines.length === 2);
+    first.ctl.abort();
+    await first.run;
+
+    store.push(LIVE);
+    try {
+      const f2 = followIo();
+      const second = start(w, relay, f2);
+      await new Promise((r) => setTimeout(r, 40));
+      relay.push(LIVE);
+      relay.push(LIVE2);
+      await until(() => f2.lines.length === 1);
+      second.ctl.abort();
+      await second.run;
+      expect(f2.lines.map((l) => (JSON.parse(l) as InboxEntry).id)).toEqual([
+        LIVE2.id,
+      ]);
+    } finally {
+      store.pop();
+    }
   });
 });
