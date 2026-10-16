@@ -8,6 +8,7 @@ import {
   repoAuthorizedAuthors,
 } from '../nip34-parsers.js';
 import { buildRepoRefsFilter } from '../relay-client.js';
+import { honoredRepoState } from '@toon-protocol/rig/repo-authority';
 import type { RepoMetadata, RepoRefs, NostrFilter } from '../nip34-parsers.js';
 
 interface UseRepoResult {
@@ -39,11 +40,15 @@ export function useRepo(owner: string, repo: string): UseRepoResult {
     error: repoError,
   } = useRelay(relayUrl, repoFilter);
 
+  // The owner's latest announcement (ADR-0005): newest wins, lowest id on a tie.
   const metadata = useMemo(() => {
-    if (repoEvents.length === 0) return null;
-    const first = repoEvents[0];
-    return first ? (parseRepoAnnouncement(first) ?? null) : null;
-  }, [repoEvents]);
+    if (!ownerHex) return null;
+    const latest = honoredRepoState(
+      new Set([ownerHex.toLowerCase()]),
+      repoEvents
+    );
+    return latest ? (parseRepoAnnouncement(latest) ?? null) : null;
+  }, [ownerHex, repoEvents]);
 
   // Refs come from the authorized authors (owner + the owner's announced
   // maintainers, ADR-0005), so the owner's announcement is fetched first.

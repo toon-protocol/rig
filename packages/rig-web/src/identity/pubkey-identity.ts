@@ -6,6 +6,7 @@
  */
 
 import { authorizedAuthors } from '@toon-protocol/rig/repo-authority';
+import type { AuthorityEvent } from '@toon-protocol/rig/repo-authority';
 
 export interface AuthorizationResult {
   authorized: boolean;
@@ -34,7 +35,7 @@ export interface PubkeyProfile {
  */
 export function checkMaintainerAuthorization(
   pubkey: string,
-  repoEvent: { pubkey: string; tags: string[][] }
+  repoEvent: Pick<AuthorityEvent, 'pubkey' | 'tags'>
 ): AuthorizationResult {
   const authorized = authorizedAuthors(repoEvent.pubkey, repoEvent.tags);
   if (authorized.has(pubkey.toLowerCase())) return { authorized: true };

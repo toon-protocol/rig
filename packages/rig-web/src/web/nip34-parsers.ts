@@ -25,8 +25,10 @@
  */
 
 import {
+  MAINTAINERS_TAG,
   authorizedAuthors,
   honoredRepoState,
+  parseMaintainers,
 } from '@toon-protocol/rig/repo-authority';
 
 // -------------------------------------------------------------------------
@@ -105,13 +107,6 @@ export interface RepoMetadata {
 }
 
 /**
- * NIP-34 tag naming a repo's declared maintainers on the kind:30617:
- * one multi-valued `["maintainers", "<hex>", …]` tag (mirrors `relays`).
- */
-const MAINTAINERS_TAG = 'maintainers';
-const HEX64_RE = /^[0-9a-f]{64}$/;
-
-/**
  * Collect every value out of a NIP-34 multi-value tag — `maintainers` and
  * `clone` are each emitted as ONE tag carrying every value
  * (`["clone", url1, url2, …]`), unlike `t`/`commit`, which repeat as separate
@@ -123,20 +118,6 @@ function getMultiValueTag(tags: string[][], name: string): string[] {
   for (const tag of tags) {
     if (tag[0] !== name) continue;
     out.push(...tag.slice(1));
-  }
-  return out;
-}
-
-/** Collect the lowercased-hex maintainer pubkeys from 30617 tags (#287). */
-function parseMaintainerTags(tags: string[][]): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const value of getMultiValueTag(tags, MAINTAINERS_TAG)) {
-    const hex = value.toLowerCase();
-    if (HEX64_RE.test(hex) && !seen.has(hex)) {
-      seen.add(hex);
-      out.push(hex);
-    }
   }
   return out;
 }
@@ -326,7 +307,7 @@ export function parseRepoAnnouncement(event: NostrEvent): RepoMetadata | null {
     eventId: event.id,
     cloneUrls,
     webUrls,
-    maintainers: parseMaintainerTags(event.tags),
+    maintainers: parseMaintainers(event.tags),
   };
 }
 
