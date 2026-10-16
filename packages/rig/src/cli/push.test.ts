@@ -146,7 +146,7 @@ interface FakeStandalone {
   context: StandaloneContext;
   uploads: { sha: string; size: number }[];
   blobs: { contentType: string; size: number; body: string }[];
-  published: { kind: number; relayUrls: string[] }[];
+  published: { kind: number; relayUrls: string[]; tags: string[][] }[];
   remoteRequests: {
     ownerPubkey: string;
     repoId: string;
@@ -181,7 +181,7 @@ function makeStandalone(
       return { txId: TX_ID, feePaid: BigInt(upload.body.length) * 10n };
     },
     publishEvent: async (event, relayUrls) => {
-      published.push({ kind: event.kind, relayUrls });
+      published.push({ kind: event.kind, relayUrls, tags: event.tags });
       return { eventId: 'e'.repeat(64), feePaid: 1n };
     },
     ...(options.withBlobUpload
@@ -581,6 +581,103 @@ describe('standalone push (Publisher seam)', () => {
     const text = h.err.join('\n');
     expect(text).toContain('differs from');
     expect(text).toContain('rig init');
+  });
+
+  describe('maintainer push (ADR-0005)', () => {
+    const MAINTAINER = OWNER;
+    const REPO_OWNER = 'cd'.repeat(32);
+
+    /** Remote state announced by REPO_OWNER, declaring OWNER a maintainer. */
+    function maintainerRemote(refs: Map<string, string>): RemoteState {
+      return emptyRemoteState({
+        announced: true,
+        refs,
+        maintainers: [MAINTAINER],
+        announceEvent: {
+          id: '1'.repeat(64),
+          pubkey: REPO_OWNER,
+          created_at: 1,
+          kind: 30617,
+          content: '',
+          sig: '',
+          tags: [
+            ['d', 'demo'],
+            ['maintainers', MAINTAINER],
+          ],
+        },
+      });
+    }
+
+    beforeEach(async () => {
+      await writeToonConfig(repoDir, { owner: REPO_OWNER });
+    });
+
+    it('fast-forwards the honored state: reads under the owner, publishes only kind:30618, keeps other refs', async () => {
+      const first = git(['rev-parse', 'HEAD'], repoDir).trim();
+      writeFileSync(join(repoDir, 'more.txt'), 'more\n');
+      git(['add', '.'], repoDir);
+      git(['commit', '-m', 'second'], repoDir);
+      const other = 'e'.repeat(40);
+      const fake = makeStandalone(
+        maintainerRemote(
+          new Map([
+            ['refs/heads/main', first],
+            ['refs/heads/theirs', other],
+          ])
+        )
+      );
+      const h = makeDeps(env, repoDir, { loadStandalone: fake.load });
+      const code = await runPush(['--yes'], h.deps);
+      expect(code).toBe(0);
+      expect(fake.remoteRequests.map((r) => r.ownerPubkey)).toEqual([
+        REPO_OWNER,
+      ]);
+      expect(fake.published.map((p) => p.kind)).toEqual([30618]);
+      expect(h.err.join('\n')).not.toContain('differs from');
+      expect(fake.published[0]?.tags).toContainEqual([
+        'refs/heads/theirs',
+        other,
+      ]);
+    });
+
+    it('refuses a diverged ref before uploading or publishing, with a stable --json code', async () => {
+      const fake = makeStandalone(
+        maintainerRemote(new Map([['refs/heads/main', 'd'.repeat(40)]]))
+      );
+      const h = makeDeps(env, repoDir, { loadStandalone: fake.load });
+      const code = await runPush(['--yes', '--json'], h.deps);
+      expect(code).toBe(1);
+      expect(fake.uploads).toHaveLength(0);
+      expect(fake.published).toHaveLength(0);
+      const text = [...h.out, ...h.err].join('\n');
+      expect(text).toContain('non_fast_forward');
+      expect(text).toContain('d'.repeat(40));
+      expect(text).toContain(git(['rev-parse', 'HEAD'], repoDir).trim());
+      expect(text).toContain('rig fetch');
+    });
+
+    it('tells the human to rig fetch and integrate on divergence', async () => {
+      const fake = makeStandalone(
+        maintainerRemote(new Map([['refs/heads/main', 'd'.repeat(40)]]))
+      );
+      const h = makeDeps(env, repoDir, { loadStandalone: fake.load });
+      const code = await runPush(['--yes'], h.deps);
+      expect(code).toBe(1);
+      expect(fake.published).toHaveLength(0);
+      const text = h.err.join('\n');
+      expect(text).toContain('refs/heads/main');
+      expect(text).toContain('rig fetch');
+    });
+
+    it('--force publishes despite divergence', async () => {
+      const fake = makeStandalone(
+        maintainerRemote(new Map([['refs/heads/main', 'd'.repeat(40)]]))
+      );
+      const h = makeDeps(env, repoDir, { loadStandalone: fake.load });
+      const code = await runPush(['--yes', '--force'], h.deps);
+      expect(code).toBe(0);
+      expect(fake.published.map((p) => p.kind)).toEqual([30618]);
+    });
   });
 
   it('refuses >1 explicit --relay before fetching, uploading, or paying', async () => {

@@ -771,7 +771,8 @@ describe('rig issue show', () => {
         kind: 1621,
         created_at: 1100,
         tags: [['subject', 'orphan issue']],
-        content: 'No `a` tag and no configured repo → nothing authorizes state.',
+        content:
+          'No `a` tag and no configured repo → nothing authorizes state.',
       }),
       event({
         id: 'b2'.repeat(32),
@@ -1174,5 +1175,123 @@ describe('comment threads merge kind:1111 and legacy kind:1622 (#159)', () => {
     expect(doc.comments).toEqual([
       expect.objectContaining({ eventId: ON_PATCH_ID, kind: 1111 }),
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Patch revisions (#229)
+// ---------------------------------------------------------------------------
+
+describe('patch revisions', () => {
+  const MAINT = '99'.repeat(32);
+  const ROOT_ID = 'b0'.repeat(32);
+  const REV1_ID = 'b1'.repeat(32);
+  const MAINT_REV_ID = 'b2'.repeat(32);
+  const SPOOF_REV_ID = 'b3'.repeat(32);
+
+  const revision = (
+    id: string,
+    pubkey: string,
+    created_at: number,
+    content: string
+  ): NostrEvent =>
+    event({
+      id,
+      kind: 1617,
+      pubkey,
+      created_at,
+      content,
+      tags: [
+        ['a', A_TAG],
+        ['subject', `Revised ${id.slice(0, 2)}`],
+        ['t', 'root-revision'],
+        ['e', ROOT_ID, '', 'reply'],
+      ],
+    });
+
+  const REVISION_EVENTS: NostrEvent[] = [
+    event({
+      id: 'c0'.repeat(32),
+      kind: 30617,
+      pubkey: OWNER,
+      tags: [
+        ['d', REPO],
+        ['maintainers', MAINT],
+      ],
+    }),
+    event({
+      id: ROOT_ID,
+      kind: 1617,
+      created_at: 2000,
+      content: 'root patch',
+      tags: [
+        ['a', A_TAG],
+        ['subject', 'Revisable'],
+      ],
+    }),
+    revision(REV1_ID, AUTHOR, 2100, 'revision one'),
+    revision(SPOOF_REV_ID, STRANGER, 2200, 'stranger swap'),
+    revision(MAINT_REV_ID, MAINT, 2300, 'maintainer fix'),
+  ];
+  const deps = (io: TestIo) => makeDeps(io, 'object', REVISION_EVENTS);
+
+  it('pr list shows a revised patch once, under its root', async () => {
+    const io = makeTestIo();
+    const code = await runPrList([...ADDR_FLAGS, '--json'], deps(io));
+    expect(code).toBe(0);
+    const doc = io.jsonDocs[0] as { prs: { eventId: string }[] };
+    expect(doc.prs.map((p) => p.eventId)).toEqual([ROOT_ID]);
+  });
+
+  it('pr show --json shows the latest authorized revision and earlier ones', async () => {
+    const io = makeTestIo();
+    const code = await runPrShow(
+      [ROOT_ID, '--relay', RELAY, '--json'],
+      deps(io)
+    );
+    expect(code).toBe(0);
+    const doc = io.jsonDocs[0] as {
+      pr: { eventId: string; content: string };
+      latestRevision: { eventId: string };
+      earlierRevisions: { eventId: string }[];
+    };
+    expect(doc.pr.eventId).toBe(ROOT_ID);
+    expect(doc.pr.content).toBe('maintainer fix');
+    expect(doc.latestRevision.eventId).toBe(MAINT_REV_ID);
+    expect(doc.earlierRevisions.map((r) => r.eventId)).toEqual([
+      ROOT_ID,
+      REV1_ID,
+    ]);
+  });
+
+  it('pr show (human) prints the latest revision and lists earlier ones', async () => {
+    const io = makeTestIo();
+    const code = await runPrShow([ROOT_ID, '--relay', RELAY], deps(io));
+    expect(code).toBe(0);
+    const text = io.outLines.join('\n');
+    expect(text).toContain(`Showing: ${MAINT_REV_ID}`);
+    expect(text).toContain('Earlier revisions');
+    expect(text).toContain(REV1_ID);
+    expect(text).toContain('maintainer fix');
+    expect(text).not.toContain('stranger swap');
+  });
+
+  it('pr show on a revision id shows the root thread', async () => {
+    const io = makeTestIo();
+    const code = await runPrShow(
+      [REV1_ID, '--relay', RELAY, '--json'],
+      deps(io)
+    );
+    expect(code).toBe(0);
+    expect((io.jsonDocs[0] as { pr: { eventId: string } }).pr.eventId).toBe(
+      ROOT_ID
+    );
+  });
+
+  it('pr show of an unrevised patch lists no earlier revisions', async () => {
+    const io = makeTestIo();
+    const code = await runPrShow([PR_OPEN_ID, '--relay', RELAY], makeDeps(io));
+    expect(code).toBe(0);
+    expect(io.outLines.join('\n')).not.toContain('Earlier revisions');
   });
 });

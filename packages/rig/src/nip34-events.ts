@@ -19,7 +19,12 @@ import {
   PATCH_KIND,
   REPOSITORY_ANNOUNCEMENT_KIND,
 } from '@toon-protocol/core/nip34';
-export { MAINTAINERS_TAG, parseMaintainers } from './repo-authority.js';
+import { REVISION_ROOT_MARKER } from './repo-authority.js';
+export {
+  MAINTAINERS_TAG,
+  parseMaintainers,
+  REVISION_ROOT_MARKER,
+} from './repo-authority.js';
 import type {
   STATUS_APPLIED_KIND,
   STATUS_CLOSED_KIND,
@@ -53,6 +58,7 @@ export interface UnsignedEvent {
   tags: string[][];
   created_at: number;
 }
+
 
 // ---------------------------------------------------------------------------
 // kind:30617 — Repository Announcement (+ maintainer authority, #287)
@@ -430,6 +436,9 @@ export function commentBelongsToThread(
  *                  to '' for callers that only reference commits by tag
  * @param description - PR body/cover text (`description` tag) — kept out of
  *                      `content` so `git am` still applies it
+ * @param revises - Makes this a NIP-34 revision of an existing root patch:
+ *                  `["t","root-revision"]` plus a NIP-10 `reply`-marked `e`
+ *                  tag to the root (and a `p` tag for the root's author)
  */
 export function buildPatch(
   repoOwnerPubkey: string,
@@ -438,13 +447,25 @@ export function buildPatch(
   commits: { sha: string; parentSha: string }[],
   branchTag?: string,
   content = '',
-  description?: string
+  description?: string,
+  revises?: { rootEventId: string; rootAuthorPubkey?: string }
 ): UnsignedEvent {
   const tags: string[][] = [
     ['a', `${REPOSITORY_ANNOUNCEMENT_KIND}:${repoOwnerPubkey}:${repoId}`],
     ['p', repoOwnerPubkey],
     ['subject', title],
   ];
+
+  if (revises) {
+    tags.push(['t', REVISION_ROOT_MARKER]);
+    tags.push(['e', revises.rootEventId, '', 'reply']);
+    if (
+      revises.rootAuthorPubkey &&
+      revises.rootAuthorPubkey.toLowerCase() !== repoOwnerPubkey.toLowerCase()
+    ) {
+      tags.push(['p', revises.rootAuthorPubkey]);
+    }
+  }
 
   if (description !== undefined && description !== '') {
     tags.push(['description', description]);

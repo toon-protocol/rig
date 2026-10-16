@@ -142,7 +142,9 @@ function nonFastForwardLines(refs: RejectedRefUpdate[]): string[] {
       (r) =>
         `  ${r.refname}  remote ${r.remoteSha.slice(0, 7)} is not an ancestor of local ${r.localSha.slice(0, 7)}`
     ),
-    'The remote moved since your last push. Re-run with --force to overwrite it',
+    'The remote moved since your last push. Run `rig fetch`, integrate the remote',
+    'commits (merge or rebase), then push again.',
+    'Re-running with --force overwrites the remote instead.',
     'WARNING: --force rewrites the published ref history for every reader of this repo.',
   ];
 }
