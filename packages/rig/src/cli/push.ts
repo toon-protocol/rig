@@ -48,6 +48,8 @@ import {
   generateRigPointerHtml,
   repoWebUrl,
 } from '../rig-pointer.js';
+import { authorizedAuthors } from '../repo-authority.js';
+import type { RemoteState } from '../remote-state.js';
 import { PREFERRED_GATEWAY, mirrorGatewaysFor } from '../gateway-preference.js';
 import { hexToNpub } from '../npub.js';
 import { planPush, executePush } from '../push.js';
@@ -590,9 +592,34 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
       identity = session.identity;
     }
 
-    if (toonConfig.owner && toonConfig.owner !== identity.pubkey) {
+    // A declared maintainer pushes into the OWNER's repo (ADR-0005): the
+    // honored state is read under toon.owner, and the new kind:30618 is signed
+    // by the maintainer. Anyone else keeps publishing under their own namespace.
+    const foreignOwner =
+      toonConfig.owner &&
+      toonConfig.owner.toLowerCase() !== identity.pubkey.toLowerCase()
+        ? toonConfig.owner
+        : undefined;
+    let maintainerRemote: RemoteState | undefined;
+    if (session.path === 'standalone' && foreignOwner) {
+      const ownerState = await session.ctx.fetchRemote({
+        ownerPubkey: foreignOwner,
+        repoId,
+        relayUrls: relaysUsed,
+      });
+      if (
+        ownerState.announced &&
+        authorizedAuthors(foreignOwner, ownerState.announceEvent?.tags).has(
+          identity.pubkey.toLowerCase()
+        )
+      ) {
+        maintainerRemote = ownerState;
+      }
+    }
+
+    if (!maintainerRemote && foreignOwner) {
       io.err(
-        `warning: git config toon.owner (${toonConfig.owner.slice(0, 8)}…) differs from ` +
+        `warning: git config toon.owner (${foreignOwner.slice(0, 8)}…) differs from ` +
           `the active identity (${identity.pubkey.slice(0, 8)}…) — this push publishes ` +
           "under the ACTIVE identity's repo namespace, not the configured owner's. " +
           'Re-run `rig init` to adopt the active identity.'
@@ -624,11 +651,13 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
     let rigPageSkipDetail: string | undefined;
     if (session.path === 'standalone') {
       const ctx = session.ctx;
-      const remoteState = await ctx.fetchRemote({
-        ownerPubkey: ctx.ownerPubkey,
-        repoId,
-        relayUrls: relaysUsed,
-      });
+      const remoteState =
+        maintainerRemote ??
+        (await ctx.fetchRemote({
+          ownerPubkey: ctx.ownerPubkey,
+          repoId,
+          relayUrls: relaysUsed,
+        }));
       const feeRates = await ctx.publisher.getFeeRates();
       const pushPlan = await planPush({
         repoReader: reader,
@@ -657,6 +686,9 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
         rigPageSkipDetail = 'skipped (--no-rig-page)';
       } else if (relaysUsed[0] === undefined) {
         rigPageSkipDetail = 'skipped (no relay resolved for the pointer)';
+      } else if (maintainerRemote) {
+        rigPageSkipDetail =
+          "skipped (the owner's rig page is the owner's to refresh)";
       } else if (!ctx.publisher.uploadBlob) {
         rigPageSkipDetail =
           'skipped (the active publisher cannot upload raw blobs)';
