@@ -30,11 +30,14 @@ import {
 } from '@toon-protocol/core/nip34';
 import {
   CI_JOB_RESULT_KIND,
+  CI_SERVICE_REQUEST_KIND,
+  CI_SERVICE_STOP_KIND,
   CI_WORKFLOW_PROGRESS_KIND,
   CI_WORKFLOW_RESULT_KIND,
 } from '../ci/nip-c1-events.js';
 import {
   COMMENT_KIND,
+  firstTagValue,
   LEGACY_COMMENT_KIND,
   parseMaintainers,
 } from '../nip34-events.js';
@@ -47,7 +50,8 @@ import { readToonConfig, resolveRepoRoot } from './git-config.js';
 import { clientStateDir, resolveIdentity } from './identity.js';
 import type { ReadCommandDeps } from './read-seams.js';
 import { resolveRelays } from './remote.js';
-import { queryAll } from './tracker.js';
+import { WS_URL_RE } from './repo-command.js';
+import { queryAll, withTargetAuthor } from './tracker.js';
 
 export const INBOX_USAGE = `Usage: rig inbox [options]
 
@@ -89,7 +93,10 @@ const STATUS_KINDS = [
   STATUS_CLOSED_KIND,
   STATUS_DRAFT_KIND,
 ];
+/** Every CI kind `rig ci status` parses (never the 39841 live log tail). */
 const CI_KINDS = [
+  CI_SERVICE_REQUEST_KIND,
+  CI_SERVICE_STOP_KIND,
   CI_WORKFLOW_RESULT_KIND,
   CI_WORKFLOW_PROGRESS_KIND,
   CI_JOB_RESULT_KIND,
@@ -104,7 +111,6 @@ const INBOX_KINDS = [
   ...CI_KINDS,
 ];
 
-const WS_URL_RE = /^wss?:\/\//i;
 const HEX64_RE = /^[0-9a-f]{64}$/;
 
 // ---------------------------------------------------------------------------
@@ -170,17 +176,22 @@ export function parseSince(value: string, nowSec: number): number {
   return Math.floor(ms / 1000);
 }
 
-function tagValue(tags: string[][], name: string): string | undefined {
-  return tags.find((t) => t[0] === name)?.[1];
+/** Local alias for the shared, case-sensitive tag reader (../nip34-events.ts). */
+const tagValue = firstTagValue;
+
+function hasTopic(event: NostrEvent, topic: string): boolean {
+  return event.tags.some((t) => t[0] === 't' && t[1] === topic);
 }
 
 function typeOf(event: NostrEvent): InboxType | null {
   if (event.kind === PATCH_KIND) {
-    const revision = event.tags.some(
-      (t) =>
-        t[0] === 't' && (t[1] === 'root-revision' || t[1] === 'revision-root')
-    );
-    return revision ? 'revision' : 'patch';
+    if (hasTopic(event, 'root-revision')) return 'revision';
+    // A root patch is tagged `t root`, or (rig's own shape) replies to
+    // nothing; a later patch in a series replies to the one before it.
+    if (hasTopic(event, 'root') || tagValue(event.tags, 'e') === undefined) {
+      return 'patch';
+    }
+    return null;
   }
   if (event.kind === ISSUE_KIND) return 'issue';
   if (event.kind === COMMENT_KIND || event.kind === LEGACY_COMMENT_KIND) {
@@ -240,6 +251,34 @@ function newest(events: NostrEvent[]): NostrEvent | null {
     }
   }
   return winner;
+}
+
+/** The owner's own latest kind:30617 for `repoId` — the only one with authority. */
+async function ownerAnnouncement(
+  relays: string[],
+  owner: string,
+  repoId: string,
+  ws: WebSocketFactory
+): Promise<NostrEvent | null> {
+  const found = await queryAll(
+    relays,
+    [
+      {
+        kinds: [REPOSITORY_ANNOUNCEMENT_KIND],
+        authors: [owner],
+        '#d': [repoId],
+      },
+    ],
+    ws
+  ).catch(() => new Map<string, NostrEvent>());
+  return newest(
+    [...found.values()].filter(
+      (e) =>
+        e.kind === REPOSITORY_ANNOUNCEMENT_KIND &&
+        e.pubkey.toLowerCase() === owner &&
+        tagValue(e.tags, 'd') === repoId
+    )
+  );
 }
 
 function relaysTag(tags: string[][]): string[] {
@@ -389,11 +428,17 @@ export async function runInbox(
     }
     const watched: WatchedRepo[] = [];
     for (const [key, events] of byRepo) {
-      // Only the owner's own latest announcement carries authority.
-      const latest = newest(events) as NostrEvent;
-      const owner = latest.pubkey.toLowerCase();
-      if (owner !== me && !parseMaintainers(latest.tags).includes(me)) continue;
+      const owner = (events[0] as NostrEvent).pubkey.toLowerCase();
       const repoId = key.slice(owner.length + 1);
+      // Only the owner's own latest announcement carries authority. A
+      // `#maintainers` hit may be stale — the owner's newer announcement
+      // that removed me doesn't match that filter — so re-read it (ADR-0005).
+      const latest =
+        owner === me
+          ? newest(events)
+          : await ownerAnnouncement(configured, owner, repoId, ws);
+      if (latest === null) continue;
+      if (owner !== me && !parseMaintainers(latest.tags).includes(me)) continue;
       watched.push({
         address: `${REPOSITORY_ANNOUNCEMENT_KIND}:${owner}:${repoId}`,
         ownerPubkey: owner,
@@ -438,19 +483,11 @@ export async function runInbox(
       let set = new Set<string>();
       if (m) {
         const owner = (m[1] as string).toLowerCase();
-        const found = await queryAll(
+        const latest = await ownerAnnouncement(
           configured,
-          [
-            {
-              kinds: [REPOSITORY_ANNOUNCEMENT_KIND],
-              authors: [owner],
-              '#d': [m[2] as string],
-            },
-          ],
+          owner,
+          m[2] as string,
           ws
-        ).catch(() => new Map<string, NostrEvent>());
-        const latest = newest(
-          [...found.values()].filter((e) => e.pubkey.toLowerCase() === owner)
         );
         set = authorizedAuthors(owner, latest?.tags ?? []);
       }
@@ -464,7 +501,10 @@ export async function runInbox(
     const unknownTargets = new Set<string>();
     for (const e of statusEvents) {
       const target = tagValue(e.tags, 'e');
-      if (target && HEX64_RE.test(target)) unknownTargets.add(target);
+      if (!target || !HEX64_RE.test(target)) continue;
+      const known = events.get(target);
+      if (known) targetAuthors.set(target, known.pubkey.toLowerCase());
+      else unknownTargets.add(target);
     }
     if (unknownTargets.size > 0) {
       const found = await queryAll(
@@ -481,10 +521,13 @@ export async function runInbox(
       if (entry === null) continue;
       if (entry.type === 'status') {
         if (entry.repo === null) continue;
-        const authors = await authorizedFor(entry.repo);
-        const author = event.pubkey.toLowerCase();
+        const repoWide = await authorizedFor(entry.repo);
         const targetAuthor = targetAuthors.get(entry.target);
-        if (!authors.has(author) && author !== targetAuthor) continue;
+        const authors =
+          targetAuthor === undefined
+            ? repoWide
+            : withTargetAuthor(repoWide, targetAuthor);
+        if (!authors.has(event.pubkey.toLowerCase())) continue;
       }
       entries.push(entry);
     }

@@ -239,6 +239,52 @@ describe('rig inbox', () => {
     ]);
   });
 
+  it('reads root patches only, and the CI service request/stop kinds', async () => {
+    const followUp = ev('d1'.repeat(32), 1617, CONTRIB, 201, [
+      ['a', MY_REPO],
+      ['e', PATCH.id, '', 'reply'],
+    ]);
+    const taggedRoot = ev('d2'.repeat(32), 1617, CONTRIB, 202, [
+      ['a', MY_REPO],
+      ['t', 'root'],
+    ]);
+    const ciRequest = ev('d3'.repeat(32), 9843, STRANGER, 203, [
+      ['a', MY_REPO],
+      ['p', STRANGER],
+    ]);
+    const w = world({
+      [RELAY_A]: [announceMine, PATCH, followUp, taggedRoot, ciRequest],
+    });
+    const entries = await read(w);
+    expect(entries.map((e) => [e.id, e.type])).toEqual([
+      [PATCH.id, 'patch'],
+      [taggedRoot.id, 'patch'],
+      [ciRequest.id, 'ci'],
+    ]);
+  });
+
+  it('stops watching a repo once the owner’s newer announcement drops me', async () => {
+    const dropped = ev('a3'.repeat(32), 30617, OWNER, 150, [['d', 'theirs']]);
+    const w = world({ [RELAY_A]: [announceTheirs, dropped, ISSUE] });
+    expect(await read(w)).toEqual([]);
+  });
+
+  it('shows an event sharing the cursor’s timestamp that was not yet seen', async () => {
+    const w = world({ [RELAY_A]: [announceMine, PATCH] });
+    expect((await read(w)).map((e) => e.id)).toEqual([PATCH.id]);
+    const twin = ev('d4'.repeat(32), 1621, STRANGER, PATCH.created_at, [
+      ['a', MY_REPO],
+    ]);
+    const io = makeIo();
+    await runInbox(ARGS, {
+      ...world({ [RELAY_A]: [announceMine, PATCH, twin] }).deps(io),
+      env: { TOON_CLIENT_HOME: w.home },
+    });
+    expect((io.jsonDocs[0] as InboxEntry[]).map((e) => e.id)).toEqual([
+      twin.id,
+    ]);
+  });
+
   it('prints one line per event in human mode', async () => {
     const w = world({ [RELAY_A]: ALL });
     const io = makeIo();
