@@ -444,6 +444,84 @@ export function assembleCiStatus(opts: AssembleStatusOptions): {
   return { runs, summary, ok, ...(reason !== undefined ? { reason } : {}) };
 }
 
+export interface CiGateOptions {
+  relays: string[];
+  owner: string;
+  repoId: string;
+  /** Full 40-hex commit SHA. */
+  commit: string;
+  webSocketFactory: WebSocketFactory;
+  requireTrust?: CiTrustLevel;
+  workflow?: string;
+}
+
+/**
+ * The merge gate shared by `rig ci status` and `rig pr merge
+ * --require-ci-trust`: read the commit's CI events plus the owner's 30617
+ * from the relays and assemble the verdict (`ok` only when a counted run
+ * concluded green and none is red or pending).
+ */
+export async function evaluateCiGate(opts: CiGateOptions) {
+  const { relays, owner, repoId, commit, webSocketFactory } = opts;
+  const repoAddr = repoAddress(owner, repoId);
+  // ── Reads ──────────────────────────────────────────────────────────────
+  const events = await queryAll(
+    relays,
+    [
+      {
+        kinds: [
+          CI_WORKFLOW_RESULT_KIND,
+          CI_WORKFLOW_PROGRESS_KIND,
+          CI_JOB_RESULT_KIND,
+        ],
+        '#a': [repoAddr],
+        '#c': [commit],
+      },
+      {
+        kinds: [CI_SERVICE_REQUEST_KIND, CI_SERVICE_STOP_KIND],
+        '#a': [repoAddr],
+      },
+      {
+        kinds: [REPOSITORY_ANNOUNCEMENT_KIND],
+        authors: [owner],
+        '#d': [repoId],
+      },
+    ],
+    webSocketFactory
+  );
+  // Authority: the owner's own latest 30617 for this d-tag; owner-only when
+  // absent (an unresolved announcement never widens authority).
+  let announce: NostrEvent | null = null;
+  for (const ev of events) {
+    if (
+      ev.kind !== REPOSITORY_ANNOUNCEMENT_KIND ||
+      ev.pubkey.toLowerCase() !== owner
+    )
+      continue;
+    if (!ev.tags.some((t) => t[0] === 'd' && t[1] === repoId)) continue;
+    if (
+      announce === null ||
+      ev.created_at > announce.created_at ||
+      (ev.created_at === announce.created_at && ev.id < announce.id)
+    ) {
+      announce = ev;
+    }
+  }
+  const authorized = authorizedAuthors(owner, announce?.tags ?? []);
+
+  return assembleCiStatus({
+    commit,
+    ownerPubkey: owner,
+    repoId,
+    authorized,
+    events,
+    ...(opts.requireTrust !== undefined
+      ? { requireTrust: opts.requireTrust }
+      : {}),
+    ...(opts.workflow !== undefined ? { workflow: opts.workflow } : {}),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Command
 // ---------------------------------------------------------------------------
@@ -546,59 +624,12 @@ export async function runCiStatus(
       );
     }
     const webSocketFactory = deps.webSocketFactory ?? defaultWebSocketFactory;
-    const repoAddr = repoAddress(owner, repoId);
-
-    // ── Reads ──────────────────────────────────────────────────────────────
-    const events = await queryAll(
+    const assembled = await evaluateCiGate({
       relays,
-      [
-        {
-          kinds: [
-            CI_WORKFLOW_RESULT_KIND,
-            CI_WORKFLOW_PROGRESS_KIND,
-            CI_JOB_RESULT_KIND,
-          ],
-          '#a': [repoAddr],
-          '#c': [commit],
-        },
-        {
-          kinds: [CI_SERVICE_REQUEST_KIND, CI_SERVICE_STOP_KIND],
-          '#a': [repoAddr],
-        },
-        {
-          kinds: [REPOSITORY_ANNOUNCEMENT_KIND],
-          authors: [owner],
-          '#d': [repoId],
-        },
-      ],
-      webSocketFactory
-    );
-    // Authority: the owner's own latest 30617 for this d-tag; owner-only when
-    // absent (an unresolved announcement never widens authority).
-    let announce: NostrEvent | null = null;
-    for (const ev of events) {
-      if (
-        ev.kind !== REPOSITORY_ANNOUNCEMENT_KIND ||
-        ev.pubkey.toLowerCase() !== owner
-      )
-        continue;
-      if (!ev.tags.some((t) => t[0] === 'd' && t[1] === repoId)) continue;
-      if (
-        announce === null ||
-        ev.created_at > announce.created_at ||
-        (ev.created_at === announce.created_at && ev.id < announce.id)
-      ) {
-        announce = ev;
-      }
-    }
-    const authorized = authorizedAuthors(owner, announce?.tags ?? []);
-
-    const assembled = assembleCiStatus({
-      commit,
-      ownerPubkey: owner,
+      owner,
       repoId,
-      authorized,
-      events,
+      commit,
+      webSocketFactory,
       ...(flags.requireTrust !== undefined
         ? { requireTrust: flags.requireTrust }
         : {}),
