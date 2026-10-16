@@ -28,7 +28,9 @@ import {
   MAINTAINERS_TAG,
   authorizedAuthors,
   honoredRepoState,
+  isPatchRevision,
   parseMaintainers,
+  selectRevision,
 } from '@toon-protocol/rig/repo-authority';
 
 // -------------------------------------------------------------------------
@@ -355,6 +357,24 @@ export interface PRMetadata {
   mergeBase?: string;
   /** kind:1618 only: labels, from `t` tags. */
   labels?: string[];
+  /**
+   * kind:1617 roots only, set by {@link collapsePatchRevisions}: every
+   * authorized version of the patch set, oldest first (the root first). The
+   * fields above are the latest version's; `eventId`, `authorPubkey`,
+   * `createdAt` and status stay the root's.
+   */
+  versions?: PRVersion[];
+}
+
+/** One version of a patch set: the root patch, or an authorized revision. */
+export interface PRVersion {
+  eventId: string;
+  authorPubkey: string;
+  createdAt: number;
+  title: string;
+  content: string;
+  commitShas: string[];
+  description?: string;
 }
 
 /**
@@ -463,6 +483,61 @@ export function parsePR(event: NostrEvent): PRMetadata | null {
     ...(description !== undefined ? { description } : {}),
     ...(isPullRequest ? parsePullRequestPointer(event.tags) : {}),
   };
+}
+
+/**
+ * Fold patch revisions into their roots. A kind:1617 carrying the
+ * `root-revision` marker is a version of its root, never a list entry (even
+ * when unauthorized or orphaned). Each root takes the content of its latest
+ * authorized revision (the shared {@link selectRevision} rule, the same one
+ * `rig pr show` uses) and lists all authorized versions in `versions`; a
+ * stranger's revision is never the current one. `authorized` is the repo's
+ * authorized authors (lowercased hex); a root's own author counts too.
+ */
+export function collapsePatchRevisions(
+  events: readonly NostrEvent[],
+  authorized: ReadonlySet<string>
+): PRMetadata[] {
+  const revisions = events.filter(
+    (e) => e.kind === 1617 && isPatchRevision(e)
+  );
+  const out: PRMetadata[] = [];
+  for (const ev of events) {
+    if (ev.kind === 1617 && isPatchRevision(ev)) continue;
+    const pr = parsePR(ev);
+    if (!pr) continue;
+    if (ev.kind === 1617) {
+      const { latest, earlier } = selectRevision(ev, revisions, authorized);
+      const toVersion = (e: NostrEvent): PRVersion => {
+        const v = parsePR(e);
+        return {
+          eventId: e.id,
+          authorPubkey: e.pubkey,
+          createdAt: e.created_at,
+          title: v?.title ?? '',
+          content: e.content,
+          commitShas: v?.commitShas ?? [],
+          ...(v?.description !== undefined
+            ? { description: v.description }
+            : {}),
+        };
+      };
+      const versions = [...earlier, latest].map(toVersion);
+      if (latest.id !== ev.id) {
+        const v = versions[versions.length - 1] as PRVersion;
+        pr.title = v.title;
+        pr.content = v.content;
+        pr.commitShas = v.commitShas;
+        delete pr.description;
+        if (v.description !== undefined) pr.description = v.description;
+        const tip = parsePR(latest);
+        if (tip) pr.baseBranch = tip.baseBranch;
+      }
+      pr.versions = versions;
+    }
+    out.push(pr);
+  }
+  return out;
 }
 
 /**

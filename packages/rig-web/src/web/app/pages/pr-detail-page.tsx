@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useParams, useOutletContext } from 'react-router';
+import { Link, useParams, useOutletContext, useSearchParams } from 'react-router';
 import type { RepoContext } from '@/app/repo-layout';
 import { usePRs } from '@/hooks/use-prs';
 import { useCiRuns } from '@/hooks/use-ci-runs';
@@ -144,8 +144,19 @@ export function PRDetailPage() {
   const eventIds = useMemo(() => (pr ? [pr.eventId] : []), [pr]);
   const { comments, loading: commentsLoading } = useComments(eventIds);
 
+  // The patch page shows the latest authorized revision; `?rev=<event id>`
+  // browses an earlier one (only ids the shared selection accepted).
+  const [searchParams] = useSearchParams();
+  const versions = pr?.versions ?? [];
+  const latestVersion = versions[versions.length - 1];
+  const requestedRev = searchParams.get('rev');
+  const shown =
+    versions.find((v) => v.eventId === requestedRev) ?? latestVersion;
+  const viewingEarlier = !!shown && shown !== latestVersion;
+  const shownCommitShas = shown?.commitShas ?? pr?.commitShas ?? [];
+
   // Use the latest commit SHA for diff view
-  const latestCommitSha = pr?.commitShas[pr.commitShas.length - 1] ?? null;
+  const latestCommitSha = shownCommitShas[shownCommitShas.length - 1] ?? null;
   const { commit: _commit, changedFiles, loading: diffLoading } = useCommitDetail(
     latestCommitSha,
     metadata.repoId,
@@ -168,12 +179,15 @@ export function PRDetailPage() {
   }
 
   const authorDisplayName = getDisplayName(pr.authorPubkey);
-  const commitCount = pr.commitShas.length;
+  const commitCount = shownCommitShas.length;
+  const shownTitle = shown?.title ?? pr.title;
+  const shownContent = shown?.content ?? pr.content;
+  const shownDescription = shown ? shown.description : pr.description;
 
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
-        <h2 className="text-xl font-semibold">{pr.title}</h2>
+        <h2 className="text-xl font-semibold">{shownTitle}</h2>
         <Badge className={STATUS_BADGE_CLASS[pr.status] ?? ''}>
           {STATUS_LABEL[pr.status] ?? pr.status}
         </Badge>
@@ -185,6 +199,40 @@ export function PRDetailPage() {
         {commitCount} commit{commitCount !== 1 ? 's' : ''} into{' '}
         <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">{pr.baseBranch}</code>
       </p>
+
+      {versions.length > 1 && (
+        <nav
+          aria-label="Patch revisions"
+          className="flex flex-wrap items-center gap-2 text-sm"
+        >
+          <span className="text-muted-foreground">Revisions:</span>
+          {versions.map((v, i) => {
+            const isLatest = v === latestVersion;
+            const label = `v${i + 1}${isLatest ? ' (latest)' : ''}`;
+            return v === shown ? (
+              <Badge key={v.eventId} aria-current="true">
+                {label}
+              </Badge>
+            ) : (
+              <Link
+                key={v.eventId}
+                to={isLatest ? '?' : `?rev=${v.eventId}`}
+                className="underline underline-offset-2 hover:text-primary"
+              >
+                {label}
+              </Link>
+            );
+          })}
+        </nav>
+      )}
+      {viewingEarlier && (
+        <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
+          This is an earlier revision.{' '}
+          <Link to="?" className="underline underline-offset-2">
+            View the latest
+          </Link>
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant="outline" className="text-[10px]">
@@ -224,7 +272,7 @@ export function PRDetailPage() {
                 // the opening comment when present; otherwise fall back to
                 // the raw format-patch text with headers/diffstat/diff
                 // stripped out. The full diff still lives in Files Changed.
-                originalContent={pr.description ?? stripPatchHeaders(pr.content)}
+                originalContent={shownDescription ?? stripPatchHeaders(shownContent)}
                 originalAuthor={pr.authorPubkey}
                 originalCreatedAt={pr.createdAt}
                 comments={comments}

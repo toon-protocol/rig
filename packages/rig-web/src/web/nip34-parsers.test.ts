@@ -14,6 +14,7 @@ import {
   parseHonoredRepoRefs,
   parseIssue,
   parsePR,
+  collapsePatchRevisions,
   parseComment,
   resolveIssueStatus,
   commentBelongsToThread,
@@ -1609,5 +1610,84 @@ describe('NIP-34 Parsers - parseHonoredRepoRefs (ADR-0005)', () => {
   it('returns null when only strangers signed', () => {
     const events = [state(stranger, 999, '3'.repeat(40), '03')];
     expect(parseHonoredRepoRefs(events, new Set([owner]), 'repo')).toBeNull();
+  });
+});
+
+
+describe('NIP-34 Parsers - collapsePatchRevisions (#230)', () => {
+  const OWNER = 'a'.repeat(64);
+  const MAINT = 'b'.repeat(64);
+  const AUTHOR = 'c'.repeat(64);
+  const STRANGER = 'd'.repeat(64);
+  const authorized = new Set([OWNER, MAINT]);
+  const first = <T extends object>(xs: T[]): T => xs[0] as T;
+
+  const patch = (
+    id: string,
+    pubkey: string,
+    created_at: number,
+    opts: { revises?: string; subject?: string; commit?: string } = {}
+  ): NostrEvent => ({
+    id,
+    pubkey,
+    created_at,
+    kind: 1617,
+    content: `patch ${id}`,
+    sig: '',
+    tags: [
+      ['a', `30617:${OWNER}:repo`],
+      ['subject', opts.subject ?? `title ${id}`],
+      ['commit', opts.commit ?? `sha-${id}`],
+      ...(opts.revises
+        ? [
+            ['t', 'root-revision'],
+            ['e', opts.revises, '', 'reply'],
+          ]
+        : []),
+    ],
+  });
+
+  it('lists a revised patch once, as its root', () => {
+    const out = collapsePatchRevisions(
+      [patch('r1', AUTHOR, 1), patch('v2', AUTHOR, 2, { revises: 'r1' })],
+      authorized
+    );
+    expect(out.map((p) => p.eventId)).toEqual(['r1']);
+  });
+
+  it('shows the latest authorized revision, keeping the root identity', () => {
+    const pr = first(collapsePatchRevisions(
+      [
+        patch('r1', AUTHOR, 1),
+        patch('v2', AUTHOR, 2, { revises: 'r1', subject: 'second' }),
+        patch('v3', MAINT, 3, { revises: 'r1', subject: 'third' }),
+      ],
+      authorized
+    ));
+    expect(pr.eventId).toBe('r1');
+    expect(pr.title).toBe('third');
+    expect(pr.content).toBe('patch v3');
+    expect(pr.commitShas).toEqual(['sha-v3']);
+    expect((pr.versions ?? []).map((v) => v.eventId)).toEqual(['r1', 'v2', 'v3']);
+  });
+
+  it("never shows a stranger's revision, current or earlier", () => {
+    const events = [
+      patch('r1', AUTHOR, 1),
+      patch('v2', AUTHOR, 2, { revises: 'r1' }),
+      patch('evil', STRANGER, 3, { revises: 'r1' }),
+    ];
+    const out = collapsePatchRevisions(events, authorized);
+    expect(out).toHaveLength(1);
+    expect(first(out).content).toBe('patch v2');
+    expect((first(out).versions ?? []).map((v) => v.eventId)).toEqual(['r1', 'v2']);
+  });
+
+  it('keeps an unrevised patch as its own single version', () => {
+    const pr = first(
+      collapsePatchRevisions([patch('r1', AUTHOR, 1)], authorized)
+    );
+    expect(pr.content).toBe('patch r1');
+    expect((pr.versions ?? []).map((v) => v.eventId)).toEqual(['r1']);
   });
 });
