@@ -1668,7 +1668,7 @@ describe('NIP-34 Parsers - collapsePatchRevisions (#230)', () => {
     expect(pr.title).toBe('third');
     expect(pr.content).toBe('patch v3');
     expect(pr.commitShas).toEqual(['sha-v3']);
-    expect((pr.versions ?? []).map((v) => v.eventId)).toEqual(['r1', 'v2', 'v3']);
+    expect((pr.revisions ?? []).map((v) => v.eventId)).toEqual(['r1', 'v2', 'v3']);
   });
 
   it("never shows a stranger's revision, current or earlier", () => {
@@ -1680,14 +1680,14 @@ describe('NIP-34 Parsers - collapsePatchRevisions (#230)', () => {
     const out = collapsePatchRevisions(events, authorized);
     expect(out).toHaveLength(1);
     expect(first(out).content).toBe('patch v2');
-    expect((first(out).versions ?? []).map((v) => v.eventId)).toEqual(['r1', 'v2']);
+    expect((first(out).revisions ?? []).map((v) => v.eventId)).toEqual(['r1', 'v2']);
   });
 
-  it('keeps an unrevised patch as its own single version', () => {
+  it('keeps an unrevised patch as its own single revision', () => {
     const pr = first(
       collapsePatchRevisions([patch('r1', AUTHOR, 1)], authorized)
     );
     expect(pr.content).toBe('patch r1');
-    expect((pr.versions ?? []).map((v) => v.eventId)).toEqual(['r1']);
+    expect((pr.revisions ?? []).map((v) => v.eventId)).toEqual(['r1']);
   });
 });

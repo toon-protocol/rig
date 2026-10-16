@@ -44,6 +44,7 @@ const mockUseCommitDetail = vi.mocked(useCommitDetail);
 afterEach(() => cleanup());
 
 const AUTHOR = 'cd'.repeat(32);
+const MAINT = 'ef'.repeat(32);
 const ROOT = '55'.repeat(32);
 const REV2 = '66'.repeat(32);
 
@@ -74,7 +75,7 @@ const PR: PRMetadata = {
   baseBranch: 'main',
   status: 'open',
   sourceKind: 1617,
-  versions: [
+  revisions: [
     {
       eventId: ROOT,
       authorPubkey: AUTHOR,
@@ -82,21 +83,23 @@ const PR: PRMetadata = {
       title: 'First try',
       content: 'content v1',
       commitShas: ['sha1'],
+      baseBranch: 'main',
     },
     {
       eventId: REV2,
-      authorPubkey: AUTHOR,
+      authorPubkey: MAINT,
       createdAt: 2,
       title: 'Second try',
       content: 'content v2',
       commitShas: ['sha2'],
+      baseBranch: 'main',
     },
   ],
 };
 
-function renderAt(search = '') {
+function renderAt(search = '', id = ROOT) {
   return render(
-    <MemoryRouter initialEntries={[`/npub1owner/demo/pulls/${ROOT}${search}`]}>
+    <MemoryRouter initialEntries={[`/npub1owner/demo/pulls/${id}${search}`]}>
       <Routes>
         <Route element={<Outlet context={CONTEXT} />}>
           <Route path="/:owner/:repo/pulls/:id" element={<PRDetailPage />} />
@@ -132,8 +135,22 @@ describe('PRDetailPage revisions', () => {
     expect(mockUseCommitDetail.mock.calls[0]?.[0]).toBe('sha1');
   });
 
-  it('ignores a ?rev that is not an authorized version', () => {
+  it('ignores a ?rev that is not an authorized revision', () => {
     renderAt(`?rev=${'99'.repeat(32)}`);
     expect(screen.getByText('Second try')).toBeTruthy();
+  });
+
+  it("opens a revision's id on its root's page, showing the latest", () => {
+    renderAt('', REV2);
+    expect(screen.getByText('Second try')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'v1' })).toBeTruthy();
+  });
+
+  it('credits the opening comment to the revision shown', () => {
+    renderAt();
+    expect(screen.getAllByText(`user-${MAINT.slice(0, 4)}`).length).toBeGreaterThan(0);
+    cleanup();
+    renderAt(`?rev=${ROOT}`);
+    expect(screen.queryByText(`user-${MAINT.slice(0, 4)}`)).toBeNull();
   });
 });

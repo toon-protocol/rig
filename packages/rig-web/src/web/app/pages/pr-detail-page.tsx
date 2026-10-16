@@ -133,13 +133,14 @@ export function PRDetailPage() {
   const { getDisplayName, requestProfiles } = useProfileCache();
   const { runsForPr, runsForCommit } = useCiRuns(owner, metadata.repoId, metadata.maintainers);
 
+  // A revision's id opens its root's page, as `rig pr show` does.
   const pr = useMemo(() => {
-    return prs.find((p) => p.eventId === id) ?? null;
+    return (
+      prs.find((p) => p.eventId === id) ??
+      prs.find((p) => p.revisions?.some((r) => r.eventId === id)) ??
+      null
+    );
   }, [prs, id]);
-
-  useEffect(() => {
-    if (pr) requestProfiles([pr.authorPubkey]);
-  }, [pr, requestProfiles]);
 
   const eventIds = useMemo(() => (pr ? [pr.eventId] : []), [pr]);
   const { comments, loading: commentsLoading } = useComments(eventIds);
@@ -147,13 +148,17 @@ export function PRDetailPage() {
   // The patch page shows the latest authorized revision; `?rev=<event id>`
   // browses an earlier one (only ids the shared selection accepted).
   const [searchParams] = useSearchParams();
-  const versions = pr?.versions ?? [];
-  const latestVersion = versions[versions.length - 1];
+  const revisions = pr?.revisions ?? [];
+  const latestRevision = revisions[revisions.length - 1];
   const requestedRev = searchParams.get('rev');
   const shown =
-    versions.find((v) => v.eventId === requestedRev) ?? latestVersion;
-  const viewingEarlier = !!shown && shown !== latestVersion;
+    revisions.find((r) => r.eventId === requestedRev) ?? latestRevision;
+  const viewingEarlier = !!shown && shown !== latestRevision;
   const shownCommitShas = shown?.commitShas ?? pr?.commitShas ?? [];
+
+  useEffect(() => {
+    if (pr) requestProfiles([pr.authorPubkey, ...(shown ? [shown.authorPubkey] : [])]);
+  }, [pr, shown, requestProfiles]);
 
   // Use the latest commit SHA for diff view
   const latestCommitSha = shownCommitShas[shownCommitShas.length - 1] ?? null;
@@ -183,6 +188,10 @@ export function PRDetailPage() {
   const shownTitle = shown?.title ?? pr.title;
   const shownContent = shown?.content ?? pr.content;
   const shownDescription = shown ? shown.description : pr.description;
+  const shownBaseBranch = shown?.baseBranch ?? pr.baseBranch;
+  // The opening comment is credited to whoever wrote the revision shown.
+  const shownAuthor = shown?.authorPubkey ?? pr.authorPubkey;
+  const shownCreatedAt = shown?.createdAt ?? pr.createdAt;
 
   return (
     <div className="space-y-4">
@@ -197,26 +206,26 @@ export function PRDetailPage() {
       <p className="text-sm text-muted-foreground">
         <span className="font-medium text-foreground">{authorDisplayName}</span> wants to merge{' '}
         {commitCount} commit{commitCount !== 1 ? 's' : ''} into{' '}
-        <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">{pr.baseBranch}</code>
+        <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">{shownBaseBranch}</code>
       </p>
 
-      {versions.length > 1 && (
+      {revisions.length > 1 && (
         <nav
           aria-label="Patch revisions"
           className="flex flex-wrap items-center gap-2 text-sm"
         >
           <span className="text-muted-foreground">Revisions:</span>
-          {versions.map((v, i) => {
-            const isLatest = v === latestVersion;
+          {revisions.map((r, i) => {
+            const isLatest = r === latestRevision;
             const label = `v${i + 1}${isLatest ? ' (latest)' : ''}`;
-            return v === shown ? (
-              <Badge key={v.eventId} aria-current="true">
+            return r === shown ? (
+              <Badge key={r.eventId} aria-current="true">
                 {label}
               </Badge>
             ) : (
               <Link
-                key={v.eventId}
-                to={isLatest ? '?' : `?rev=${v.eventId}`}
+                key={r.eventId}
+                to={isLatest ? '?' : `?rev=${r.eventId}`}
                 className="underline underline-offset-2 hover:text-primary"
               >
                 {label}
@@ -273,8 +282,8 @@ export function PRDetailPage() {
                 // the raw format-patch text with headers/diffstat/diff
                 // stripped out. The full diff still lives in Files Changed.
                 originalContent={shownDescription ?? stripPatchHeaders(shownContent)}
-                originalAuthor={pr.authorPubkey}
-                originalCreatedAt={pr.createdAt}
+                originalAuthor={shownAuthor}
+                originalCreatedAt={shownCreatedAt}
                 comments={comments}
               />
               <MergeStatusBox pr={pr} />
