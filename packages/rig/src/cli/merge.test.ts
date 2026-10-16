@@ -255,6 +255,7 @@ describe('rig pr merge', () => {
       ...doc.mergedShas,
     ]);
     expect(status.tags).toContainEqual(['e', PATCH_ID, '', 'root']);
+    expect(status.tags).toContainEqual(['r', doc.mergedShas[0]]);
     expect(doc.statusEventId).toBeTruthy();
     // Local branch moved to the merge; working tree has the new file.
     expect(git(fx.dir, 'rev-parse', 'main')).toBe(doc.mergedShas[0]);

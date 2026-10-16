@@ -574,12 +574,13 @@ export function buildStatus(
   }
   if (applied) {
     // NIP-34 applied status: the revision that landed (NIP-10 reply) and the
-    // commits it became.
+    // commits it became, each also as an `r` tag for subscription filters.
     if (applied.revisionEventId && applied.revisionEventId !== targetEventId) {
       tags.push(['e', applied.revisionEventId, '', 'reply']);
     }
     if (applied.commits.length > 0) {
       tags.push(['applied-as-commits', ...applied.commits]);
+      for (const sha of applied.commits) tags.push(['r', sha]);
     }
   }
   return {

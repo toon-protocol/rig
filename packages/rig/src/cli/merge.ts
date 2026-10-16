@@ -250,7 +250,7 @@ async function applyInIsolation(
     const commits = listed === '' ? [] : listed.split('\n');
     if (commits.length === 0) {
       throw new PrMergeError(
-        'apply_conflict',
+        'nothing_to_apply',
         'the patch applied no commits (already merged?) — nothing was ' +
           'pushed, published, or paid.'
       );
