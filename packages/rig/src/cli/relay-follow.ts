@@ -1,7 +1,8 @@
 /**
  * A long-lived relay subscription that survives drops (#235): the live half of
  * `rig inbox --follow`. One call follows one relay — it opens a REQ per filter,
- * hands every EVENT to `onEvent`, and when the connection errors or closes it
+ * hands every EVENT to `onEvent`, relays a NOTICE to `onError` and keeps going,
+ * and when the connection errors or closes, or the relay answers CLOSED, it
  * reports to `onError`, waits a backoff, and reconnects, until `signal` aborts.
  * The backoff resets only once a relay has answered with EOSE, so a relay that
  * accepts and then drops at once still backs off. Filters are rebuilt per
@@ -27,7 +28,7 @@ export interface FollowRelayOptions {
   filters: () => NostrFilter[];
   webSocketFactory: WebSocketFactory;
   onEvent: (event: NostrEvent, url: string) => void;
-  /** A connection problem; the follower keeps going after reporting it. */
+  /** A connection problem or relay NOTICE; the follower keeps going after it. */
   onError: (message: string) => void;
   signal: AbortSignal;
   /** Delay before reconnect attempt `n` (1-based), in ms. */
@@ -104,6 +105,12 @@ function connectOnce(
         ) {
           subscribed = true;
           onSubscribed();
+        } else if (msg[0] === 'CLOSED' && subIds.includes(msg[1] as string)) {
+          const why =
+            typeof msg[2] === 'string' && msg[2] ? msg[2] : 'no reason';
+          finish(`${opts.url} closed the subscription: ${why}`);
+        } else if (msg[0] === 'NOTICE') {
+          opts.onError(`notice from ${opts.url}: ${String(msg[1])}`);
         }
       } catch {
         // Ignore unparseable frames

@@ -110,6 +110,16 @@ export interface PushDeps {
   probeDaemon?: ProbeDaemon;
 }
 
+/** `owner` when it names an identity other than `pubkey`, else undefined. */
+function foreignOwnerOf(
+  owner: string | undefined,
+  pubkey: string
+): string | undefined {
+  return owner && owner.toLowerCase() !== pubkey.toLowerCase()
+    ? owner
+    : undefined;
+}
+
 /**
  * Return deps with the force-standalone override switched on — the
  * `--standalone` / `--no-daemon` per-command flag, equivalent to running with
@@ -582,7 +592,26 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
 
     // ── Paid session (#279): same-identity daemon → delegate; else the
     // standalone context (identity chain + nonce guard).
-    const session = await loadPaidSession(deps, relaysUsed[0]);
+    let session = await loadPaidSession(deps, relaysUsed[0]);
+    // A declared maintainer's push must read the OWNER's honored state, which
+    // the daemon's /git routes cannot (they resolve under the daemon's own
+    // identity). A foreign toon.owner on the daemon path therefore forces
+    // standalone, as `rig pr merge` does; the maintainer check runs below.
+    const daemonForeignOwner =
+      session.path === 'daemon'
+        ? foreignOwnerOf(toonConfig.owner, session.identity.pubkey)
+        : undefined;
+    if (daemonForeignOwner) {
+      io.err(
+        `rig: toon.owner (${daemonForeignOwner.slice(0, 8)}…) is another identity's repo — ` +
+          "running standalone instead of the daemon to read the owner's repo " +
+          'state (the daemon reads only its own).'
+      );
+      session = await loadPaidSession(
+        withForcedStandalone(deps),
+        relaysUsed[0]
+      );
+    }
     const path = session.path;
     let identity: IdentityReport;
     if (session.path === 'standalone') {
@@ -595,11 +624,7 @@ export async function runPush(args: string[], deps: PushDeps): Promise<number> {
     // A declared maintainer pushes into the OWNER's repo (ADR-0005): the
     // honored state is read under toon.owner, and the new kind:30618 is signed
     // by the maintainer. Anyone else keeps publishing under their own namespace.
-    const foreignOwner =
-      toonConfig.owner &&
-      toonConfig.owner.toLowerCase() !== identity.pubkey.toLowerCase()
-        ? toonConfig.owner
-        : undefined;
+    const foreignOwner = foreignOwnerOf(toonConfig.owner, identity.pubkey);
     let maintainerRemote: RemoteState | undefined;
     if (session.path === 'standalone' && foreignOwner) {
       const ownerState = await session.ctx.fetchRemote({

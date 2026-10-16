@@ -33,8 +33,14 @@ import type { SecretInventory } from './secrets.js';
 export interface RepoCursor {
   /** `created_at` of the newest trigger event processed for this repo. */
   lastCreatedAt: number;
-  /** Id of that event (tie-breaker / audit). */
+  /** Id of that event (audit). */
   lastEventId: string;
+  /**
+   * The kind:30618 whose refs `refs` holds: what a newer state must supersede.
+   * Kept apart from `lastCreatedAt`/`lastEventId`, which pull requests also
+   * advance. Absent in cursors written before rig#253.
+   */
+  honoredState?: { created_at: number; id: string };
   /** Ref map (`refname → sha`) of the last kind:30618 seen — push diffs use it. */
   refs: Record<string, string>;
   /** Ids of trigger events already handled (bounded, newest last). */

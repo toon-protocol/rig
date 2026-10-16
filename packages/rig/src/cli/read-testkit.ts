@@ -79,6 +79,23 @@ class FakeRelaySocket implements WebSocketLike {
     });
   }
 
+  /** Send `["CLOSED", subId, reason]` for every open subscription. */
+  closeSubs(reason: string): void {
+    if (this.readyState !== 1) return;
+    for (const subId of [...this.subs.keys()]) {
+      this.subs.delete(subId);
+      this.emit('message', {
+        data: JSON.stringify(['CLOSED', subId, reason]),
+      });
+    }
+  }
+
+  /** Send a `["NOTICE", message]` frame. */
+  notice(message: string): void {
+    if (this.readyState !== 1) return;
+    this.emit('message', { data: JSON.stringify(['NOTICE', message]) });
+  }
+
   /** Push a live event to every subscription whose filter matches. */
   push(event: NostrEvent): void {
     if (this.readyState !== 1) return;
@@ -101,6 +118,10 @@ export interface MockRelay {
   push(event: NostrEvent, url?: string): void;
   /** Drop every open connection (all relays, or just `url`): a `close` event. */
   drop(url?: string): void;
+  /** Answer every open REQ (all relays, or just `url`) with CLOSED + reason. */
+  closeSubs(reason: string, url?: string): void;
+  /** Send a NOTICE frame on open connections (all relays, or just `url`). */
+  notice(message: string, url?: string): void;
   /** Every connection ever opened, in order; `subscribed` = has an open REQ. */
   readonly connections: { url: string; open: boolean; subscribed: boolean }[];
 }
@@ -119,6 +140,12 @@ export function makeMockRelay(
     },
     push: (event, url) => {
       for (const s of sockets) if (!url || s.url === url) s.push(event);
+    },
+    closeSubs: (reason, url) => {
+      for (const s of sockets) if (!url || s.url === url) s.closeSubs(reason);
+    },
+    notice: (message, url) => {
+      for (const s of sockets) if (!url || s.url === url) s.notice(message);
     },
     drop: (url) => {
       for (const s of sockets) if (!url || s.url === url) s.close();
