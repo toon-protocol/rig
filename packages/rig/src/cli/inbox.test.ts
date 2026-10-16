@@ -336,14 +336,15 @@ describe('rig inbox --follow', () => {
   function start(
     w: ReturnType<typeof world>,
     relay: ReturnType<typeof makeMockRelay>,
-    f: ReturnType<typeof followIo>
+    f: ReturnType<typeof followIo>,
+    followBackoffMs: (attempt: number) => number = () => 1
   ) {
     const ctl = new AbortController();
     const run = runInbox(FOLLOW, {
       ...w.deps(f.io),
       webSocketFactory: relay.factory,
       followSignal: ctl.signal,
-      followBackoffMs: () => 1,
+      followBackoffMs,
     });
     return { ctl, run };
   }
@@ -431,6 +432,63 @@ describe('rig inbox --follow', () => {
     ctl.abort();
     expect(await run).toBe(0);
     expect((JSON.parse(f.lines[1] as string) as InboxEntry).id).toBe(LIVE2.id);
+  });
+
+  it('reports a relay CLOSED reason on stderr, reconnects with backoff, and keeps the healthy relay flowing', async () => {
+    const w = world({});
+    const relay = makeMockRelay(handler);
+    const f = followIo();
+    const attempts: number[] = [];
+    const { ctl, run } = start(w, relay, f, (attempt) => {
+      attempts.push(attempt);
+      return 100;
+    });
+    await until(
+      () =>
+        f.lines.length === 1 &&
+        relay.connections.filter((c) => c.subscribed).length >= 2
+    );
+    const before = relay.connections.length;
+    relay.closeSubs('rate-limited: slow down', RELAY_A);
+    await until(() => f.errs.some((e) => /rate-limited: slow down/.test(e)));
+    expect(attempts).toEqual([1]);
+    // RELAY_A is waiting out its backoff; RELAY_B still streams meanwhile.
+    relay.push(LIVE, RELAY_B);
+    await until(() => f.lines.length === 2);
+    expect(relay.connections).toHaveLength(before);
+    await until(() =>
+      relay.connections.some(
+        (c, i) => i >= before && c.url === RELAY_A && c.subscribed
+      )
+    );
+    relay.push(LIVE2, RELAY_A);
+    await until(() => f.lines.length === 3);
+    ctl.abort();
+    expect(await run).toBe(0);
+    expect(f.errs.filter((e) => /closed the subscription/.test(e))).toEqual([
+      expect.stringContaining(RELAY_A),
+    ]);
+  });
+
+  it('reports a NOTICE on stderr and keeps the connection streaming', async () => {
+    const w = world({});
+    const relay = makeMockRelay(handler);
+    const f = followIo();
+    const { ctl, run } = start(w, relay, f);
+    await until(
+      () =>
+        f.lines.length === 1 &&
+        relay.connections.filter((c) => c.subscribed).length >= 2
+    );
+    const before = relay.connections.length;
+    relay.notice('ERROR: bad filter', RELAY_A);
+    await until(() => f.errs.some((e) => /ERROR: bad filter/.test(e)));
+    relay.push(LIVE, RELAY_A);
+    relay.push(LIVE2, RELAY_B);
+    await until(() => f.lines.length === 3);
+    expect(relay.connections).toHaveLength(before);
+    ctl.abort();
+    expect(await run).toBe(0);
   });
 
   it('resumes from the cursor on restart without re-emitting', async () => {
