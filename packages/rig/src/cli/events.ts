@@ -71,6 +71,7 @@ import {
   type GitRepoAddr,
   type GitStatusValue,
 } from '../routes.js';
+import { PR_MERGE_USAGE, runPrMerge } from './merge.js';
 import { type DaemonGitClient, type SessionPath } from './daemon-session.js';
 import { emitCliError, UnconfiguredRepoAddressError } from './errors.js';
 import {
@@ -255,6 +256,8 @@ Options:
 ${COMMON_FLAGS_USAGE}`;
 
 export const PR_USAGE = `${PR_CREATE_USAGE}
+
+${PR_MERGE_USAGE}
 
 ${PR_STATUS_USAGE}
 
@@ -876,6 +879,8 @@ export async function runPr(
   switch (sub) {
     case 'create':
       return runPrCreate(rest, deps);
+    case 'merge':
+      return runPrMerge(rest, deps);
     case 'status':
       return runStatusCommand(rest, deps, PR_STATUS_SPEC);
     // FREE read subcommands (#278): relay queries only, no payment path.
@@ -891,7 +896,7 @@ export async function runPr(
     default:
       io.err(
         sub === undefined
-          ? 'missing subcommand: rig pr <create|status|list|show>'
+          ? 'missing subcommand: rig pr <create|merge|status|list|show>'
           : `unknown rig pr subcommand: ${sub}`
       );
       io.err(PR_USAGE);

@@ -135,6 +135,29 @@ export class NotAGitRepositoryError extends Error {
   }
 }
 
+/** Stable machine codes of `rig pr merge` failures. */
+export type PrMergeErrorCode =
+  | 'not_authorized'
+  | 'patch_not_found'
+  | 'target_not_found'
+  | 'tip_unavailable'
+  | 'local_branch_diverged'
+  | 'apply_conflict';
+
+/**
+ * `rig pr merge` refused or failed BEFORE anything was spent. `code` is the
+ * stable `--json` error code.
+ */
+export class PrMergeError extends Error {
+  constructor(
+    public readonly code: PrMergeErrorCode,
+    message: string
+  ) {
+    super(message);
+    this.name = 'PrMergeError';
+  }
+}
+
 function nonFastForwardLines(refs: RejectedRefUpdate[]): string[] {
   return [
     'Push rejected: non-fast-forward update for:',
@@ -219,6 +242,13 @@ export function describeError(err: unknown, command = 'push'): DescribedError {
       code: 'missing_identity',
       lines: err.message.split('\n'),
       json: { error: 'missing_identity', detail: err.message },
+    };
+  }
+  if (err instanceof PrMergeError) {
+    return {
+      code: err.code,
+      lines: err.message.split('\n'),
+      json: { error: err.code, detail: err.message },
     };
   }
   if (err instanceof NonFastForwardError) {

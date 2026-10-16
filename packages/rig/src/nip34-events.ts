@@ -529,6 +529,14 @@ export type StatusKind =
   | typeof STATUS_CLOSED_KIND
   | typeof STATUS_DRAFT_KIND;
 
+/** What an applied (kind:1631) status records about the merge. */
+export interface AppliedStatusDetail {
+  /** Commit SHAs the patch landed as, oldest first (`applied-as-commits`). */
+  commits: string[];
+  /** The merged patch revision (an `e` reply tag), when not the root. */
+  revisionEventId?: string;
+}
+
 /**
  * Build a status event (kind 1630-1633).
  *
@@ -547,13 +555,15 @@ export type StatusKind =
  * @param targetEventId - Event ID of the patch, PR, or issue being updated
  * @param statusKind - One of 1630 (open), 1631 (applied), 1632 (closed), 1633 (draft)
  * @param targetPubkey - Optional pubkey of the target event author (p tag per NIP-34 StatusEvent), when known
+ * @param applied - For kind:1631: the merged revision and the commit SHAs it landed as
  */
 export function buildStatus(
   repoOwnerPubkey: string,
   repoId: string,
   targetEventId: string,
   statusKind: StatusKind,
-  targetPubkey?: string
+  targetPubkey?: string,
+  applied?: AppliedStatusDetail
 ): UnsignedEvent {
   const tags: string[][] = [
     ['e', targetEventId, '', 'root'],
@@ -561,6 +571,16 @@ export function buildStatus(
   ];
   if (targetPubkey) {
     tags.push(['p', targetPubkey]);
+  }
+  if (applied) {
+    // NIP-34 applied status: the revision that landed (NIP-10 reply) and the
+    // commits it became.
+    if (applied.revisionEventId && applied.revisionEventId !== targetEventId) {
+      tags.push(['e', applied.revisionEventId, '', 'reply']);
+    }
+    if (applied.commits.length > 0) {
+      tags.push(['applied-as-commits', ...applied.commits]);
+    }
   }
   return {
     kind: statusKind,
