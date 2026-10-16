@@ -52,6 +52,8 @@ export {
   honoredRepoState,
   type AuthorityEvent,
 } from './repo-authority.js';
+/** @deprecated Renamed to {@link authorizedAuthors} (ADR-0005). */
+export { authorizedAuthors as authorizedStatusAuthors } from './repo-authority.js';
 
 export {
   amendRepoAnnouncement,

@@ -48,6 +48,10 @@ import type { StandaloneContext } from './standalone-context.js';
 
 const HEX64_RE = /^[0-9a-f]{64}$/;
 
+/** Printed by add/remove: a maintainer's repo state is honored (ADR-0005). */
+export const REF_AUTHORITY_NOTICE =
+  'Note: maintainers can move refs (publish honored repo state), not only set status.';
+
 export const MAINTAINERS_USAGE = `Usage: rig maintainers <list|add|remove> [<pubkey>] [options]
 
 Manage a repo's declared maintainers (#287). Status authority is consumer-side:
@@ -302,9 +306,7 @@ async function runMutate(
         io.out('Tags changed:');
         for (const line of describeAnnouncementDiff(diff)) io.out(line);
       }
-      io.out(
-        'Note: maintainers can move refs (publish honored repo state), not only set status.'
-      );
+      io.out(REF_AUTHORITY_NOTICE);
       io.out(`Fee: ${feeLabel(fee)}. Writes are permanent and non-refundable.`);
     }
     if (!flags.yes) {
@@ -358,9 +360,7 @@ async function runMutate(
       io.out(
         `Published ${action}: ${result.eventId}  paid ${result.feePaid} base units`
       );
-      io.out(
-        'Note: maintainers can move refs (publish honored repo state), not only set status.'
-      );
+      io.out(REF_AUTHORITY_NOTICE);
     }
     return 0;
   } catch (err) {

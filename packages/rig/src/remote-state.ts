@@ -331,7 +331,10 @@ export function queryRelay(
  * lowest id (NIP-01 replaceable-event convention).
  */
 function latestReplaceable(events: NostrEvent[]): NostrEvent | null {
-  return honoredRepoState(new Set(events.map((e) => e.pubkey)), events);
+  return honoredRepoState(
+    new Set(events.map((e) => e.pubkey.toLowerCase())),
+    events
+  );
 }
 
 /** Get the first value for a tag name. */

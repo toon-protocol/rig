@@ -1584,12 +1584,14 @@ export async function startCoordinator(
         return;
       }
       case REPOSITORY_STATE_KIND: {
+        // Honored repo state (ADR-0005): the owner's or a declared
+        // maintainer's 30618 moves refs; a stranger's is ignored.
         const repoId = tagValues(ev.tags, 'd')[0];
-        const repo = repoId
-          ? repos.get(repoAddress(ev.pubkey, repoId))
-          : undefined;
-        if (repo && ev.pubkey.toLowerCase() === repo.ownerPubkey)
-          await handleRepoState(repo, ev);
+        const author = ev.pubkey.toLowerCase();
+        for (const repo of repos.values()) {
+          if (repo.repoId === repoId && repo.authorized.has(author))
+            await handleRepoState(repo, ev);
+        }
         return;
       }
       case 1617:
@@ -1644,10 +1646,14 @@ export async function startCoordinator(
   const sinceFor: ((() => number | undefined) | null)[] = [null];
   for (const repo of repos.values()) {
     filters.push({
-      kinds: [REPOSITORY_ANNOUNCEMENT_KIND, REPOSITORY_STATE_KIND],
+      kinds: [REPOSITORY_ANNOUNCEMENT_KIND],
       authors: [repo.ownerPubkey],
       '#d': [repo.repoId],
     });
+    sinceFor.push(null);
+    // No `authors`: the maintainer set can change while serving, so repo
+    // state is filtered against `repo.authorized` in `handleEvent`.
+    filters.push({ kinds: [REPOSITORY_STATE_KIND], '#d': [repo.repoId] });
     sinceFor.push(null);
     filters.push({ kinds: [1617, 1618, 1619], '#a': [repo.addr] });
     sinceFor.push(() => repo.cursor?.lastCreatedAt);
