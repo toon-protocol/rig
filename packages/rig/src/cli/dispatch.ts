@@ -85,6 +85,8 @@ Commands rig owns:
   site url [ref]             print the last-published site URL for a ref (free)
   issue create               file an issue (kind:1621) against a repo
   issue list | show <id>     read the repo's issues + comments (free)
+  issue status <id> <open|closed>  set an issue's status (kind:1630/1632);
+                             close | reopen <id> are shortcuts
   pr list | show <id>        read the repo's patches; show prints the full
                              patch text (free)
   comment <target-event-id>  comment (NIP-22 kind:1111) on an issue or patch,
@@ -153,7 +155,8 @@ Any other command is passed through to git verbatim: \`rig status\` runs
 Run \`rig <command> --help\` for a rig command's flags. \`rig init\`,
 \`rig remote\`, \`rig clone\`, \`rig fetch\`, \`rig issue list/show\`,
 \`rig pr list/show\`, \`rig fund\`, \`rig balance\`, and \`rig channel list\`
-are free; push/issue create/comment/pr create/pr status are paid writes —
+are free; push/issue create/issue status/close/reopen/comment/pr create/pr
+status are paid writes —
 permanent and non-refundable —
 and channel open/close/settle are on-chain wallet transactions; each states
 what it will spend and asks for confirmation before doing so (--yes skips,
