@@ -5,6 +5,10 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': resolve(import.meta.dirname, 'src/web'),
+      '@toon-protocol/rig/repo-authority': resolve(
+        import.meta.dirname,
+        '../rig/src/repo-authority.ts'
+      ),
     },
   },
   test: {

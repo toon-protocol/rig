@@ -36,6 +36,10 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': resolve(import.meta.dirname, 'src/web'),
+      '@toon-protocol/rig/repo-authority': resolve(
+        import.meta.dirname,
+        '../rig/src/repo-authority.ts'
+      ),
     },
   },
   build: {
@@ -51,7 +55,9 @@ export default defineConfig({
         // dependency gzips anywhere near the cap once separated — leaving
         // only app code in the entry chunk (README "Deploying").
         manualChunks(id: string) {
-          const m = id.match(/node_modules\/(?:\.pnpm\/[^/]+\/node_modules\/)?((?:@[^/]+\/)?[^/]+)/);
+          const m = id.match(
+            /node_modules\/(?:\.pnpm\/[^/]+\/node_modules\/)?((?:@[^/]+\/)?[^/]+)/
+          );
           if (!m) return undefined; // app code → entry/dynamic chunks
           const pkg = (m[1] as string).replace(/^@/, '').replace('/', '-');
           // shiki keeps its own per-language dynamic chunks.

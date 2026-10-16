@@ -5,6 +5,8 @@
  * Maps Nostr pubkeys to git author identities and checks maintainer authorization.
  */
 
+import { authorizedAuthors } from '@toon-protocol/rig/repo-authority';
+
 export interface AuthorizationResult {
   authorized: boolean;
   rejectCode?: string;
@@ -31,10 +33,17 @@ export interface PubkeyProfile {
  * kind:30617 repository announcement event.
  */
 export function checkMaintainerAuthorization(
-  _pubkey: string,
-  _repoEvent: unknown
+  pubkey: string,
+  repoEvent: { pubkey: string; tags: string[][] }
 ): AuthorizationResult {
-  throw new Error('checkMaintainerAuthorization is not yet implemented');
+  const authorized = authorizedAuthors(repoEvent.pubkey, repoEvent.tags);
+  if (authorized.has(pubkey.toLowerCase())) return { authorized: true };
+  return {
+    authorized: false,
+    rejectCode: 'F06',
+    rejectMessage:
+      'Unauthorized: pubkey is not a maintainer of this repository',
+  };
 }
 
 /**

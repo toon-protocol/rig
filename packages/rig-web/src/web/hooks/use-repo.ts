@@ -2,7 +2,12 @@ import { useMemo } from 'react';
 import { useRigConfig } from './use-rig-config.js';
 import { useRelay } from './use-relay.js';
 import { npubToHex } from '../npub.js';
-import { parseRepoAnnouncement, parseRepoRefs } from '../nip34-parsers.js';
+import {
+  parseHonoredRepoRefs,
+  parseRepoAnnouncement,
+  repoAuthorizedAuthors,
+} from '../nip34-parsers.js';
+import { buildRepoRefsFilter } from '../relay-client.js';
 import type { RepoMetadata, RepoRefs, NostrFilter } from '../nip34-parsers.js';
 
 interface UseRepoResult {
@@ -28,22 +33,11 @@ export function useRepo(owner: string, repo: string): UseRepoResult {
     return { kinds: [30617], authors: [ownerHex], '#d': [repo] };
   }, [ownerHex, repo]);
 
-  const refsFilter = useMemo<NostrFilter | null>(() => {
-    if (!ownerHex) return null;
-    return { kinds: [30618], authors: [ownerHex], '#d': [repo] };
-  }, [ownerHex, repo]);
-
   const {
     events: repoEvents,
     loading: repoLoading,
     error: repoError,
   } = useRelay(relayUrl, repoFilter);
-
-  const {
-    events: refsEvents,
-    loading: refsLoading,
-    error: refsError,
-  } = useRelay(relayUrl, refsFilter);
 
   const metadata = useMemo(() => {
     if (repoEvents.length === 0) return null;
@@ -51,16 +45,38 @@ export function useRepo(owner: string, repo: string): UseRepoResult {
     return first ? (parseRepoAnnouncement(first) ?? null) : null;
   }, [repoEvents]);
 
-  const refs = useMemo(() => {
-    if (refsEvents.length === 0) return null;
-    const first = refsEvents[0];
-    return first ? (parseRepoRefs(first) ?? null) : null;
-  }, [refsEvents]);
+  // Refs come from the authorized authors (owner + the owner's announced
+  // maintainers, ADR-0005), so the owner's announcement is fetched first.
+  const authorized = useMemo(() => {
+    if (!ownerHex) return null;
+    const owned =
+      metadata && metadata.ownerPubkey.toLowerCase() === ownerHex.toLowerCase();
+    return owned
+      ? repoAuthorizedAuthors(metadata)
+      : new Set([ownerHex.toLowerCase()]);
+  }, [ownerHex, metadata]);
+
+  const refsFilter = useMemo<NostrFilter | null>(() => {
+    if (!authorized || repoLoading) return null;
+    return buildRepoRefsFilter([...authorized].sort(), repo);
+  }, [authorized, repoLoading, repo]);
+
+  const {
+    events: refsEvents,
+    loading: refsLoading,
+    error: refsError,
+  } = useRelay(relayUrl, refsFilter);
+
+  const refs = useMemo(
+    () =>
+      authorized ? parseHonoredRepoRefs(refsEvents, authorized, repo) : null,
+    [refsEvents, authorized, repo]
+  );
 
   return {
     metadata,
     refs,
-    loading: repoLoading || refsLoading,
+    loading: repoLoading || refsLoading || (!!ownerHex && !refsFilter),
     error: repoError || refsError,
   };
 }

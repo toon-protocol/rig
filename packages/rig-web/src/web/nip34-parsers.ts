@@ -24,6 +24,11 @@
  * this file's actual parsers are the ground truth.
  */
 
+import {
+  authorizedAuthors,
+  honoredRepoState,
+} from '@toon-protocol/rig/repo-authority';
+
 // -------------------------------------------------------------------------
 // Nostr primitives (inlined from views' `types.ts` — see header)
 // -------------------------------------------------------------------------
@@ -60,7 +65,10 @@ export interface NostrFilter {
 }
 
 /** Get the first value for a tag name. */
-export function getTagValue(tags: string[][], name: string): string | undefined {
+export function getTagValue(
+  tags: string[][],
+  name: string
+): string | undefined {
   const tag = tags.find((t) => t[0] === name);
   return tag?.[1];
 }
@@ -139,7 +147,9 @@ function parseMaintainerTags(tags: string[][]): string[] {
  * Feed this to {@link resolvePRStatus} / {@link resolveIssueStatus}.
  */
 export function repoAuthorizedAuthors(repo: RepoMetadata): Set<string> {
-  return new Set([repo.ownerPubkey.toLowerCase(), ...repo.maintainers]);
+  return authorizedAuthors(repo.ownerPubkey, [
+    [MAINTAINERS_TAG, ...repo.maintainers],
+  ]);
 }
 
 /**
@@ -272,6 +282,23 @@ export function parseRepoRefs(event: NostrEvent): RepoRefs | null {
   return { repoId: dTag, refs: mergeRefShapes(nip, legacy), arweaveMap };
 }
 
+/**
+ * The refs the web shows (ADR-0005): the newest kind:30618 for `repoId` signed
+ * by an authorized author, via the same pure rule the CLI uses. A stranger's
+ * state is ignored however new. `null` when none qualifies.
+ */
+export function parseHonoredRepoRefs(
+  events: readonly NostrEvent[],
+  authorized: ReadonlySet<string>,
+  repoId: string
+): RepoRefs | null {
+  const candidates = events.filter(
+    (e) => e.kind === 30618 && getTagValue(e.tags, 'd') === repoId
+  );
+  const winner = honoredRepoState(authorized, candidates);
+  return winner ? parseRepoRefs(winner) : null;
+}
+
 /** Parse a kind:30617 repository announcement event into RepoMetadata. */
 export function parseRepoAnnouncement(event: NostrEvent): RepoMetadata | null {
   if (event.kind !== 30617) return null;
@@ -282,7 +309,9 @@ export function parseRepoAnnouncement(event: NostrEvent): RepoMetadata | null {
   const name = getTagValue(event.tags, 'name') ?? dTag;
   const description = getTagValue(event.tags, 'description') ?? event.content;
 
-  const refTag = event.tags.find((t) => t[0] === 'r' && t[1] === 'HEAD' && t[2]);
+  const refTag = event.tags.find(
+    (t) => t[0] === 'r' && t[1] === 'HEAD' && t[2]
+  );
   const defaultBranch = refTag?.[2] ?? 'main';
 
   const cloneUrls = getTagValues(event.tags, 'clone');
@@ -607,12 +636,13 @@ export function commentBelongsToThread(
 }
 
 /** kind:1630-1633 → the PR status each one sets. */
-const KIND_STATUS_MAP: Record<number, 'open' | 'applied' | 'closed' | 'draft'> = {
-  1630: 'open',
-  1631: 'applied',
-  1632: 'closed',
-  1633: 'draft',
-};
+const KIND_STATUS_MAP: Record<number, 'open' | 'applied' | 'closed' | 'draft'> =
+  {
+    1630: 'open',
+    1631: 'applied',
+    1632: 'closed',
+    1633: 'draft',
+  };
 
 /**
  * Resolve the status of a PR from status events (kind:1630-1633), honoring
@@ -641,7 +671,10 @@ export function resolvePRStatus(
   const latest = latestAuthorizedEvent(
     statusEvents,
     authorized,
-    (evt) => evt.kind >= 1630 && evt.kind <= 1633 && getTagValue(evt.tags, 'e') === prEventId
+    (evt) =>
+      evt.kind >= 1630 &&
+      evt.kind <= 1633 &&
+      getTagValue(evt.tags, 'e') === prEventId
   );
   if (latest === null) return 'open';
   return KIND_STATUS_MAP[latest.kind] ?? 'open';
