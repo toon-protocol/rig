@@ -333,16 +333,26 @@ export function resolveConnectorSettings(args: {
 // ---------------------------------------------------------------------------
 
 /**
- * The store route a node offers, when the caller named none: its first priced
- * route spelled `*.store`, else `*.ario` (the AR.IO-backed store this
- * repository has always uploaded to), else nothing.
+ * The store route a node offers, when the caller named none: a priced `*.store`
+ * route the node TERMINATES itself (one of its own `ilpAddresses`), else its
+ * first priced route spelled `*.store`, else `*.ario` (the AR.IO-backed store
+ * this repository has always uploaded to), else nothing.
+ *
+ * Own-address first because a node that fronts several apps publishes both:
+ * devnet's one connector (2026-10-16) terminates `g.toon.store` and still
+ * prices the relay's old forwarded spelling `g.toon.relay.store`, which on a
+ * single connector is a route it serves to itself. A node that only forwards
+ * to a store (no own `*.store`) gets the forwarded route exactly as before.
  */
 export function defaultStoreDestinationFor(
   desc: NodeSelfDescription
 ): string | undefined {
   const prefixes = desc.routes.map((r) => r.prefix);
+  const isStore = (p: string) => p === 'store' || p.endsWith('.store');
+  const own = new Set(desc.ilpAddresses);
   return (
-    prefixes.find((p) => p === 'store' || p.endsWith('.store')) ??
+    prefixes.find((p) => isStore(p) && own.has(p)) ??
+    prefixes.find(isStore) ??
     prefixes.find((p) => p === 'ario' || p.endsWith('.ario')) ??
     prefixes.find((p) => /store/i.test(p))
   );

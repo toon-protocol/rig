@@ -52,7 +52,7 @@ VITE_ARWEAVE_GATEWAY=http://localhost:3000 \
 
 ```bash
 # From the repo root (workspace deps must be built first):
-VITE_DEFAULT_RELAY=wss://relay-ws.devnet.toonprotocol.dev \
+VITE_DEFAULT_RELAY=wss://relay.toonprotocol.dev \
   pnpm --filter @toon-protocol/rig-web... build
 ```
 
@@ -84,7 +84,7 @@ The target model: upload every `dist/` file as an Arweave data item, then upload
 mapping paths → txids with `index: index.html`, so one URL serves the whole app:
 
 ```
-https://permagate.io/<manifest-txid>/#relay=wss://relay-ws.devnet.toonprotocol.dev
+https://permagate.io/<manifest-txid>/#relay=wss://relay.toonprotocol.dev
 ```
 
 Two things block this today (as of 2026-07):
@@ -129,7 +129,7 @@ Result — stable, human-readable, gateway-agnostic; the `#relay=` fragment (see
 with no rebuild:
 
 ```
-https://<name>.<any ar.io gateway>/#relay=wss://relay-ws.devnet.toonprotocol.dev
+https://<name>.<any ar.io gateway>/#relay=wss://relay.toonprotocol.dev
 ```
 
 Config (env): `RIG_ARNS_NAME` (enables the step), `RIG_ARNS_TYPE` (`lease`|`permabuy`),

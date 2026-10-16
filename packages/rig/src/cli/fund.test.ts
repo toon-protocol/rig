@@ -16,7 +16,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEVNET_FAUCET_URL, FUND_USAGE, runFund, type FundDeps } from './fund.js';
+import {
+  DEVNET_FAUCET_URL,
+  FUND_USAGE,
+  runFund,
+  sharedDevnetOrigin,
+  type FundDeps,
+} from './fund.js';
 import type { CliIo } from './push.js';
 
 /** Standard BIP-39 test vector phrase — deterministic addresses. */
@@ -84,7 +90,8 @@ function makeHarness(
     }
     const override = options.respond?.(String(url));
     const status = override?.status ?? options.status ?? 200;
-    const body = override?.body ?? options.body ?? JSON.stringify({ success: true });
+    const body =
+      override?.body ?? options.body ?? JSON.stringify({ success: true });
     return new Response(body, { status });
   }) as unknown as typeof fetch;
   return {
@@ -193,7 +200,10 @@ describe('rig fund', () => {
     const h = makeHarness(baseEnv(), cwd);
     expect(await runFund(['--chain', 'all', '--json'], h.deps)).toBe(0);
     expect(h.fetchCalls).toHaveLength(2);
-    expect(parseJson(h).results?.map((r) => r.chain)).toEqual(['evm', 'solana']);
+    expect(parseJson(h).results?.map((r) => r.chain)).toEqual([
+      'evm',
+      'solana',
+    ]);
   });
 
   it('the drips run in PARALLEL, not serially (both dispatched before any resolves)', async () => {
@@ -212,7 +222,10 @@ describe('rig fund', () => {
     const h = makeHarness(baseEnv(), cwd);
     expect(await runFund(['--json'], h.deps)).toBe(0);
     expect(h.fetchCalls).toHaveLength(2);
-    expect(parseJson(h).results?.map((r) => r.chain)).toEqual(['evm', 'solana']);
+    expect(parseJson(h).results?.map((r) => r.chain)).toEqual([
+      'evm',
+      'solana',
+    ]);
   });
 
   // ── Independent per-chain failure (the parallel-results contract) ──────────
@@ -222,7 +235,9 @@ describe('rig fund', () => {
     const h = makeHarness(baseEnv(), cwd, {
       // Solana faucet is dry; evm succeeds.
       respond: (url) =>
-        url.includes(SOLANA_PATH) ? { status: 503, body: 'faucet dry' } : undefined,
+        url.includes(SOLANA_PATH)
+          ? { status: 503, body: 'faucet dry' }
+          : undefined,
     });
     expect(await runFund(['--json'], h.deps)).toBe(1);
 
@@ -242,14 +257,18 @@ describe('rig fund', () => {
     writeConfig({ network: 'devnet' });
     const h = makeHarness(baseEnv(), cwd, {
       respond: (url) =>
-        url.includes(SOLANA_PATH) ? { status: 503, body: 'faucet dry' } : undefined,
+        url.includes(SOLANA_PATH)
+          ? { status: 503, body: 'faucet dry' }
+          : undefined,
     });
     expect(await runFund([], h.deps)).toBe(1);
     const text = h.out.join('\n');
     // Every chain's funded/attempted ADDRESS is echoed (the #312 review fix —
     // human output must confirm WHERE funds went, not just the coin type).
     expect(text).toMatch(/evm\s+✓ funded \(USDC\) → 0x[0-9a-fA-F]{40}/);
-    expect(text).toMatch(/solana\s+✗ → [1-9A-HJ-NP-Za-km-z]+ — .*(503|faucet dry)/);
+    expect(text).toMatch(
+      /solana\s+✗ → [1-9A-HJ-NP-Za-km-z]+ — .*(503|faucet dry)/
+    );
   });
 
   // ── Single-chain targeting (preserved) ────────────────────────────────────
@@ -292,7 +311,10 @@ describe('rig fund', () => {
     writeConfig({ network: 'devnet' });
     const h = makeHarness(baseEnv(), cwd);
     expect(
-      await runFund(['--chain', 'evm', '--address', '0x' + 'ab'.repeat(20)], h.deps)
+      await runFund(
+        ['--chain', 'evm', '--address', '0x' + 'ab'.repeat(20)],
+        h.deps
+      )
     ).toBe(0);
     expect(h.fetchCalls).toHaveLength(1);
     const body = JSON.parse(String(h.fetchCalls[0]?.init?.body)) as {
@@ -303,9 +325,13 @@ describe('rig fund', () => {
 
   it('--address without an explicit single --chain is a usage error (exit 2)', async () => {
     const h = makeHarness(baseEnv(), cwd);
-    expect(await runFund(['--address', '0x' + 'ab'.repeat(20)], h.deps)).toBe(2);
+    expect(await runFund(['--address', '0x' + 'ab'.repeat(20)], h.deps)).toBe(
+      2
+    );
     expect(h.fetchCalls).toEqual([]);
-    expect(h.err.join('\n')).toMatch(/--address requires an explicit single chain/);
+    expect(h.err.join('\n')).toMatch(
+      /--address requires an explicit single chain/
+    );
   });
 
   // ── Faucet-URL resolution ─────────────────────────────────────────────────
@@ -318,9 +344,9 @@ describe('rig fund', () => {
     );
     expect(await runFund([], h.deps)).toBe(0);
     expect(h.fetchCalls).toHaveLength(2);
-    expect(h.fetchCalls.every((c) => c.url.startsWith('https://faucet.example/'))).toBe(
-      true
-    );
+    expect(
+      h.fetchCalls.every((c) => c.url.startsWith('https://faucet.example/'))
+    ).toBe(true);
     expect(h.fetchCalls[0]?.url).toBe(`https://faucet.example${EVM_PATH}`);
     expect(h.out.join('\n')).toMatch(/✓ funded/);
   });
@@ -375,10 +401,10 @@ describe('rig fund', () => {
     expect(text).toMatch(/self-hosted[^.]*TOON_CLIENT_FAUCET_URL/);
   });
 
-  it('a *.devnet.toonprotocol.dev relay on a "custom" network infers devnet and drips (#288)', async () => {
+  it('the devnet relay on a "custom" network infers devnet and drips (#288)', async () => {
     writeConfig({
       network: 'custom',
-      relayUrl: 'wss://relay-ws.devnet.toonprotocol.dev',
+      relayUrl: 'wss://relay.toonprotocol.dev',
     });
     const h = makeHarness(baseEnv(), cwd);
     expect(await runFund(['--json'], h.deps)).toBe(0);
@@ -389,7 +415,7 @@ describe('rig fund', () => {
     expect(parsed.funded).toBe(true);
     expect(parsed.network).toBe('devnet');
     expect(parsed.faucetUrl).toBe(DEVNET_FAUCET_URL);
-    expect(parsed.inferredDevnetFrom).toBe('wss://relay-ws.devnet.toonprotocol.dev');
+    expect(parsed.inferredDevnetFrom).toBe('wss://relay.toonprotocol.dev');
   });
 
   it('a devnet-looking TOON_CLIENT_PROXY_URL env override infers devnet too (#288)', async () => {
@@ -405,7 +431,9 @@ describe('rig fund', () => {
     expect(h.fetchCalls).toHaveLength(2);
     expect(h.fetchCalls[0]?.url).toBe(`${DEVNET_FAUCET_URL}${EVM_PATH}`);
     const text = h.out.join('\n');
-    expect(text).toContain("Inferred network 'devnet' from the configured origin");
+    expect(text).toContain(
+      "Inferred network 'devnet' from the configured origin"
+    );
     expect(text).toContain('https://apex.devnet.toonprotocol.dev');
   });
 
@@ -414,7 +442,7 @@ describe('rig fund', () => {
     // devnet and silently drip from the wrong faucet.
     writeConfig({
       network: 'testnet',
-      relayUrl: 'wss://relay-ws.devnet.toonprotocol.dev',
+      relayUrl: 'wss://relay.toonprotocol.dev',
     });
     const h = makeHarness(baseEnv(), cwd);
     expect(await runFund(['--json'], h.deps)).toBe(0);
@@ -440,7 +468,7 @@ describe('rig fund', () => {
 
   it('a devnet git origin remote infers devnet and drips — no env var, no config network (#288)', async () => {
     writeConfig({}); // fresh config → network defaults to "custom"; no env relay
-    gitOrigin('wss://relay-ws.devnet.toonprotocol.dev');
+    gitOrigin('wss://relay.toonprotocol.dev');
     const h = makeHarness(baseEnv(), cwd);
     expect(await runFund(['--json'], h.deps)).toBe(0);
     // The devnet origin alone drove drips from the deployed devnet faucet.
@@ -450,26 +478,29 @@ describe('rig fund', () => {
     expect(parsed.funded).toBe(true);
     expect(parsed.network).toBe('devnet');
     expect(parsed.faucetUrl).toBe(DEVNET_FAUCET_URL);
-    expect(parsed.inferredDevnetFrom).toBe(
-      'wss://relay-ws.devnet.toonprotocol.dev'
-    );
+    expect(parsed.inferredDevnetFrom).toBe('wss://relay.toonprotocol.dev');
   });
 
   it('a devnet git origin: human output announces the inference (#288)', async () => {
     writeConfig({});
-    gitOrigin('wss://relay-ws.devnet.toonprotocol.dev');
+    gitOrigin('wss://relay.toonprotocol.dev');
     const h = makeHarness(baseEnv(), cwd);
     expect(await runFund([], h.deps)).toBe(0);
     const text = h.out.join('\n');
-    expect(text).toContain("Inferred network 'devnet' from the configured origin");
-    expect(text).toContain('wss://relay-ws.devnet.toonprotocol.dev');
+    expect(text).toContain(
+      "Inferred network 'devnet' from the configured origin"
+    );
+    expect(text).toContain('wss://relay.toonprotocol.dev');
     expect(text).toMatch(/✓ funded/);
   });
 
   it('explicit TOON_CLIENT_NETWORK=testnet is authoritative over a devnet git origin (#288)', async () => {
     writeConfig({});
-    gitOrigin('wss://relay-ws.devnet.toonprotocol.dev');
-    const h = makeHarness({ ...baseEnv(), TOON_CLIENT_NETWORK: 'testnet' }, cwd);
+    gitOrigin('wss://relay.toonprotocol.dev');
+    const h = makeHarness(
+      { ...baseEnv(), TOON_CLIENT_NETWORK: 'testnet' },
+      cwd
+    );
     expect(await runFund(['--json'], h.deps)).toBe(0);
     expect(h.fetchCalls).toEqual([]);
     const parsed = parseJson(h);
@@ -516,20 +547,26 @@ describe('rig fund', () => {
 
   it('an injected seed is still honoured by the seam (devnet URL infers devnet)', async () => {
     const h = makeHarness(baseEnv(), cwd, {
-      genesisSeed: async () => ({ relayUrl: 'wss://relay-ws.devnet.toonprotocol.dev' }),
+      genesisSeed: async () => ({ relayUrl: 'wss://relay.toonprotocol.dev' }),
     });
     expect(await runFund(['--json'], h.deps)).toBe(0);
     expect(h.fetchCalls).toHaveLength(2);
     expect(parseJson(h).inferredDevnetFrom).toBe(
-      'wss://relay-ws.devnet.toonprotocol.dev (genesis seed)'
+      'wss://relay.toonprotocol.dev (genesis seed)'
     );
   });
 
   it('explicit TOON_CLIENT_NETWORK=testnet beats any seed', async () => {
-    const seed = vi.fn(async () => ({ relayUrl: 'wss://relay-ws.devnet.toonprotocol.dev' }));
-    const h = makeHarness({ ...baseEnv(), TOON_CLIENT_NETWORK: 'testnet' }, cwd, {
-      genesisSeed: seed,
-    });
+    const seed = vi.fn(async () => ({
+      relayUrl: 'wss://relay.toonprotocol.dev',
+    }));
+    const h = makeHarness(
+      { ...baseEnv(), TOON_CLIENT_NETWORK: 'testnet' },
+      cwd,
+      {
+        genesisSeed: seed,
+      }
+    );
     expect(await runFund(['--json'], h.deps)).toBe(0);
     expect(h.fetchCalls).toEqual([]);
     expect(seed).not.toHaveBeenCalled();
@@ -540,7 +577,10 @@ describe('rig fund', () => {
 
   it('a single --chain non-2xx faucet response is a per-chain failure (exit 1)', async () => {
     writeConfig({ network: 'devnet' });
-    const h = makeHarness(baseEnv(), cwd, { status: 500, body: 'treasury empty' });
+    const h = makeHarness(baseEnv(), cwd, {
+      status: 500,
+      body: 'treasury empty',
+    });
     expect(await runFund(['--chain', 'evm', '--json'], h.deps)).toBe(1);
     const parsed = parseJson(h);
     expect(parsed.command).toBe('fund');
@@ -618,5 +658,43 @@ describe('rig fund', () => {
     const h = makeHarness({}, cwd);
     expect(await runFund(['--help'], h.deps)).toBe(0);
     expect(h.out.join('\n')).toBe(FUND_USAGE);
+  });
+});
+
+describe('sharedDevnetOrigin: which hosts are the shared devnet', () => {
+  it("recognises the consolidated devnet's connector and relay (2026-10-16)", () => {
+    expect(
+      sharedDevnetOrigin(
+        { TOON_CLIENT_PROXY_URL: 'https://toonprotocol.dev/ilp' },
+        {}
+      )
+    ).toBe('https://toonprotocol.dev/ilp');
+    expect(
+      sharedDevnetOrigin(
+        { TOON_CLIENT_BTP_URL: 'wss://toonprotocol.dev/ilp/btp' },
+        {}
+      )
+    ).toBe('wss://toonprotocol.dev/ilp/btp');
+    expect(sharedDevnetOrigin({}, {}, ['wss://relay.toonprotocol.dev'])).toBe(
+      'wss://relay.toonprotocol.dev'
+    );
+  });
+
+  it('still recognises a *.devnet.toonprotocol.dev edge', () => {
+    expect(
+      sharedDevnetOrigin(
+        {},
+        { relayUrl: 'wss://relay-ws.devnet.toonprotocol.dev' }
+      )
+    ).toBe('wss://relay-ws.devnet.toonprotocol.dev');
+  });
+
+  it('does not treat any other toonprotocol.dev name as devnet', () => {
+    expect(
+      sharedDevnetOrigin({}, { relayUrl: 'wss://mainnet.toonprotocol.dev' })
+    ).toBeUndefined();
+    expect(
+      sharedDevnetOrigin({}, { relayUrl: 'wss://nottoonprotocol.dev' })
+    ).toBeUndefined();
   });
 });

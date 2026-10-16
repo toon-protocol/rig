@@ -190,6 +190,33 @@ describe('resolveDestinations', () => {
     expect(defaultStoreDestinationFor(desc(['g.x.relay']))).toBeUndefined();
   });
 
+  it('prefers a store the node terminates over a forwarded spelling of one', () => {
+    // Devnet's one connector (2026-10-16): it terminates g.toon.store and
+    // still prices g.toon.relay.store, which sorts first in its routes.
+    const routes = [
+      'g.toon.echo',
+      'g.toon.gas',
+      'g.toon.relay',
+      'g.toon.relay.store',
+      'g.toon.store',
+    ];
+    const addresses = [
+      'g.toon.relay',
+      'g.toon.store',
+      'g.toon.gas',
+      'g.toon.echo',
+    ];
+    expect(defaultStoreDestinationFor(desc(routes, addresses))).toBe(
+      'g.toon.store'
+    );
+    // A relay-only node that forwards to a store keeps the forwarded route.
+    expect(
+      defaultStoreDestinationFor(
+        desc(['g.toon.relay', 'g.toon.relay.store'], ['g.toon.relay'])
+      )
+    ).toBe('g.toon.relay.store');
+  });
+
   it('explicit settings win, and a missing store route names the knob', () => {
     expect(
       resolveDestinations(

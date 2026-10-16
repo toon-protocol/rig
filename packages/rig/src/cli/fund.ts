@@ -27,12 +27,13 @@
  * (client-mcp/src/daemon/config.ts — no import, keep in sync):
  * `TOON_CLIENT_FAUCET_URL` env → `faucetUrl` in the shared client config →
  * the deployed devnet faucet when the network IS (or is inferred as) devnet.
- * A configured `*.devnet.toonprotocol.dev` origin infers devnet even when
+ * A configured shared-devnet origin (`*.devnet.toonprotocol.dev`, or the
+ * consolidated `toonprotocol.dev` / `relay.toonprotocol.dev`) infers devnet even when
  * `network` still reads its `custom` default (#288) — that origin is BOTH a
  * devnet-looking relay/proxy/btp endpoint in env/config AND the git `origin`
  * remote `rig remote` configures (resolved the same way push/fetch resolve
  * their relay), so a fresh user who only ran `rig remote add origin
- * wss://relay-ws.devnet.toonprotocol.dev` gets the drip from a plain
+ * wss://relay.toonprotocol.dev` gets the drip from a plain
  * `rig fund` with no env var. A truly FRESH install — no origin configured
  * anywhere (env, config, git `origin`) — falls back to core's committed
  * genesis seed, whose relay/btp origin names the live shared devnet, so
@@ -92,7 +93,9 @@ const CHAIN_ARG_LIST = 'evm | sol | solana | all';
  * selector, accepting short aliases. Throws a usage error on an unknown value.
  * Returns `undefined` when no chain was given (→ the all-chains default).
  */
-function resolveChainArg(raw: string | undefined): FundChain | 'all' | undefined {
+function resolveChainArg(
+  raw: string | undefined
+): FundChain | 'all' | undefined {
   if (raw === undefined) return undefined;
   const canonical = CHAIN_ALIASES[raw.toLowerCase()];
   if (!canonical) {
@@ -201,17 +204,34 @@ interface FundJson {
   guidance?: string;
 }
 
-/** Hostname suffix of every shared-devnet edge (relay, proxy, faucet …). */
+/** Hostname suffix of the shared devnet's per-app edges (faucet, dvm, gw …). */
 const SHARED_DEVNET_SUFFIX = '.devnet.toonprotocol.dev';
 
-/** `url` when its host is a shared-devnet edge (`*.devnet.toonprotocol.dev`). */
+/**
+ * The shared devnet's consolidated edges (2026-10-16): its one connector at
+ * the apex (`https://toonprotocol.dev/ilp`, `wss://toonprotocol.dev/ilp/btp`)
+ * and its relay (`wss://relay.toonprotocol.dev`). Named exactly rather than
+ * by suffix: the apex is the devnet's today, and a future mainnet edge under
+ * `toonprotocol.dev` must not be inferred as devnet — an explicit
+ * `TOON_CLIENT_NETWORK` still wins either way.
+ */
+const SHARED_DEVNET_HOSTS: ReadonlySet<string> = new Set([
+  'toonprotocol.dev',
+  'relay.toonprotocol.dev',
+]);
+
+/**
+ * `url` when its host is a shared-devnet edge (`*.devnet.toonprotocol.dev`, or
+ * one of {@link SHARED_DEVNET_HOSTS}).
+ */
 function devnetHost(url: string | undefined): string | undefined {
   if (!url) return undefined;
   try {
     const { hostname } = new URL(url);
     if (
       hostname.endsWith(SHARED_DEVNET_SUFFIX) ||
-      hostname === SHARED_DEVNET_SUFFIX.slice(1)
+      hostname === SHARED_DEVNET_SUFFIX.slice(1) ||
+      SHARED_DEVNET_HOSTS.has(hostname)
     ) {
       return url;
     }
@@ -330,7 +350,8 @@ export async function resolveEffectiveNetwork(opts: {
     ].some((url) => url !== undefined);
     if (!anyConfiguredOrigin) {
       const seed = await (opts.loadGenesisSeed ?? loadGenesisSeedDefault)();
-      devnetOrigin = devnetHost(seed?.relayUrl) ?? devnetHost(seed?.btpEndpoint);
+      devnetOrigin =
+        devnetHost(seed?.relayUrl) ?? devnetHost(seed?.btpEndpoint);
       seededOrigin = devnetOrigin !== undefined;
     }
   }
@@ -457,7 +478,10 @@ export async function runFund(args: string[], deps: FundDeps): Promise<number> {
     json = values.json ?? false;
     // A per-chain address (`--address`) is meaningless across chains — an EVM
     // 0x address cannot fund Solana or Mina. Require an explicit single chain.
-    if (addressFlag !== undefined && (resolvedChain === undefined || resolvedChain === 'all')) {
+    if (
+      addressFlag !== undefined &&
+      (resolvedChain === undefined || resolvedChain === 'all')
+    ) {
       throw new Error(
         `--address requires an explicit single chain (${CHAIN_ARG_LIST}) — ` +
           'a single address cannot fund every chain'
@@ -555,7 +579,8 @@ export async function runFund(args: string[], deps: FundDeps): Promise<number> {
     // Env/config override applies uniformly to every chain's drip.
     const timeoutEnv = env['TOON_CLIENT_FAUCET_TIMEOUT_MS'];
     const timeoutFor = (): number => {
-      if (timeoutEnv && Number.isFinite(Number(timeoutEnv))) return Number(timeoutEnv);
+      if (timeoutEnv && Number.isFinite(Number(timeoutEnv)))
+        return Number(timeoutEnv);
       if (file.faucetTimeoutMs !== undefined) return file.faucetTimeoutMs;
       return 90_000;
     };
@@ -585,7 +610,8 @@ export async function runFund(args: string[], deps: FundDeps): Promise<number> {
     // genuinely concurrent (the Mina ~75s overlaps evm/solana, not stacks).
     const singleChain = targetChains.length === 1;
     const drips = targetChains.map(async (chain): Promise<ChainDripResult> => {
-      const address = (singleChain ? addressFlag : undefined) ?? addresses[chain];
+      const address =
+        (singleChain ? addressFlag : undefined) ?? addresses[chain];
       if (!address) {
         return {
           chain,
@@ -596,10 +622,15 @@ export async function runFund(args: string[], deps: FundDeps): Promise<number> {
       }
       const started = Date.now();
       try {
-        const { response } = await client.fundWallet(faucetUrl, address, chain, {
-          timeout: timeoutFor(),
-          ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
-        });
+        const { response } = await client.fundWallet(
+          faucetUrl,
+          address,
+          chain,
+          {
+            timeout: timeoutFor(),
+            ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+          }
+        );
         return {
           chain,
           funded: true,
@@ -650,14 +681,18 @@ export async function runFund(args: string[], deps: FundDeps): Promise<number> {
         // The faucet drips USDC only (gas is assumed); annotate the token, and
         // the wall time for slow chains (mina) so a >1-minute wait reads as normal.
         const slow = r.elapsedMs !== undefined && r.elapsedMs >= 5_000;
-        const time = slow ? ` (${Math.round((r.elapsedMs as number) / 1000)}s)` : '';
+        const time = slow
+          ? ` (${Math.round((r.elapsedMs as number) / 1000)}s)`
+          : '';
         io.out(`  ${label} ✓ funded (USDC)${addr}${time}`);
       } else {
         io.out(`  ${label} ✗${addr} — ${r.error ?? 'failed'}`);
       }
     }
     io.out(renderIdentityLine(identity));
-    io.out('Re-check with `rig balance` (a drip can take a few blocks to land).');
+    io.out(
+      'Re-check with `rig balance` (a drip can take a few blocks to land).'
+    );
     return allFunded ? 0 : 1;
   } catch (err) {
     return emitCliError(io, json, 'fund', err);
