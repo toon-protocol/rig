@@ -1,5 +1,15 @@
 # @toon-protocol/rig
 
+> [!WARNING]
+> **`@toon-protocol/rig` and the `rig` CLI are deprecated, and this repository is archived.** Use a TOON client ([`toon_cli`](https://github.com/toon-protocol/toon_cli) or
+> [`toon-client`](https://github.com/toon-protocol/toon-client)) with the
+> [`git` skill](https://github.com/toon-protocol/toon-plugins/blob/main/plugins/toon-nostr/skills/git/SKILL.md)
+> to push and pull.
+> The pointer pages already on Arweave, and the `toon-protocol.github.io/rig/`
+> and `/toon-client/` pages they link to, still load but are no longer maintained
+> ([ADR 0001](https://github.com/toon-protocol/rig/blob/main/docs/adr/0001-rig-web-ownership-and-url-permanence.md#amendment-frozen-at-sunset-2026-10-22)).
+> Background: [rig#261](https://github.com/toon-protocol/rig/issues/261).
+
 **Git, with a TOON remote.** `rig` is a drop-in `git` wrapper that publishes your
 repository to the TOON network — a decentralized control plane where repo state
 lives in NIP-34 Nostr events and the objects live on Arweave.

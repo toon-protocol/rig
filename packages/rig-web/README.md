@@ -1,5 +1,13 @@
 # @toon-protocol/rig-web
 
+> [!WARNING]
+> **`rig-web` is deprecated, and this repository is archived.** Browse repositories in the relay's `/repo` UI
+> ([toon-protocol/relay#276](https://github.com/toon-protocol/relay/issues/276)).
+> The pointer pages already on Arweave, and the `toon-protocol.github.io/rig/`
+> and `/toon-client/` pages they link to, still load but are no longer maintained
+> ([ADR 0001](https://github.com/toon-protocol/rig/blob/main/docs/adr/0001-rig-web-ownership-and-url-permanence.md#amendment-frozen-at-sunset-2026-10-22)).
+> Background: [rig#261](https://github.com/toon-protocol/rig/issues/261).
+
 rig — a browser-only SPA that renders TOON Protocol events (NIP-34 git vocabulary first: repos, refs, issues, PRs) from a relay over WebSocket, with git objects fetched from Arweave gateways. No backend, no accounts, no servers.
 
 ## Development

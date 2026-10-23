@@ -1,5 +1,17 @@
 # rig
 
+> [!WARNING]
+> **rig, both the CLI and `rig-web`, is deprecated, and this repository is archived.** Browse repositories in the relay's `/repo` UI
+> ([toon-protocol/relay#276](https://github.com/toon-protocol/relay/issues/276)).
+> Use a TOON client ([`toon_cli`](https://github.com/toon-protocol/toon_cli) or
+> [`toon-client`](https://github.com/toon-protocol/toon-client)) with the
+> [`git` skill](https://github.com/toon-protocol/toon-plugins/blob/main/plugins/toon-nostr/skills/git/SKILL.md)
+> to push and pull.
+> The pointer pages already on Arweave, and the `toon-protocol.github.io/rig/`
+> and `/toon-client/` pages they link to, still load but are no longer maintained
+> ([ADR 0001](https://github.com/toon-protocol/rig/blob/main/docs/adr/0001-rig-web-ownership-and-url-permanence.md#amendment-frozen-at-sunset-2026-10-22)).
+> Background: [rig#261](https://github.com/toon-protocol/rig/issues/261).
+
 **rig** is git on TOON: the git-to-TOON write path and its decentralized
 control-plane frontend. It interprets Nostr events (NIP-34 git is its first
 surface — not a GitHub clone) and gives them a browsable, forge-like UI, while
